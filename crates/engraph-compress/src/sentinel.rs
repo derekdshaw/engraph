@@ -1,5 +1,3 @@
-use crate::{hex_encode, CompressKind};
-
 pub const SENTINEL: &str = "<<engraph:v1:compressed>>";
 pub const ALGO_ID: &str = "v1";
 
@@ -7,25 +5,17 @@ pub fn is_compressed(text: &str) -> bool {
     text.starts_with(SENTINEL)
 }
 
-pub(crate) fn stamp(
-    body: &str,
-    orig_hash: &[u8; 32],
-    orig_tokens: u32,
-    comp_tokens: u32,
-    kind: CompressKind,
-) -> String {
-    let kind_str = match kind {
-        CompressKind::ProjectNotes => "project_notes",
-        CompressKind::SessionMessage => "session_message",
-        CompressKind::ToolOutput => "tool_output",
-        CompressKind::Generic => "generic",
-    };
-    let trailer = format!(
-        "\n[engraph:hash={hash},algo={ALGO_ID},kind={kind_str},orig_tokens={orig_tokens},comp_tokens={comp_tokens}]\n",
-        hash = hex_encode(orig_hash),
-    );
+/// Wrap `body` with the sentinel prefix only. Provenance (hash, token counts,
+/// kind, algorithm id) lives in `CompressResult` and is persisted by the
+/// caller adjacent to the compressed text (e.g. `messages.content_hash`,
+/// `content_compressed`). An in-band trailer would be indistinguishable from
+/// arbitrary content and so isn't emitted.
+pub(crate) fn stamp(body: &str) -> String {
     let body = body.trim_end_matches('\n');
-    format!("{SENTINEL}\n{body}{trailer}")
+    if body.is_empty() {
+        return format!("{SENTINEL}\n");
+    }
+    format!("{SENTINEL}\n{body}\n")
 }
 
 #[cfg(test)]
@@ -41,9 +31,16 @@ mod tests {
 
     #[test]
     fn stamped_starts_with_sentinel() {
-        let s = stamp("body", &[0u8; 32], 100, 40, CompressKind::Generic);
+        let s = stamp("body");
         assert!(s.starts_with(SENTINEL));
-        assert!(s.contains("orig_tokens=100"));
-        assert!(s.contains("comp_tokens=40"));
+        assert!(s.contains("body"));
+        assert!(!s.contains("[engraph:hash"));
+    }
+
+    #[test]
+    fn empty_body_still_marked() {
+        let s = stamp("");
+        assert_eq!(s, format!("{SENTINEL}\n"));
+        assert!(is_compressed(&s));
     }
 }

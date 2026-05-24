@@ -195,6 +195,7 @@ fn main() -> Result<()> {
                 text: &text,
                 kind: kind.into(),
                 target_ratio,
+                brevity: false,
             });
             let elapsed = start.elapsed().as_millis() as i64;
             telemetry::record_event(

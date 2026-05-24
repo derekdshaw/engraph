@@ -26,22 +26,24 @@ pub(crate) fn extract(text: &str, target_tokens: u32) -> String {
     let scored: Vec<(usize, f64)> = sentences
         .iter()
         .enumerate()
-        .map(|(i, s)| {
+        .filter_map(|(i, s)| {
             let ws: Vec<String> = words_lowercase(s)
                 .into_iter()
                 .filter(|w| !stopwords().contains(w.as_str()))
                 .collect();
             if ws.is_empty() {
-                return (i, 0.0);
+                // Drop stopword-only sentences entirely instead of giving them
+                // a zero score that ties against real low-frequency content.
+                return None;
             }
             let sum: u32 = ws.iter().map(|w| *freqs.get(w).unwrap_or(&0)).sum();
             let denom = (ws.len() as f64).sqrt();
-            (i, sum as f64 / denom)
+            Some((i, sum as f64 / denom))
         })
         .collect();
 
-    // Sort by descending score, stable; ties broken by original index (lower wins)
-    let mut order: Vec<(usize, f64)> = scored.clone();
+    // Sort by descending score; ties broken by original index (lower wins).
+    let mut order = scored;
     order.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)

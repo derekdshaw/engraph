@@ -64,6 +64,16 @@ pub fn add_used(conn: &PooledConn, session_id: &str, delta: i64) -> Result<Budge
 }
 
 pub fn set_limits(conn: &PooledConn, session_id: &str, soft: i64, hard: i64) -> Result<()> {
+    if soft <= 0 || hard <= 0 {
+        return Err(crate::Error::Config(format!(
+            "budget limits must be positive (soft={soft}, hard={hard})"
+        )));
+    }
+    if soft > hard {
+        return Err(crate::Error::Config(format!(
+            "soft limit ({soft}) must not exceed hard limit ({hard})"
+        )));
+    }
     conn.execute(
         "INSERT INTO session_budget (session_id, soft_limit, hard_limit) VALUES (?1, ?2, ?3) \
          ON CONFLICT(session_id) DO UPDATE SET soft_limit = ?2, hard_limit = ?3, updated_at = datetime('now')",
@@ -124,5 +134,45 @@ mod tests {
         assert_eq!(g1.used, 500);
         let g2 = add_used(&conn, "s1", 250).unwrap();
         assert_eq!(g2.used, 750);
+    }
+
+    #[test]
+    fn set_limits_validates() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        assert!(set_limits(&conn, "s", 0, 100).is_err());
+        assert!(set_limits(&conn, "s", 100, 0).is_err());
+        assert!(set_limits(&conn, "s", 200, 100).is_err());
+        assert!(set_limits(&conn, "s", 100, 200).is_ok());
+    }
+
+    #[test]
+    fn add_used_is_atomic_under_threads() {
+        use std::sync::Arc;
+        use std::thread;
+        let dir = tempdir().unwrap();
+        let pool = Arc::new(open_pool(&dir.path().join("t.db")).unwrap());
+        let session = "concurrent";
+        // Seed the row so all threads UPDATE rather than racing the INSERT OR IGNORE.
+        get_or_init(&pool.get().unwrap(), session).unwrap();
+        const N: usize = 16;
+        const PER: i64 = 25;
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let pool = pool.clone();
+                thread::spawn(move || {
+                    let conn = pool.get().unwrap();
+                    for _ in 0..PER {
+                        add_used(&conn, session, 1).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let final_gate = get_or_init(&pool.get().unwrap(), session).unwrap();
+        assert_eq!(final_gate.used, (N as i64) * PER);
     }
 }

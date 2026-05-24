@@ -2,8 +2,6 @@
 //! Applied only when extractive ranking alone hasn't hit the target budget,
 //! and only for kinds where verbatim fidelity isn't required.
 
-use crate::stopwords::stopwords;
-
 const FILLERS: &[&str] = &[
     "just", "really", "very", "actually", "basically", "literally", "simply", "quite",
     "rather", "somewhat", "perhaps", "maybe",
@@ -11,20 +9,16 @@ const FILLERS: &[&str] = &[
 
 pub(crate) fn strip_fillers(text: &str) -> String {
     let fillers: std::collections::HashSet<&'static str> = FILLERS.iter().copied().collect();
-    let stop = stopwords();
 
     let mut out = String::with_capacity(text.len());
     for line in text.lines() {
         let mut first = true;
         for tok in tokenize_keeping_punct(line) {
             let lower = tok.to_lowercase();
-            // Drop pure articles ("a", "an", "the") and filler words
             if lower == "a" || lower == "an" || lower == "the" || fillers.contains(lower.as_str())
             {
                 continue;
             }
-            // Keep other stopwords; they preserve grammar
-            let _ = stop; // referenced for future tuning
             if !first && !tok.starts_with(|c: char| c.is_ascii_punctuation()) {
                 out.push(' ');
             }

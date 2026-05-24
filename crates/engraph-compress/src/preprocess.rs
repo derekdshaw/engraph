@@ -41,8 +41,9 @@ fn progress_re() -> &'static Regex {
 
 fn blob_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    // base64 or hex run >= 80 chars
-    RE.get_or_init(|| Regex::new(r"(?:[A-Za-z0-9+/=]{80,}|[0-9a-fA-F]{80,})").unwrap())
+    // Long base64-alphabet run (>= 80 chars). The base64 character class is a
+    // superset of hex so a separate hex alternative would be unreachable.
+    RE.get_or_init(|| Regex::new(r"[A-Za-z0-9+/=]{80,}").unwrap())
 }
 
 fn html_comment_re() -> &'static Regex {
@@ -82,7 +83,8 @@ fn dedupe_consecutive(s: &str) -> String {
     let flush = |buf: &mut String, prev: &Option<String>, count: u32| {
         if let Some(p) = prev {
             buf.push_str(p);
-            if count > 1 {
+            // Don't annotate repeated empty lines — collapse them silently.
+            if count > 1 && !p.is_empty() {
                 buf.push_str(&format!(" (x{count})"));
             }
             buf.push('\n');

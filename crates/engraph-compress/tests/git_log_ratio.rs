@@ -33,6 +33,7 @@ fn git_log_2k_lines_compresses_below_half() {
         text: &log,
         kind: CompressKind::ToolOutput,
         target_ratio: 0.4,
+        brevity: true,
     });
 
     assert!(
@@ -51,11 +52,13 @@ fn deterministic_on_same_input() {
         text: &log,
         kind: CompressKind::ToolOutput,
         target_ratio: 0.4,
+        brevity: true,
     });
     let b = compress(CompressInput {
         text: &log,
         kind: CompressKind::ToolOutput,
         target_ratio: 0.4,
+        brevity: true,
     });
     assert_eq!(a.text, b.text);
     assert_eq!(a.original_hash, b.original_hash);

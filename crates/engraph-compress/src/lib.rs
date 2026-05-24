@@ -35,6 +35,10 @@ pub struct CompressInput<'a> {
     /// Target ratio of compressed/original tokens (e.g. 0.5 = aim for 50%).
     /// Soft target; falls back to whatever the algorithm can guarantee.
     pub target_ratio: f32,
+    /// Apply caveman-style brevity rules (drop articles, fillers). Off by
+    /// default — articles carry meaning in prose. Opt in for noisy inputs
+    /// like tool output where verbatim grammar is not preserved.
+    pub brevity: bool,
 }
 
 impl<'a> CompressInput<'a> {
@@ -43,6 +47,7 @@ impl<'a> CompressInput<'a> {
             text,
             kind,
             target_ratio: 0.5,
+            brevity: false,
         }
     }
 }
@@ -70,20 +75,36 @@ impl CompressResult {
 }
 
 pub fn compress(input: CompressInput<'_>) -> CompressResult {
-    // 1. Sentinel check (idempotency)
+    let orig_hash = hash_bytes(input.text.as_bytes());
+
+    // 1. Sentinel check (idempotency fast path). No integrity validation:
+    // arbitrary content starting with the sentinel round-trips. The contract
+    // is fixed-point, not authenticity. Callers needing integrity validate
+    // against the stored `content_hash` column adjacent to the compressed text.
     if is_compressed(input.text) {
-        let orig_tokens = tokens::count(input.text);
+        let tk = tokens::count(input.text);
         return CompressResult {
             text: input.text.to_string(),
-            original_tokens: orig_tokens,
-            compressed_tokens: orig_tokens,
+            original_tokens: tk,
+            compressed_tokens: tk,
             algorithm_id: ALGO_ID,
-            original_hash: hash_bytes(input.text.as_bytes()),
+            original_hash: orig_hash,
         };
     }
 
     let orig_tokens = tokens::count(input.text);
-    let orig_hash = hash_bytes(input.text.as_bytes());
+
+    // Short-circuit on empty: nothing to extract; emit a marked-but-empty body.
+    if orig_tokens == 0 {
+        let stamped = sentinel::stamp("");
+        return CompressResult {
+            text: stamped,
+            original_tokens: 0,
+            compressed_tokens: 0,
+            algorithm_id: ALGO_ID,
+            original_hash: orig_hash,
+        };
+    }
 
     // 2. Whitespace normalization
     let normalized = normalize_whitespace(input.text);
@@ -91,36 +112,27 @@ pub fn compress(input: CompressInput<'_>) -> CompressResult {
     // 3. Per-kind preprocessing
     let preprocessed = preprocess::apply(&normalized, input.kind);
 
-    // 4. Extractive sentence ranking
+    // 4. Extractive sentence ranking — budget tracked via cheap char/4
+    // estimator inside rank.rs so we don't retokenize per sentence.
     let target_tokens = ((orig_tokens as f32) * input.target_ratio).max(32.0) as u32;
     let ranked = rank::extract(&preprocessed, target_tokens);
 
-    // 5. Brevity rules (kind-gated)
-    let brevity_on = matches!(
-        input.kind,
-        CompressKind::ToolOutput | CompressKind::ProjectNotes
-    );
-    let after_brevity = if brevity_on && tokens::count(&ranked) > target_tokens {
+    // 5. Brevity rules — opt-in per CompressInput.brevity, never per-kind default.
+    // Articles carry meaning in prose; brevity is for noisy tool output only.
+    let body = if input.brevity {
         brevity::strip_fillers(&ranked)
     } else {
         ranked
     };
 
     // 6. Stamp
-    let comp_tokens = tokens::count(&after_brevity);
-    let stamped = sentinel::stamp(
-        &after_brevity,
-        &orig_hash,
-        orig_tokens,
-        comp_tokens,
-        input.kind,
-    );
+    let stamped = sentinel::stamp(&body);
+    let comp_tokens = tokens::count(&stamped);
 
-    let final_tokens = tokens::count(&stamped);
     CompressResult {
         text: stamped,
         original_tokens: orig_tokens,
-        compressed_tokens: final_tokens,
+        compressed_tokens: comp_tokens,
         algorithm_id: ALGO_ID,
         original_hash: orig_hash,
     }
