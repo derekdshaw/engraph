@@ -13,8 +13,10 @@ fn bin() -> &'static str {
 
 fn run_hook_with_stdin(db_path: &std::path::Path, stdin: &str) -> String {
     let mut child = Command::new(bin())
-        .args(["hook", "session-start"])
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("ENGRAPH_DB_PATH", db_path)
+        .args(["hook", "session-start"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

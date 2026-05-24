@@ -374,18 +374,20 @@ fn run_session_start_hook(conn: &db::PooledConn) -> Result<()> {
     let mut buf = String::new();
     std::io::stdin().read_to_string(&mut buf)?;
 
-    let cwd = if buf.trim().is_empty() {
-        std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned())
-    } else {
-        let v: serde_json::Value = serde_json::from_str(&buf)?;
-        v.get("cwd").and_then(|c| c.as_str()).map(|s| s.to_string())
-    };
-    let session_id = if buf.trim().is_empty() {
+    let parsed: Option<serde_json::Value> = if buf.trim().is_empty() {
         None
     } else {
-        let v: serde_json::Value = serde_json::from_str(&buf)?;
-        v.get("session_id").and_then(|c| c.as_str()).map(|s| s.to_string())
+        // Malformed JSON falls back to "no stdin info" rather than failing the hook.
+        serde_json::from_str(&buf).ok()
     };
+    let cwd = match parsed.as_ref() {
+        Some(v) => v.get("cwd").and_then(|c| c.as_str()).map(|s| s.to_string()),
+        None => std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()),
+    };
+    let session_id = parsed
+        .as_ref()
+        .and_then(|v| v.get("session_id").and_then(|c| c.as_str()))
+        .map(|s| s.to_string());
 
     let mut signal_sections: Vec<String> = Vec::new();
     if let Some(cwd) = cwd.as_deref() {
@@ -413,8 +415,10 @@ fn run_session_start_hook(conn: &db::PooledConn) -> Result<()> {
     }
     if let Some(sid) = session_id.as_deref() {
         let g = budget::get_or_init(conn, sid)?;
-        // Only surface budget when it carries real signal (usage above zero).
-        if g.used > 0 {
+        // Surface when usage is non-zero OR limits diverge from defaults.
+        let limits_default = g.soft == budget::DEFAULT_SOFT_LIMIT
+            && g.hard == budget::DEFAULT_HARD_LIMIT;
+        if g.used > 0 || !limits_default {
             signal_sections.push(format!(
                 "## budget\nsession={sid} used={used} soft={soft} hard={hard} level={lvl}",
                 used = g.used,
@@ -463,17 +467,23 @@ fn run_session_start_hook(conn: &db::PooledConn) -> Result<()> {
     Ok(())
 }
 
+const TRUNCATE_MARKER: &str = "\n…[truncated]";
+
 fn truncate_to_bytes(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
-    // Truncate at a UTF-8 boundary just below `max`.
-    let mut cut = max.saturating_sub(20);
+    let marker_len = TRUNCATE_MARKER.len();
+    if max <= marker_len {
+        // No room for content; emit marker alone, clipped to max.
+        return TRUNCATE_MARKER.chars().take(max).collect();
+    }
+    let mut cut = max - marker_len;
     while !s.is_char_boundary(cut) && cut > 0 {
         cut -= 1;
     }
     let mut out = s[..cut].to_string();
-    out.push_str("\n…[truncated]");
+    out.push_str(TRUNCATE_MARKER);
     out
 }
 
