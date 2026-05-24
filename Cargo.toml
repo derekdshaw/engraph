@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/engraph-core",
+    "crates/engraph-compress",
     "crates/engraph-cli",
 ]
 
@@ -14,6 +15,7 @@ authors = ["Derek Shaw"]
 
 [workspace.dependencies]
 engraph-core = { path = "crates/engraph-core" }
+engraph-compress = { path = "crates/engraph-compress" }
 
 anyhow = "1"
 thiserror = "1"
@@ -29,6 +31,8 @@ uuid = { version = "1", features = ["v7"] }
 tiktoken-rs = "0.5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 dirs = "5"
+sha2 = "0.10"
+regex = "1"
 
 [profile.release]
 lto = "thin"

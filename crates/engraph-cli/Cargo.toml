@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 engraph-core.workspace = true
+engraph-compress.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true

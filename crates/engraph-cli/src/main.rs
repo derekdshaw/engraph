@@ -1,6 +1,13 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
-use engraph_core::{budget, db, telemetry};
+use clap::{Parser, Subcommand, ValueEnum};
+use engraph_compress::{compress, CompressInput, CompressKind};
+use engraph_core::{
+    budget, db,
+    models::EventKind,
+    telemetry::{self, EventInput},
+};
+use std::path::PathBuf;
+use std::time::Instant;
 
 #[derive(Parser)]
 #[command(name = "engraph", version, about = "Token-saving AI tooling")]
@@ -22,6 +29,39 @@ enum Cmd {
         #[command(subcommand)]
         cmd: BudgetCmd,
     },
+    /// One-shot deterministic compression of a file
+    Compress {
+        /// File to compress (use `-` for stdin)
+        path: PathBuf,
+        /// Compression kind
+        #[arg(long, value_enum, default_value_t = CliKind::Generic)]
+        kind: CliKind,
+        /// Target compressed/original token ratio
+        #[arg(long, default_value_t = 0.5)]
+        target_ratio: f32,
+        /// Write back to the file in place (otherwise print to stdout)
+        #[arg(long)]
+        in_place: bool,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum CliKind {
+    ProjectNotes,
+    SessionMessage,
+    ToolOutput,
+    Generic,
+}
+
+impl From<CliKind> for CompressKind {
+    fn from(k: CliKind) -> Self {
+        match k {
+            CliKind::ProjectNotes => CompressKind::ProjectNotes,
+            CliKind::SessionMessage => CompressKind::SessionMessage,
+            CliKind::ToolOutput => CompressKind::ToolOutput,
+            CliKind::Generic => CompressKind::Generic,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -62,6 +102,52 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&rows)?);
             } else {
                 print_gain_table(&rows);
+            }
+        }
+        Cmd::Compress {
+            path,
+            kind,
+            target_ratio,
+            in_place,
+        } => {
+            let text = if path.as_os_str() == "-" {
+                use std::io::Read;
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                buf
+            } else {
+                std::fs::read_to_string(&path)?
+            };
+            let start = Instant::now();
+            let result = compress(CompressInput {
+                text: &text,
+                kind: kind.into(),
+                target_ratio,
+            });
+            let elapsed = start.elapsed().as_millis() as i64;
+            telemetry::record_event(
+                &conn,
+                EventInput {
+                    session_id: None,
+                    kind: EventKind::Compress,
+                    feature: "F6",
+                    filter_id: Some(result.algorithm_id),
+                    input_tokens: result.original_tokens as i64,
+                    output_tokens: result.compressed_tokens as i64,
+                    latency_ms: elapsed,
+                },
+            )?;
+            if in_place && path.as_os_str() != "-" {
+                std::fs::write(&path, &result.text)?;
+                eprintln!(
+                    "compressed {} → {} tokens (ratio {:.2}) in {}ms",
+                    result.original_tokens,
+                    result.compressed_tokens,
+                    result.ratio(),
+                    elapsed
+                );
+            } else {
+                print!("{}", result.text);
             }
         }
         Cmd::Budget { cmd } => match cmd {
