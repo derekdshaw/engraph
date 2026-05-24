@@ -48,6 +48,114 @@ struct RawMessage {
     content: Option<serde_json::Value>,
 }
 
+pub struct SweepStats {
+    pub rows_scanned: usize,
+    pub rows_compressed: usize,
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+    pub elapsed_ms: u128,
+}
+
+/// Sweep messages and context_items, compressing in place any row whose
+/// content is uncompressed AND exceeds the token threshold. Idempotent:
+/// rows already marked content_compressed=1 are skipped without re-tokenizing,
+/// and the sentinel check inside compress() makes accidental double-compress
+/// a no-op anyway.
+pub fn compress_existing(conn: &PooledConn, batch: usize) -> Result<SweepStats> {
+    let start = Instant::now();
+    let mut stats = SweepStats {
+        rows_scanned: 0,
+        rows_compressed: 0,
+        bytes_before: 0,
+        bytes_after: 0,
+        elapsed_ms: 0,
+    };
+
+    for table in ["messages", "context_items"] {
+        sweep_table(conn, table, batch, &mut stats)?;
+    }
+
+    stats.elapsed_ms = start.elapsed().as_millis();
+    Ok(stats)
+}
+
+fn sweep_table(
+    conn: &PooledConn,
+    table: &str,
+    batch: usize,
+    stats: &mut SweepStats,
+) -> Result<()> {
+    // Read candidate rows in one prepared statement, then update in a loop.
+    // `batch` caps the number of rows processed per call.
+    let select_sql = format!(
+        "SELECT rowid, id, content FROM {table}
+         WHERE content_compressed = 0
+         ORDER BY rowid ASC LIMIT ?1"
+    );
+    let update_sql = format!(
+        "UPDATE {table} SET content = ?2, content_compressed = 1, content_hash = ?3 WHERE rowid = ?1"
+    );
+
+    let mut select = conn.prepare(&select_sql)?;
+    let mut update = conn.prepare(&update_sql)?;
+
+    let rows = select
+        .query_map([batch as i64], |r| {
+            let rowid: i64 = r.get(0)?;
+            let id: String = r.get(1)?;
+            let content: String = r.get(2)?;
+            Ok((rowid, id, content))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for (rowid, id, content) in rows {
+        stats.rows_scanned += 1;
+        let original_bytes = content.len() as u64;
+        let original_tokens = tokens::count(&content);
+        if original_tokens < COMPRESS_THRESHOLD_TOKENS {
+            // Below threshold — still mark as compressed so we don't re-scan
+            // the same rows every sweep.
+            update.execute(rusqlite::params![rowid, content, sha256(content.as_bytes())])?;
+            continue;
+        }
+        let r = compress(CompressInput {
+            text: &content,
+            kind: CompressKind::SessionMessage,
+            target_ratio: 0.5,
+            brevity: false,
+        });
+        update.execute(rusqlite::params![
+            rowid,
+            &r.text,
+            sha256(content.as_bytes()),
+        ])?;
+        let after_bytes = r.text.len() as u64;
+        stats.bytes_before += original_bytes;
+        stats.bytes_after += after_bytes;
+        stats.rows_compressed += 1;
+
+        telemetry::record_event(
+            conn,
+            telemetry::EventInput {
+                session_id: None,
+                kind: EventKind::Compress,
+                feature: "F6_sweep",
+                filter_id: Some(table),
+                input_tokens: r.original_tokens as i64,
+                output_tokens: r.compressed_tokens as i64,
+                latency_ms: 0,
+            },
+        )?;
+        tracing::debug!(
+            id = %id,
+            orig = original_tokens,
+            comp = r.compressed_tokens,
+            "compressed existing row"
+        );
+    }
+    Ok(())
+}
+
 pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
     let start = Instant::now();
     let abs = path
@@ -325,6 +433,70 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn compress_existing_only_touches_large_uncompressed_rows() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("sweep.db")).unwrap();
+        let conn = pool.get().unwrap();
+        // Insert one small row (below threshold) and one large row (above).
+        let small = "hello world".to_string();
+        // Diverse English sentences to ensure > COMPRESS_THRESHOLD_TOKENS (2000).
+        let mut large = String::new();
+        for i in 0..400 {
+            large.push_str(&format!(
+                "Note {i}: the engineer reviewed the proposal and recorded decision number {i} with rationale about scaling and observability tradeoffs.\n",
+            ));
+        }
+        conn.execute(
+            "INSERT INTO sessions (id, project, cwd, started_at) VALUES ('s', '/p', '/p', 't')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, ts) VALUES ('m1','s','user',?1,'t')",
+            [&small],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, ts) VALUES ('m2','s','user',?1,'t')",
+            [&large],
+        )
+        .unwrap();
+        let stats = compress_existing(&conn, 100).unwrap();
+        assert_eq!(stats.rows_scanned, 2);
+        assert_eq!(stats.rows_compressed, 1, "only the large row should compress");
+        assert!(stats.bytes_after < stats.bytes_before);
+
+        // Second pass: idempotent, nothing left to scan.
+        let stats2 = compress_existing(&conn, 100).unwrap();
+        assert_eq!(stats2.rows_scanned, 0);
+        assert_eq!(stats2.rows_compressed, 0);
+    }
+
+    #[test]
+    fn compress_existing_preserves_recoverability_hash() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("rec.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let large = "decision: ".repeat(800);
+        let expected_hash = sha256(large.as_bytes());
+        conn.execute(
+            "INSERT INTO sessions (id, project, cwd, started_at) VALUES ('s', '/p', '/p', 't')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, ts) VALUES ('m','s','user',?1,'t')",
+            [&large],
+        )
+        .unwrap();
+        compress_existing(&conn, 100).unwrap();
+        let stored_hash: Vec<u8> = conn
+            .query_row("SELECT content_hash FROM messages WHERE id = 'm'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored_hash, expected_hash);
     }
 
     #[test]

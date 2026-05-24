@@ -74,6 +74,13 @@ enum Cmd {
         /// JSONL file to ingest. Use `-` for stdin (reads session_id from stdin JSON).
         path: PathBuf,
     },
+    /// Sweep messages and context_items, compressing any rows above the
+    /// token threshold that haven't been compressed yet. Idempotent.
+    CompressExisting {
+        /// Cap the number of rows examined per table per run.
+        #[arg(long, default_value_t = 1000)]
+        batch: usize,
+    },
     /// One-shot deterministic compression of a file
     Compress {
         /// File to compress (use `-` for stdin)
@@ -265,6 +272,17 @@ fn main() -> Result<()> {
                 stats.messages_inserted,
                 stats.messages_compressed,
                 stats.bytes_read,
+                stats.elapsed_ms
+            );
+        }
+        Cmd::CompressExisting { batch } => {
+            let stats = engraph_ingest::compress_existing(&conn, batch)?;
+            println!(
+                "scanned {} rows, compressed {} ({} -> {} bytes, {}ms)",
+                stats.rows_scanned,
+                stats.rows_compressed,
+                stats.bytes_before,
+                stats.bytes_after,
                 stats.elapsed_ms
             );
         }
