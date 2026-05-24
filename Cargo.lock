@@ -305,6 +305,9 @@ dependencies = [
  "clap",
  "engraph-compress",
  "engraph-core",
+ "engraph-ingest",
+ "engraph-retrieve",
+ "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
@@ -334,6 +337,39 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tiktoken-rs",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "engraph-ingest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "engraph-compress",
+ "engraph-core",
+ "engraph-retrieve",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "engraph-retrieve"
+version = "0.1.0"
+dependencies = [
+ "engraph-core",
+ "engraph-ingest",
+ "rusqlite",
+ "serde",
+ "tempfile",
+ "thiserror",
  "tracing",
  "uuid",
 ]

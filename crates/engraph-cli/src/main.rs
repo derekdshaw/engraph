@@ -11,6 +11,7 @@ use engraph_core::{
     telemetry::{self, EventInput},
     tokens,
 };
+use engraph_retrieve::{Query, ScopeFilter, Target};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
@@ -47,6 +48,31 @@ enum Cmd {
     Hook {
         #[command(subcommand)]
         cmd: HookCmd,
+    },
+    /// Search prior sessions and context for a phrase
+    Recall {
+        /// FTS query (words are AND-ed)
+        query: String,
+        /// Limit on returned hits
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Restrict to a project (matches scopes.name where kind='project')
+        #[arg(long)]
+        project: Option<String>,
+        /// Include entities in results
+        #[arg(long)]
+        with_entities: bool,
+        /// Include bugs in results
+        #[arg(long)]
+        with_bugs: bool,
+        /// Emit JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ingest a Claude Code JSONL transcript into the SQLite store
+    Ingest {
+        /// JSONL file to ingest. Use `-` for stdin (reads session_id from stdin JSON).
+        path: PathBuf,
     },
     /// One-shot deterministic compression of a file
     Compress {
@@ -176,6 +202,64 @@ fn main() -> Result<()> {
                 }
             }
         },
+        Cmd::Recall {
+            query,
+            limit,
+            project,
+            with_entities,
+            with_bugs,
+            json,
+        } => {
+            let scope = match project {
+                Some(p) => ScopeFilter::Project(p),
+                None => ScopeFilter::All,
+            };
+            let mut kinds = vec![Target::Messages, Target::ContextItems];
+            if with_entities {
+                kinds.push(Target::Entities);
+            }
+            if with_bugs {
+                kinds.push(Target::Bugs);
+            }
+            let start = Instant::now();
+            let hits = engraph_retrieve::search(
+                &conn,
+                &Query {
+                    text: &query,
+                    scope,
+                    kinds: &kinds,
+                    limit,
+                    strategy: Default::default(),
+                },
+            )?;
+            telemetry::record_event(
+                &conn,
+                EventInput {
+                    session_id: std::env::var("CLAUDE_SESSION_ID").ok().as_deref(),
+                    kind: EventKind::Retrieve,
+                    feature: "F3",
+                    filter_id: Some("fts"),
+                    input_tokens: 0,
+                    output_tokens: hits.iter().map(|h| tokens::count(&h.preview) as i64).sum(),
+                    latency_ms: start.elapsed().as_millis() as i64,
+                },
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+            } else {
+                print_hits(&hits);
+            }
+        }
+        Cmd::Ingest { path } => {
+            let stats = engraph_ingest::ingest_file(&conn, &path)?;
+            println!(
+                "ingested {} messages ({} compressed, {} bytes read, {}ms)",
+                stats.messages_inserted,
+                stats.messages_compressed,
+                stats.bytes_read,
+                stats.elapsed_ms
+            );
+        }
         Cmd::Compress {
             path,
             kind,
@@ -297,6 +381,23 @@ fn run_pre_bash_hook() -> Result<()> {
     });
     println!("{decision}");
     Ok(())
+}
+
+fn print_hits(hits: &[engraph_retrieve::Hit]) {
+    if hits.is_empty() {
+        println!("(no hits)");
+        return;
+    }
+    for h in hits {
+        println!(
+            "[{kind} score={score:.3} session={session:?} ts={ts:?}]",
+            kind = h.target_kind,
+            score = h.score,
+            session = h.session_id.as_deref().unwrap_or("-"),
+            ts = h.ts.as_deref().unwrap_or("-")
+        );
+        println!("  {}", h.preview);
+    }
 }
 
 fn print_gain_table(rows: &[telemetry::GainRow]) {

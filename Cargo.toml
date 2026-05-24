@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/engraph-core",
     "crates/engraph-compress",
+    "crates/engraph-retrieve",
+    "crates/engraph-ingest",
     "crates/engraph-cli",
 ]
 
@@ -16,6 +18,8 @@ authors = ["Derek Shaw"]
 [workspace.dependencies]
 engraph-core = { path = "crates/engraph-core" }
 engraph-compress = { path = "crates/engraph-compress" }
+engraph-retrieve = { path = "crates/engraph-retrieve" }
+engraph-ingest = { path = "crates/engraph-ingest" }
 
 anyhow = "1"
 thiserror = "1"
