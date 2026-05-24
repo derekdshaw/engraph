@@ -13,7 +13,14 @@ pub fn filter(ctx: &FilterCtx<'_>) -> FilterOutput {
         combined.push_str("--- stderr ---\n");
         combined.push_str(ctx.stderr);
     }
-    let r = compress(CompressInput::new(&combined, CompressKind::ToolOutput));
+    // ToolOutput is exactly the case the brevity flag exists to serve —
+    // noisy, non-prose, grammar not preserved by extractive ranking anyway.
+    let r = compress(CompressInput {
+        text: &combined,
+        kind: CompressKind::ToolOutput,
+        target_ratio: 0.5,
+        brevity: true,
+    });
     FilterOutput {
         text: r.text,
         filter_id: "generic",

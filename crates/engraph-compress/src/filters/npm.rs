@@ -9,13 +9,13 @@ pub fn install(ctx: &FilterCtx<'_>) -> FilterOutput {
     let mut out = String::with_capacity(combined.len() / 5);
     for line in combined.lines() {
         let t = line.trim_start();
-        // Drop "added X packages, removed Y..." per-line spam; keep the final summary
+        // Drop per-package "added X package(s)..." spam; keep the final summary
+        // which is recognized by the trailing " in Ns" marker.
         if t.starts_with("added ")
-            && t.contains("packages")
+            && (t.contains("package"))
             && !t.contains("found")
             && !t.contains("audited")
         {
-            // The final summary line typically reads "added N packages in Xs"
             if t.contains(" in ") {
                 out.push_str(line);
                 out.push('\n');

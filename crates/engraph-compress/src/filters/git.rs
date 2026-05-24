@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 
 /// `git log` — collapse to one line per commit: short hash + first subject line.
 /// Drops Author/Date/body lines unless the user asked for --oneline (then pass-through).
+/// Handles `--graph` by stripping leading graph characters before the regex.
 pub fn log(ctx: &FilterCtx<'_>) -> FilterOutput {
     if ctx.args.iter().any(|a| a == "--oneline") {
         return FilterOutput {
@@ -17,8 +18,9 @@ pub fn log(ctx: &FilterCtx<'_>) -> FilterOutput {
     let mut subject_emitted_for_current = false;
     let mut total = 0_u32;
     for line in ctx.stdout.lines() {
-        if let Some(c) = commit_re.captures(line) {
-            current_hash = Some(c[1][..7.min(c[1].len())].to_string());
+        let stripped = strip_graph_prefix(line).trim_start();
+        if let Some(c) = commit_re.captures(stripped) {
+            current_hash = Some(c[1].chars().take(7).collect::<String>());
             subject_emitted_for_current = false;
             total += 1;
             continue;
@@ -26,13 +28,9 @@ pub fn log(ctx: &FilterCtx<'_>) -> FilterOutput {
         if subject_emitted_for_current {
             continue;
         }
-        if line.starts_with("    ") {
-            let subject = line.trim();
-            if subject.is_empty() {
-                continue;
-            }
+        if current_hash.is_some() && is_subject_line(stripped) {
             if let Some(h) = &current_hash {
-                out.push_str(&format!("{h} {subject}\n"));
+                out.push_str(&format!("{h} {stripped}\n"));
                 subject_emitted_for_current = true;
             }
         }
@@ -44,9 +42,53 @@ pub fn log(ctx: &FilterCtx<'_>) -> FilterOutput {
     }
 }
 
+/// Strip leading `git log --graph` decoration characters (`*`, `|`, `/`, `\`, `_`).
+/// Does NOT strip spaces — leaves the original whitespace so caller can decide.
+fn strip_graph_prefix(line: &str) -> &str {
+    let mut idx = 0;
+    for (i, ch) in line.char_indices() {
+        match ch {
+            '*' | '|' | '/' | '\\' | '_' | ' ' if i == idx => idx = i + ch.len_utf8(),
+            '*' | '|' | '/' | '\\' | '_' => idx = i + ch.len_utf8(),
+            _ => break,
+        }
+    }
+    &line[idx..]
+}
+
+/// A subject candidate: non-empty, not a metadata header (`Author:`, `Date:`,
+/// `Merge:`, `Commit:`), and not another `commit <hash>` line.
+fn is_subject_line(stripped: &str) -> bool {
+    if stripped.is_empty() {
+        return false;
+    }
+    for prefix in ["Author:", "AuthorDate:", "Date:", "CommitDate:", "Commit:", "Merge:", "Refs:"] {
+        if stripped.starts_with(prefix) {
+            return false;
+        }
+    }
+    if commit_re().is_match(stripped) {
+        return false;
+    }
+    true
+}
+
 /// `git diff` — keep file headers and hunk headers, summarize each hunk as
 /// +X/-Y with a one-line preview of the first non-context line.
+/// Stat/shortstat/numstat/name-only forms have no `diff --git`/`@@` markers
+/// and would compress to empty; for those, pass through unchanged.
 pub fn diff(ctx: &FilterCtx<'_>) -> FilterOutput {
+    if ctx.args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "--stat" | "--shortstat" | "--numstat" | "--name-only" | "--name-status" | "--summary"
+        )
+    }) {
+        return FilterOutput {
+            text: ctx.stdout.to_string(),
+            filter_id: "git_diff",
+        };
+    }
     let mut out = String::with_capacity(ctx.stdout.len() / 4);
     let mut in_hunk = false;
     let mut added = 0_u32;

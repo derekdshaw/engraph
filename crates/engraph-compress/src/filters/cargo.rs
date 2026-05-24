@@ -70,7 +70,9 @@ pub fn test(ctx: &FilterCtx<'_>) -> FilterOutput {
             }
             continue;
         }
-        if trimmed.contains("FAILED") || trimmed.starts_with("---- ") {
+        // Count failures only on the per-failure block header to avoid double-
+        // counting against `... FAILED` lines and the summary `test result: FAILED`.
+        if trimmed.starts_with("---- ") && trimmed.ends_with("stdout ----") {
             failed += 1;
         }
         out.push_str(line);
