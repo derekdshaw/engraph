@@ -307,8 +307,10 @@ dependencies = [
  "engraph-core",
  "engraph-ingest",
  "engraph-retrieve",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]

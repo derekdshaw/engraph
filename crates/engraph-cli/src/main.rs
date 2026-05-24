@@ -95,6 +95,9 @@ enum HookCmd {
     /// PreToolUse(Bash) backstop: deny commands with available wrappers,
     /// suggesting `engraph run` as the replacement.
     PreBash,
+    /// SessionStart hook: emit a terse brief of prior context for the current
+    /// project as `hookSpecificOutput.additionalContext` (<= MAX_BRIEF_BYTES).
+    SessionStart,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -199,6 +202,11 @@ fn main() -> Result<()> {
             HookCmd::PreBash => {
                 if let Err(e) = run_pre_bash_hook() {
                     tracing::warn!(?e, "pre-bash hook failed; allowing through");
+                }
+            }
+            HookCmd::SessionStart => {
+                if let Err(e) = run_session_start_hook(&conn) {
+                    tracing::warn!(?e, "session-start hook failed; emitting empty");
                 }
             }
         },
@@ -334,6 +342,162 @@ fn main() -> Result<()> {
         },
     }
     Ok(())
+}
+
+/// Hard cap for the session-start brief, in bytes. Claude Code injects this
+/// into context at session start; keep it small.
+const MAX_BRIEF_BYTES: usize = 2048;
+
+/// SessionStart hook: read the JSON from stdin, resolve a project scope from
+/// `cwd`, gather a terse markdown brief of prior decisions, do-not-repeat
+/// rules, and budget status, and emit it as hookSpecificOutput.additionalContext.
+fn run_session_start_hook(conn: &db::PooledConn) -> Result<()> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf)?;
+
+    let cwd = if buf.trim().is_empty() {
+        std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned())
+    } else {
+        let v: serde_json::Value = serde_json::from_str(&buf)?;
+        v.get("cwd").and_then(|c| c.as_str()).map(|s| s.to_string())
+    };
+    let session_id = if buf.trim().is_empty() {
+        None
+    } else {
+        let v: serde_json::Value = serde_json::from_str(&buf)?;
+        v.get("session_id").and_then(|c| c.as_str()).map(|s| s.to_string())
+    };
+
+    let mut signal_sections: Vec<String> = Vec::new();
+    if let Some(cwd) = cwd.as_deref() {
+        let dnr = recent_do_not_repeat(conn, cwd, 5)?;
+        if !dnr.is_empty() {
+            signal_sections.push("## do-not-repeat".to_string());
+            for r in dnr {
+                signal_sections.push(format!("- {r}"));
+            }
+        }
+        let decisions = recent_decisions(conn, cwd, 5)?;
+        if !decisions.is_empty() {
+            signal_sections.push("## recent decisions".to_string());
+            for d in decisions {
+                signal_sections.push(format!("- {d}"));
+            }
+        }
+        let bugs = open_bugs(conn, cwd, 5)?;
+        if !bugs.is_empty() {
+            signal_sections.push("## open bugs".to_string());
+            for b in bugs {
+                signal_sections.push(format!("- {b}"));
+            }
+        }
+    }
+    if let Some(sid) = session_id.as_deref() {
+        let g = budget::get_or_init(conn, sid)?;
+        // Only surface budget when it carries real signal (usage above zero).
+        if g.used > 0 {
+            signal_sections.push(format!(
+                "## budget\nsession={sid} used={used} soft={soft} hard={hard} level={lvl}",
+                used = g.used,
+                soft = g.soft,
+                hard = g.hard,
+                lvl = g.escalation_level()
+            ));
+        }
+    }
+
+    // Empty additionalContext on a truly-fresh project: zero injected tokens.
+    let body = if signal_sections.is_empty() {
+        String::new()
+    } else {
+        let mut full = String::new();
+        if let Some(cwd) = cwd.as_deref() {
+            full.push_str(&format!("# engraph brief — {cwd}\n"));
+        }
+        full.push_str(&signal_sections.join("\n"));
+        truncate_to_bytes(&full, MAX_BRIEF_BYTES)
+    };
+
+    let start = Instant::now();
+    let decision = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": body,
+        }
+    });
+    println!("{decision}");
+
+    if !body.is_empty() {
+        telemetry::record_event(
+            conn,
+            EventInput {
+                session_id: session_id.as_deref(),
+                kind: EventKind::Hook,
+                feature: "F4",
+                filter_id: Some("session_start"),
+                input_tokens: 0,
+                output_tokens: tokens::count(&body) as i64,
+                latency_ms: start.elapsed().as_millis() as i64,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn truncate_to_bytes(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    // Truncate at a UTF-8 boundary just below `max`.
+    let mut cut = max.saturating_sub(20);
+    while !s.is_char_boundary(cut) && cut > 0 {
+        cut -= 1;
+    }
+    let mut out = s[..cut].to_string();
+    out.push_str("\n…[truncated]");
+    out
+}
+
+fn recent_decisions(conn: &db::PooledConn, project: &str, limit: i64) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.content FROM context_items c
+         JOIN scope_members sm ON sm.target_kind = 'context_item' AND sm.target_id = c.id
+         JOIN scopes s ON s.id = sm.scope_id AND s.kind = 'project' AND s.name = ?1
+         WHERE c.kind IN ('decision','note')
+         ORDER BY c.ts DESC LIMIT ?2",
+    )?;
+    let out = stmt
+        .query_map(rusqlite::params![project, limit], |r| {
+            let content: String = r.get(0)?;
+            Ok(content.chars().take(180).collect::<String>())
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(out)
+}
+
+fn recent_do_not_repeat(
+    conn: &db::PooledConn,
+    project: &str,
+    limit: i64,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT rule FROM do_not_repeat WHERE project = ?1 ORDER BY ts DESC LIMIT ?2",
+    )?;
+    let out = stmt
+        .query_map(rusqlite::params![project, limit], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(out)
+}
+
+fn open_bugs(conn: &db::PooledConn, project: &str, limit: i64) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT summary FROM bugs WHERE project = ?1 AND resolved = 0 ORDER BY ts DESC LIMIT ?2",
+    )?;
+    let out = stmt
+        .query_map(rusqlite::params![project, limit], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(out)
 }
 
 /// PreToolUse(Bash) hook: read tool_input.command, and if we have a wrapper

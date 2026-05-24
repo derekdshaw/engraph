@@ -10,6 +10,9 @@ authors.workspace = true
 name = "engraph"
 path = "src/main.rs"
 
+[dev-dependencies]
+tempfile = "3"
+
 [dependencies]
 engraph-core.workspace = true
 engraph-compress.workspace = true
@@ -17,6 +20,7 @@ engraph-retrieve.workspace = true
 engraph-ingest.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+rusqlite.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
