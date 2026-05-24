@@ -1,12 +1,18 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use engraph_compress::{compress, CompressInput, CompressKind};
+use engraph_compress::{
+    compress,
+    filters::{self, FilterCtx},
+    CompressInput, CompressKind,
+};
 use engraph_core::{
     budget, db,
     models::EventKind,
     telemetry::{self, EventInput},
+    tokens,
 };
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -29,6 +35,19 @@ enum Cmd {
         #[command(subcommand)]
         cmd: BudgetCmd,
     },
+    /// Run a wrapped command and compress its output before printing
+    Run {
+        /// The command to execute (e.g. `git`)
+        command: String,
+        /// Arguments to the command
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Hook handlers for Claude Code lifecycle events
+    Hook {
+        #[command(subcommand)]
+        cmd: HookCmd,
+    },
     /// One-shot deterministic compression of a file
     Compress {
         /// File to compress (use `-` for stdin)
@@ -43,6 +62,13 @@ enum Cmd {
         #[arg(long)]
         in_place: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum HookCmd {
+    /// PreToolUse(Bash) backstop: deny commands with available wrappers,
+    /// suggesting `engraph run` as the replacement.
+    PreBash,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -104,6 +130,52 @@ fn main() -> Result<()> {
                 print_gain_table(&rows);
             }
         }
+        Cmd::Run { command, args } => {
+            let start = Instant::now();
+            let output = Command::new(&command)
+                .args(&args)
+                .output()
+                .map_err(|e| anyhow::anyhow!("exec {command} failed: {e}"))?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let exit_code = output.status.code().unwrap_or(-1);
+
+            let (filter_fn, filter_id) = filters::pick(&command, &args);
+            let result = filter_fn(&FilterCtx {
+                cmd: &command,
+                args: &args,
+                stdout: &stdout,
+                stderr: &stderr,
+                exit_code,
+            });
+
+            let input_tokens =
+                tokens::count(&stdout) as i64 + tokens::count(&stderr) as i64;
+            let output_tokens = tokens::count(&result.text) as i64;
+            let elapsed = start.elapsed().as_millis() as i64;
+            telemetry::record_event(
+                &conn,
+                EventInput {
+                    session_id: std::env::var("CLAUDE_SESSION_ID").ok().as_deref(),
+                    kind: EventKind::WrappedCmd,
+                    feature: "F1",
+                    filter_id: Some(filter_id),
+                    input_tokens,
+                    output_tokens,
+                    latency_ms: elapsed,
+                },
+            )?;
+
+            print!("{}", result.text);
+            std::process::exit(exit_code);
+        }
+        Cmd::Hook { cmd } => match cmd {
+            HookCmd::PreBash => {
+                if let Err(e) = run_pre_bash_hook() {
+                    tracing::warn!(?e, "pre-bash hook failed; allowing through");
+                }
+            }
+        },
         Cmd::Compress {
             path,
             kind,
@@ -176,6 +248,53 @@ fn main() -> Result<()> {
             }
         },
     }
+    Ok(())
+}
+
+/// PreToolUse(Bash) hook: read tool_input.command, and if we have a wrapper
+/// for it (and it isn't already wrapped via `engraph run`), emit a deny+suggest
+/// JSON. Otherwise stay silent and exit 0.
+fn run_pre_bash_hook() -> Result<()> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf)?;
+    if buf.trim().is_empty() {
+        return Ok(());
+    }
+    let v: serde_json::Value = serde_json::from_str(&buf)?;
+    let command = v
+        .pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if command.is_empty() {
+        return Ok(());
+    }
+    if command.starts_with("engraph ") || command.contains(" engraph run ") {
+        return Ok(());
+    }
+    // Tokenize the first two words (cmd + first arg) for filter lookup.
+    let mut parts = command.split_whitespace();
+    let cmd_word = parts.next().unwrap_or("");
+    let arg_word = parts.next().unwrap_or("");
+    let args_vec = vec![arg_word.to_string()];
+    let (_fn, filter_id) = filters::pick(cmd_word, &args_vec);
+    if filter_id == "generic" {
+        return Ok(());
+    }
+    let reason = format!(
+        "engraph has a wrapper for `{cmd_word} {arg_word}` that compresses its output. Re-run as: engraph run {cmd_word} {rest}",
+        rest = command.trim_start_matches(cmd_word).trim_start(),
+    );
+    let decision = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason
+        }
+    });
+    println!("{decision}");
     Ok(())
 }
 

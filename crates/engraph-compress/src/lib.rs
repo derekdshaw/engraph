@@ -9,6 +9,7 @@
 //!   6. Stamp with sentinel header and provenance trailer.
 
 mod brevity;
+pub mod filters;
 mod preprocess;
 mod rank;
 mod sentinel;
