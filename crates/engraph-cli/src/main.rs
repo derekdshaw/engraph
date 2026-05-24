@@ -188,23 +188,26 @@ fn print_gain_table(rows: &[telemetry::GainRow]) {
         "{:<12} {:<14} {:>6} {:>10} {:>10} {:>10}",
         "kind", "feature", "count", "input_tk", "output_tk", "saved_tk"
     );
-    let mut tot_in = 0_i64;
-    let mut tot_out = 0_i64;
+    let mut tot_saved = 0_i64;
+    let mut savings_rows = 0_i64;
     for r in rows {
+        let saved_cell = match r.saved_tokens {
+            Some(s) => {
+                tot_saved += s;
+                savings_rows += 1;
+                s.to_string()
+            }
+            None => "-".to_string(),
+        };
         println!(
             "{:<12} {:<14} {:>6} {:>10} {:>10} {:>10}",
-            r.kind, r.feature, r.count, r.input_tokens, r.output_tokens, r.saved_tokens
+            r.kind, r.feature, r.count, r.input_tokens, r.output_tokens, saved_cell
         );
-        tot_in += r.input_tokens;
-        tot_out += r.output_tokens;
     }
-    println!(
-        "{:<12} {:<14} {:>6} {:>10} {:>10} {:>10}",
-        "TOTAL",
-        "",
-        "",
-        tot_in,
-        tot_out,
-        tot_in - tot_out
-    );
+    if savings_rows > 0 {
+        println!(
+            "{:<12} {:<14} {:>6} {:>10} {:>10} {:>10}",
+            "TOTAL_SAVED", "", "", "", "", tot_saved
+        );
+    }
 }

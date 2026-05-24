@@ -38,23 +38,29 @@ pub fn get_or_init(conn: &PooledConn, session_id: &str) -> Result<BudgetGate> {
 }
 
 pub fn add_used(conn: &PooledConn, session_id: &str, delta: i64) -> Result<BudgetGate> {
-    let g = get_or_init(conn, session_id)?;
-    let new_used = g.used + delta;
-    let new_level = BudgetGate {
-        soft: g.soft,
-        hard: g.hard,
-        used: new_used,
-    }
-    .escalation_level();
     conn.execute(
-        "UPDATE session_budget SET used_tokens = ?2, escalation_level = ?3, updated_at = datetime('now') WHERE session_id = ?1",
-        rusqlite::params![session_id, new_used, new_level],
+        "INSERT OR IGNORE INTO session_budget (session_id, soft_limit, hard_limit) VALUES (?1, ?2, ?3)",
+        rusqlite::params![session_id, DEFAULT_SOFT_LIMIT, DEFAULT_HARD_LIMIT],
     )?;
-    Ok(BudgetGate {
-        soft: g.soft,
-        hard: g.hard,
-        used: new_used,
-    })
+    conn.execute(
+        "UPDATE session_budget
+         SET used_tokens = used_tokens + ?2,
+             escalation_level = CASE
+                WHEN used_tokens + ?2 >= hard_limit THEN 3
+                WHEN used_tokens + ?2 >= soft_limit THEN 2
+                WHEN used_tokens + ?2 >= soft_limit / 2 THEN 1
+                ELSE 0
+             END,
+             updated_at = datetime('now')
+         WHERE session_id = ?1",
+        rusqlite::params![session_id, delta],
+    )?;
+    let (soft, hard, used): (i64, i64, i64) = conn.query_row(
+        "SELECT soft_limit, hard_limit, used_tokens FROM session_budget WHERE session_id = ?1",
+        [session_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    Ok(BudgetGate { soft, hard, used })
 }
 
 pub fn set_limits(conn: &PooledConn, session_id: &str, soft: i64, hard: i64) -> Result<()> {
@@ -62,6 +68,19 @@ pub fn set_limits(conn: &PooledConn, session_id: &str, soft: i64, hard: i64) -> 
         "INSERT INTO session_budget (session_id, soft_limit, hard_limit) VALUES (?1, ?2, ?3) \
          ON CONFLICT(session_id) DO UPDATE SET soft_limit = ?2, hard_limit = ?3, updated_at = datetime('now')",
         rusqlite::params![session_id, soft, hard],
+    )?;
+    // Recompute escalation against the (possibly changed) limits and unchanged used_tokens.
+    conn.execute(
+        "UPDATE session_budget
+         SET escalation_level = CASE
+                WHEN used_tokens >= hard_limit THEN 3
+                WHEN used_tokens >= soft_limit THEN 2
+                WHEN used_tokens >= soft_limit / 2 THEN 1
+                ELSE 0
+             END,
+             updated_at = datetime('now')
+         WHERE session_id = ?1",
+        rusqlite::params![session_id],
     )?;
     Ok(())
 }

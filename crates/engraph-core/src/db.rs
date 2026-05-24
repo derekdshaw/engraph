@@ -1,10 +1,22 @@
 use crate::{schema, Result, SCHEMA_VERSION};
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::OpenFlags;
+use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
 
 pub type Pool = r2d2::Pool<SqliteConnectionManager>;
 pub type PooledConn = r2d2::PooledConnection<SqliteConnectionManager>;
+
+#[derive(Debug)]
+struct Pragmas;
+
+impl r2d2::CustomizeConnection<Connection, rusqlite::Error> for Pragmas {
+    fn on_acquire(&self, conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(())
+    }
+}
 
 pub fn default_db_path() -> PathBuf {
     if let Ok(p) = std::env::var("ENGRAPH_DB_PATH") {
@@ -24,12 +36,14 @@ pub fn open_pool(path: &Path) -> Result<Pool> {
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_URI,
     );
-    let pool = r2d2::Pool::builder().max_size(4).build(manager)?;
+    let pool = r2d2::Pool::builder()
+        .max_size(4)
+        .connection_customizer(Box::new(Pragmas))
+        .build(manager)?;
     {
         let mut conn = pool.get()?;
+        // WAL is database-wide and persists; set once.
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
         schema::run_migrations(&mut conn)?;
         schema::check_drift(&conn, SCHEMA_VERSION)?;
     }

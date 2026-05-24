@@ -38,7 +38,18 @@ pub struct GainRow {
     pub count: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
-    pub saved_tokens: i64,
+    /// Token savings. Defined only for kinds where `input` represents the
+    /// pre-compression size and `output` represents the post-compression size
+    /// (`compress`, `wrapped_cmd`). `None` for kinds where the diff has no
+    /// savings semantic (`retrieve`, `hook`).
+    pub saved_tokens: Option<i64>,
+}
+
+fn saved_for(kind: &str, input: i64, output: i64) -> Option<i64> {
+    match kind {
+        "compress" | "wrapped_cmd" => Some(input - output),
+        _ => None,
+    }
 }
 
 pub fn gain_report(conn: &PooledConn) -> Result<Vec<GainRow>> {
@@ -55,13 +66,14 @@ pub fn gain_report(conn: &PooledConn) -> Result<Vec<GainRow>> {
             let count: i64 = r.get(2)?;
             let input_tokens: i64 = r.get(3)?;
             let output_tokens: i64 = r.get(4)?;
+            let saved_tokens = saved_for(&kind, input_tokens, output_tokens);
             Ok(GainRow {
                 kind,
                 feature,
                 count,
                 input_tokens,
                 output_tokens,
-                saved_tokens: input_tokens - output_tokens,
+                saved_tokens,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -94,6 +106,28 @@ mod tests {
         .unwrap();
         let rows = gain_report(&conn).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].saved_tokens, 600);
+        assert_eq!(rows[0].saved_tokens, Some(600));
+    }
+
+    #[test]
+    fn retrieve_kind_has_no_savings() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        record_event(
+            &conn,
+            EventInput {
+                session_id: None,
+                kind: EventKind::Retrieve,
+                feature: "F3",
+                filter_id: None,
+                input_tokens: 0,
+                output_tokens: 200,
+                latency_ms: 5,
+            },
+        )
+        .unwrap();
+        let rows = gain_report(&conn).unwrap();
+        assert_eq!(rows[0].saved_tokens, None);
     }
 }

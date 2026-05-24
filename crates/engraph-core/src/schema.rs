@@ -1,5 +1,5 @@
-use crate::Result;
-use rusqlite::Connection;
+use crate::{Error, Result};
+use rusqlite::{Connection, OptionalExtension};
 
 const MIGRATIONS: &[&str] = &[
     // v1 — Phase 0 foundation
@@ -32,12 +32,13 @@ const MIGRATIONS: &[&str] = &[
     );
 
     CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+    CREATE INDEX IF NOT EXISTS idx_messages_session_ts ON messages(session_id, ts);
 
     CREATE TABLE IF NOT EXISTS events (
-        rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+        seq INTEGER PRIMARY KEY,
         id TEXT NOT NULL UNIQUE,
         session_id TEXT,
-        kind TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('compress','retrieve','hook','wrapped_cmd')),
         feature TEXT NOT NULL,
         filter_id TEXT,
         input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -56,28 +57,28 @@ const MIGRATIONS: &[&str] = &[
         soft_limit INTEGER NOT NULL,
         hard_limit INTEGER NOT NULL,
         used_tokens INTEGER NOT NULL DEFAULT 0,
-        escalation_level INTEGER NOT NULL DEFAULT 0,
+        escalation_level INTEGER NOT NULL DEFAULT 0 CHECK (escalation_level IN (0,1,2,3)),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
-    let exists: bool = conn
+    let table_present: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='migrations'",
             [],
-            |_| Ok(true),
+            |r| r.get(0),
         )
-        .unwrap_or(false);
-    if !exists {
+        .optional()?;
+    if table_present.is_none() {
         return Ok(0);
     }
-    let v: i64 = conn
-        .query_row("SELECT COALESCE(MAX(version), 0) FROM migrations", [], |r| {
-            r.get(0)
-        })
-        .unwrap_or(0);
+    let v: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM migrations",
+        [],
+        |r| r.get(0),
+    )?;
     Ok(v)
 }
 
@@ -102,8 +103,13 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()> {
 
 pub fn check_drift(conn: &Connection, expected: i64) -> Result<()> {
     let found = current_version(conn)?;
-    if found != expected {
-        tracing::warn!(expected, found, "schema drift detected");
+    if found > expected {
+        // DB is newer than this binary — running would risk corrupting newer tables.
+        return Err(Error::SchemaDrift { expected, found });
+    }
+    if found < expected {
+        // Should not happen after run_migrations; warn so the discrepancy surfaces.
+        tracing::warn!(expected, found, "schema behind code after migrations");
     }
     Ok(())
 }
