@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+embeddings = ["engraph-core/embeddings"]
+
 [dependencies]
 engraph-core.workspace = true
 rusqlite.workspace = true

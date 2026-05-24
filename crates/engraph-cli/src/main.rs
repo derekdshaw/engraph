@@ -65,6 +65,10 @@ enum Cmd {
         /// Include bugs in results
         #[arg(long)]
         with_bugs: bool,
+        /// Use hybrid (FTS+embeddings+recency) retrieval. Only available
+        /// when built with `--features embeddings`.
+        #[arg(long)]
+        hybrid: bool,
         /// Emit JSON instead of a table
         #[arg(long)]
         json: bool,
@@ -79,6 +83,18 @@ enum Cmd {
     CompressExisting {
         /// Cap the number of rows examined per table per run.
         #[arg(long, default_value_t = 1000)]
+        batch: usize,
+    },
+    /// Initialize the embedding model on disk (downloads if absent).
+    /// Available only when built with `--features embeddings`.
+    #[cfg(feature = "embeddings")]
+    InitEmbeddings,
+    /// Embed messages that don't yet have a vector for the current model.
+    /// Available only when built with `--features embeddings`.
+    #[cfg(feature = "embeddings")]
+    ReindexEmbeddings {
+        /// Cap the number of rows embedded per run.
+        #[arg(long, default_value_t = 200)]
         batch: usize,
     },
     /// One-shot deterministic compression of a file
@@ -223,6 +239,7 @@ fn main() -> Result<()> {
             project,
             with_entities,
             with_bugs,
+            hybrid,
             json,
         } => {
             let scope = match project {
@@ -237,16 +254,28 @@ fn main() -> Result<()> {
                 kinds.push(Target::Bugs);
             }
             let start = Instant::now();
-            let hits = engraph_retrieve::search(
-                &conn,
-                &Query {
-                    text: &query,
-                    scope,
-                    kinds: &kinds,
-                    limit,
-                    strategy: Default::default(),
-                },
-            )?;
+            let q = Query {
+                text: &query,
+                scope,
+                kinds: &kinds,
+                limit,
+                strategy: Default::default(),
+            };
+            let hits = if hybrid {
+                #[cfg(feature = "embeddings")]
+                {
+                    let provider = engraph_core::embedding::default_provider()?;
+                    engraph_retrieve::hybrid::search_hybrid(&conn, &q, provider.as_ref())?
+                }
+                #[cfg(not(feature = "embeddings"))]
+                {
+                    anyhow::bail!(
+                        "hybrid retrieval requires the `embeddings` feature; rebuild with `--features embeddings`"
+                    );
+                }
+            } else {
+                engraph_retrieve::search(&conn, &q)?
+            };
             telemetry::record_event(
                 &conn,
                 EventInput {
@@ -285,6 +314,25 @@ fn main() -> Result<()> {
                 stats.bytes_after,
                 stats.elapsed_ms
             );
+        }
+        #[cfg(feature = "embeddings")]
+        Cmd::InitEmbeddings => {
+            let provider = engraph_core::embedding::default_provider()?;
+            println!(
+                "initialized embedding model: {} (dim {})",
+                provider.model_id(),
+                provider.dim()
+            );
+        }
+        #[cfg(feature = "embeddings")]
+        Cmd::ReindexEmbeddings { batch } => {
+            let provider = engraph_core::embedding::default_provider()?;
+            let n = engraph_retrieve::hybrid::reindex_messages(
+                &conn,
+                provider.as_ref(),
+                batch,
+            )?;
+            println!("embedded {n} messages (model {})", provider.model_id());
         }
         Cmd::Compress {
             path,

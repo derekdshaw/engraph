@@ -181,6 +181,18 @@ const MIGRATIONS: &[&str] = &[
         INSERT INTO context_items_fts(rowid, content) VALUES (new.rowid, new.content);
     END;
     "#,
+    // v3 — Phase 6 embeddings (feature-gated at query time, table always present)
+    r#"
+    CREATE TABLE IF NOT EXISTS embeddings (
+        target_kind TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        vector BLOB NOT NULL,
+        model_id TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (target_kind, target_id, model_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_embeddings_target ON embeddings(target_kind, target_id);
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {

@@ -24,6 +24,10 @@ pub enum ScopeFilter {
 pub enum Strategy {
     #[default]
     Fts,
+    /// Hybrid (BM25 + cosine similarity + recency). Requires the `embeddings`
+    /// feature. Falls back to FTS when no embeddings are stored for candidates.
+    #[cfg(feature = "embeddings")]
+    Hybrid,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +63,8 @@ pub struct Hit {
 }
 
 pub mod scope;
+#[cfg(feature = "embeddings")]
+pub mod hybrid;
 
 pub fn search(conn: &PooledConn, q: &Query<'_>) -> Result<Vec<Hit>> {
     let scope_ids = scope::resolve(conn, &q.scope)?;

@@ -1,5 +1,6 @@
 pub mod budget;
 pub mod db;
+pub mod embedding;
 pub mod error;
 pub mod models;
 pub mod schema;
@@ -8,4 +9,4 @@ pub mod tokens;
 
 pub use error::{Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
