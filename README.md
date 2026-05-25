@@ -1,0 +1,228 @@
+# Engraph
+
+A Rust toolchain that cuts Claude Code token usage by combining persistent session memory, scoped retrieval, deterministic compression of stored content and per-command output, and telemetry that proves the savings.
+
+Engraph is local-first. Storage is one SQLite file under `~/.local/share/engraph/engraph.db` (override with `ENGRAPH_DB_PATH`). The cloud path is reserved through a thin `EmbeddingProvider` trait and append-only ingest log; no service is required.
+
+## Status
+
+Six phases of the implementation plan are shipped:
+
+| Feature | Crate / module | Subcommand |
+|---|---|---|
+| Telemetry + savings dashboard | `engraph-core::telemetry` | `engraph gain` |
+| Session token budget with escalation levels | `engraph-core::budget` | `engraph budget {status, set}` |
+| Deterministic compressor (F6) | `engraph-compress` | `engraph compress` |
+| Per-command Bash wrappers (F1) | `engraph-compress::filters` | `engraph run` |
+| PreToolUse(Bash) deny-suggest backstop | `engraph-cli` | `engraph hook pre-bash` |
+| JSONL ingest with rotation guard | `engraph-ingest` | `engraph ingest` |
+| FTS5 + scoped retrieval + KG (F3) | `engraph-retrieve` | `engraph recall` |
+| SessionStart auto-context inject (F4) | `engraph-cli` | `engraph hook session-start` |
+| Compress-existing sweep | `engraph-ingest` | `engraph compress-existing` |
+| Local embeddings + hybrid retrieval | `engraph-core::embedding`, `engraph-retrieve::hybrid` | `engraph init-embeddings`, `engraph reindex-embeddings`, `engraph recall --hybrid` |
+
+## Install
+
+```bash
+git clone <repo>
+cd engraph
+cargo build --release                       # default build, no embeddings
+cargo build --release --features embeddings # opt-in semantic retrieval (~150MB ONNX runtime + model)
+install -m 0755 target/release/engraph ~/.local/bin/engraph
+```
+
+## Wiring into Claude Code
+
+Add to `~/.claude/settings.json`:
+
+```jsonc
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "engraph hook session-start" }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "engraph hook pre-bash" }] }
+    ],
+    "SessionEnd": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "engraph ingest --from-stdin" }] }
+    ]
+  }
+}
+```
+
+PostToolUse output rewriting is intentionally absent — Claude Code hooks can only *append* to the transcript, not replace tool results. The wrapper pattern (`engraph run <cmd>`) is the supported way to compress shell output.
+
+## Storage
+
+One SQLite DB, WAL mode, schema migrations under `engraph-core/src/schema.rs`.
+
+| Table | Purpose |
+|---|---|
+| `sessions`, `messages`, `tool_calls` | Session-state snapshot from JSONL ingestion |
+| `scopes`, `scope_members` | Hierarchical scoping (mempalace wings/rooms/drawers, generalized) |
+| `context_items`, `bugs`, `do_not_repeat` | Curated decisions and rules |
+| `entities`, `relations` | Knowledge graph with validity windows and provenance flags |
+| `messages_fts`, `context_items_fts` | FTS5 virtual tables auto-synced via triggers |
+| `embeddings` | Vector store (populated only with `--features embeddings`) |
+| `events`, `session_budget` | Telemetry + per-session token budget |
+| `ingestion_log` | JSONL ingest offsets + rotation fingerprint (inode + size) |
+
+## Token-savings telemetry
+
+Every compression, retrieval, and wrapped-command invocation writes a row to `events`. `engraph gain` prints a per-feature table:
+
+```
+kind         feature         count   input_tk  output_tk   saved_tk
+wrapped_cmd  F1                  1       1024         50        974
+compress     F6                  3      12440       4730       7710
+retrieve     F3                  8          0        842          -
+TOTAL_SAVED                                                    8684
+```
+
+`saved_tk` is only meaningful for kinds where input represents the pre-compression size (`compress`, `wrapped_cmd`); other kinds show `-`.
+
+## Hybrid retrieval (semantic + lexical)
+
+When built with `--features embeddings`, `engraph recall --hybrid <query>` combines lexical search (BM25 from SQLite FTS5) and semantic search (cosine similarity over locally-computed embeddings). This section explains the algorithm, why it exists, and when to use it.
+
+### Why hybrid
+
+Lexical-only retrieval misses synonyms: a query for "auth" won't find a message about "login". Semantic-only retrieval misses identifier exact-matches: a query for `processOrder` against an embedding model trained on prose loses the compositional cue. Hybrid trades a small per-query embedding cost for higher recall on real-world queries that mix concept and identifier vocabulary.
+
+### Why not a weighted sum of scores
+
+The natural-looking formula is
+
+```
+score(d) = α·BM25(d) + β·cosine(d)
+```
+
+This is mathematically broken. BM25 scores are unbounded positive (typically 0–20+, occasionally higher), while cosine sits in [−1, 1]. The larger-scale source dominates the sum regardless of weights — cosine ends up acting as a tiebreaker for BM25 rather than as a co-equal signal. Min-max normalization within the candidate set could fix this but is sensitive to outliers and varies per query.
+
+### The algorithm: Reciprocal Rank Fusion
+
+Engraph uses **Reciprocal Rank Fusion** (RRF; Cormack, Clarke, Büttcher, SIGIR 2009):
+
+```
+rrf_score(d) = Σ over sources i:  w_i / (k + rank_i(d))
+```
+
+For each candidate document `d` and each source list `i` (lexical, semantic), look up `d`'s 1-based rank in that source and contribute `w_i / (k + rank_i(d))`. Documents missing from a source contribute zero for that term.
+
+Constants used by Engraph:
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `K_RRF` | `60.0` | Smoothing — the standard value from the RRF paper. Larger `k` flattens the bonus for top-of-list documents. |
+| `W_LEXICAL` | `1.0` | Weight on the BM25 ranking. |
+| `W_SEMANTIC` | `1.0` | Weight on the embedding-cosine ranking. |
+| `CANDIDATE_MULT` | `4` | The FTS stage pulls `q.limit * 4` candidates so the reranker has headroom. |
+
+Why this works:
+- **Scale-free.** Only ranks are combined; raw score scales don't matter.
+- **Robust to missing data.** A document with no embedding still gets its full lexical contribution; nothing collapses to zero.
+- **Composable.** Adding a third source (e.g., recency) is just another term in the sum.
+
+The maximum achievable score is `(W_LEXICAL + W_SEMANTIC) / (K_RRF + 1)` ≈ `0.0328` with the defaults — a document ranked first in both sources.
+
+### Pipeline
+
+1. Sanitize the query (strip FTS5 meta-characters; quote and AND each remaining word).
+2. Run the lexical search with the widened limit (`q.limit * CANDIDATE_MULT`), recording each candidate's BM25 rank.
+3. Embed the query text once via the configured `EmbeddingProvider`.
+4. For every candidate, fetch its stored vector under the current `model_id` (rows from a stale model are ignored). Score by cosine; sort the candidate set; record each candidate's cosine rank.
+5. Compute RRF per candidate by combining its lexical and semantic ranks. Candidates without a stored embedding get zero on the semantic term.
+6. Sort by fused score, stable secondary by `target_id`, truncate to `q.limit`.
+
+### When to use it
+
+- **Use hybrid** when you query a corpus with synonyms or paraphrase — sessions where users describe the same concept in different words, code-adjacent prose mixing identifiers and English, or long-running projects where vocabulary drifts.
+- **Stick with `Strategy::Fts` (the default)** for short-lived projects, tight identifier matching, or any environment that can't tolerate the embeddings dependency (~150MB on disk; the model also requires the ONNX runtime). The FTS path is deterministic, faster cold, and has zero per-query model load.
+
+### Operationally
+
+```bash
+# Build with embeddings enabled.
+cargo build --release --features embeddings
+
+# Materialize the local model (downloads bge-small-en-v1.5, ~130MB).
+engraph init-embeddings
+
+# Embed all existing messages under the current model.
+engraph reindex-embeddings --batch 500
+
+# Hybrid recall (semantic + lexical).
+engraph recall --hybrid "auth flow"
+```
+
+`engraph reindex-embeddings` only embeds rows that don't yet have a vector under the current `model_id`, so it's safe to re-run; a model upgrade (new `model_id`) requires a fresh full reindex by design — old embeddings are not silently mixed with new ones.
+
+### Future signals
+
+The RRF combinator is intentionally open-ended. The natural next signal is recency — a third source list ranking candidates by `exp(−age / τ)` and joining it into the same `Σ w_i / (k + rank_i(d))` formula. The plan reserves this; it isn't wired today because raw `ts` recency on synthetic test data has no meaningful signal yet.
+
+## Reading the events table
+
+```bash
+engraph gain --json
+```
+
+Useful queries directly against the DB:
+
+```sql
+-- Largest single compressions in the last day:
+SELECT kind, feature, filter_id, input_tokens, output_tokens, ts
+FROM events
+WHERE kind = 'compress' AND ts > datetime('now', '-1 day')
+ORDER BY (input_tokens - output_tokens) DESC LIMIT 20;
+
+-- Per-filter ratio:
+SELECT filter_id, AVG(1.0 * output_tokens / NULLIF(input_tokens, 0)) AS avg_ratio,
+       COUNT(*) AS samples
+FROM events
+WHERE kind IN ('compress','wrapped_cmd') AND input_tokens > 0
+GROUP BY filter_id ORDER BY avg_ratio ASC;
+```
+
+## Crate layout
+
+```
+crates/
+├── engraph-core/          # schema, db pool, telemetry, budget, tokens, embedding trait
+├── engraph-compress/      # F6 compressor + per-command filters (git, cargo, npm, tree, fd, ls)
+├── engraph-retrieve/      # FTS+scoping+KG, hybrid (feature-gated)
+├── engraph-ingest/        # JSONL → SQLite with rotation guard and in-place compression sweep
+└── engraph-cli/           # the `engraph` binary
+```
+
+## Feature flags
+
+| Feature | Effect |
+|---|---|
+| (default) | Lexical retrieval only; no ONNX/fastembed dependency. |
+| `embeddings` | Pulls in fastembed-rs (≈150MB transitive), enables `engraph init-embeddings`, `engraph reindex-embeddings`, and `engraph recall --hybrid`. |
+
+## Verification
+
+```bash
+# Default build:
+cargo test
+cargo clippy --all-targets -- -D warnings
+
+# With embeddings:
+cargo test --features embeddings
+cargo clippy --all-targets --features embeddings -- -D warnings
+```
+
+The plan's verification gates are wired as tests:
+- `engraph-compress/tests/git_log_ratio.rs` — F6 ratio < 0.5 on a 2k-line git log
+- `engraph-compress/tests/filter_ratios.rs` — per-filter token-reduction gates
+- `engraph-retrieve/tests/end_to_end.rs` — ingest + recall, scope restriction, KG entity search
+- `engraph-retrieve/tests/hybrid_path.rs` — RRF reordering vs FTS, unembedded-candidate fallback, idempotent upsert
+- `engraph-ingest/src/lib.rs` (unit) — incremental re-ingest, rotation/truncation replay, sweep idempotency and recoverability
+- `engraph-cli/tests/session_start_hook.rs` — empty brief on unknown project, populated brief includes rules/bugs, size cap respected
+
+## License
+
+MIT

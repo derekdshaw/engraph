@@ -193,6 +193,11 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_embeddings_target ON embeddings(target_kind, target_id);
     "#,
+    // v4 — ingest_file file-rotation guard (last_inode + last_size for detection)
+    r#"
+    ALTER TABLE ingestion_log ADD COLUMN last_inode INTEGER;
+    ALTER TABLE ingestion_log ADD COLUMN last_size INTEGER;
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
