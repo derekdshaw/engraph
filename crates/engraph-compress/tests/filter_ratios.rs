@@ -205,6 +205,136 @@ fn npm_install_ratio_under_half() {
 }
 
 #[test]
+fn pytest_drops_pass_progress() {
+    let mut stdout = String::new();
+    for i in 0..200 {
+        stdout.push_str(&format!(
+            "tests/test_unit.py::test_case_{i} PASSED                                              [{}%]\n",
+            i / 2
+        ));
+    }
+    stdout.push_str("=================== 200 passed in 1.23s =====================\n");
+    let args = vec!["-q".to_string()];
+    let (filter, _) = filters::pick("pytest", &args);
+    let out = filter(&ctx("pytest", &args, &stdout));
+    let r = ratio(&stdout, &out.text);
+    assert!(r < 0.3, "pytest ratio {r:.3} >= 0.3");
+    assert!(out.text.contains("200 passed"));
+}
+
+#[test]
+fn pip_install_drops_collecting_lines() {
+    let mut stdout = String::new();
+    for i in 0..100 {
+        stdout.push_str(&format!("Collecting package-{i}\n"));
+        stdout.push_str(&format!(
+            "  Downloading package_{i}-1.0.0-py3-none-any.whl (50 kB)\n"
+        ));
+    }
+    stdout.push_str("Installing collected packages: package-0, package-1\n");
+    stdout.push_str("Successfully installed package-0-1.0.0 package-1-1.0.0\n");
+    let args = vec!["install".to_string()];
+    let (filter, _) = filters::pick("pip", &args);
+    let out = filter(&ctx("pip", &args, &stdout));
+    let r = ratio(&stdout, &out.text);
+    assert!(r < 0.2, "pip_install ratio {r:.3} >= 0.2");
+    assert!(out.text.contains("Successfully installed"));
+}
+
+#[test]
+fn go_test_caps_summary() {
+    let mut stdout = String::new();
+    for i in 0..50 {
+        stdout.push_str(&format!("=== RUN   TestX{i}\n--- PASS: TestX{i} (0.00s)\n"));
+    }
+    stdout.push_str("PASS\nok  \texample.com/m\t0.05s\n");
+    let args = vec!["test".to_string()];
+    let (filter, _) = filters::pick("go", &args);
+    let out = filter(&ctx("go", &args, &stdout));
+    let r = ratio(&stdout, &out.text);
+    assert!(r < 0.3, "go_test ratio {r:.3} >= 0.3");
+    assert!(out.text.contains("1 ok, 0 failed pkgs"));
+}
+
+#[test]
+fn yarn_install_drops_resolution_spam() {
+    let mut stdout = String::new();
+    for stage in ["Resolving", "Fetching", "Linking", "Building"] {
+        for i in 0..30 {
+            stdout.push_str(&format!("[{i}/30] {stage} packages...\n"));
+        }
+    }
+    stdout.push_str("Done in 4.2s\n");
+    let args = vec!["install".to_string()];
+    let (filter, _) = filters::pick("yarn", &args);
+    let out = filter(&ctx("yarn", &args, &stdout));
+    let r = ratio(&stdout, &out.text);
+    assert!(r < 0.2, "yarn_install ratio {r:.3} >= 0.2");
+    assert!(out.text.contains("Done in 4.2s"));
+}
+
+#[test]
+fn docker_ps_truncates_long_table() {
+    let input: String = (0..150).map(|i| format!("container-{i}  running\n")).collect();
+    let args = vec!["ps".to_string()];
+    let (filter, _) = filters::pick("docker", &args);
+    let out = filter(&ctx("docker", &args, &input));
+    let r = ratio(&input, &out.text);
+    assert!(r < 0.8, "docker_ps ratio {r:.3} >= 0.8");
+    assert!(out.text.contains("truncated 50 more rows"));
+}
+
+#[test]
+fn kubectl_describe_drops_spec_annotations() {
+    let mut stdout = String::from("Name: pod\nStatus: Running\nSpec:\n");
+    for i in 0..50 {
+        stdout.push_str(&format!("  field{i}: value{i}\n"));
+    }
+    stdout.push_str("Annotations:\n");
+    for i in 0..50 {
+        stdout.push_str(&format!("  ann/k{i}: vvv{i}\n"));
+    }
+    stdout.push_str("Events:\n  Normal Pulled\n");
+    let args = vec!["describe".to_string()];
+    let (filter, _) = filters::pick("kubectl", &args);
+    let out = filter(&ctx("kubectl", &args, &stdout));
+    let r = ratio(&stdout, &out.text);
+    assert!(r < 0.4, "kubectl_describe ratio {r:.3} >= 0.4");
+    assert!(out.text.contains("Events:"));
+    assert!(!out.text.contains("field49"));
+}
+
+#[test]
+fn make_drops_dir_echoes() {
+    let mut stdout = String::new();
+    for i in 0..80 {
+        stdout.push_str(&format!("make[1]: Entering directory '/build/sub{i}'\n"));
+        stdout.push_str(&format!("cc -c -o file{i}.o file{i}.c\n"));
+        stdout.push_str(&format!("make[1]: Leaving directory '/build/sub{i}'\n"));
+    }
+    stdout.push_str("file42.c:10: error: 'x' undeclared\n");
+    let args = vec![];
+    let (filter, _) = filters::pick("make", &args);
+    let out = filter(&ctx("make", &args, &stdout));
+    let r = ratio(&stdout, &out.text);
+    assert!(r < 0.1, "make ratio {r:.3} >= 0.1");
+    assert!(out.text.contains("'x' undeclared"));
+}
+
+#[test]
+fn rg_truncates_long_match_lists() {
+    let input: String = (0..400)
+        .map(|i| format!("src/file{i}.rs:10:42:match-here\n"))
+        .collect();
+    let args = vec!["pattern".to_string()];
+    let (filter, _) = filters::pick("rg", &args);
+    let out = filter(&ctx("rg", &args, &input));
+    let r = ratio(&input, &out.text);
+    assert!(r < 0.6, "rg ratio {r:.3} >= 0.6");
+    assert!(out.text.contains("truncated 200 more matches"));
+}
+
+#[test]
 fn unknown_command_falls_back_to_generic() {
     let args = vec!["something".to_string()];
     let (_, id) = filters::pick("totally-made-up", &args);

@@ -88,6 +88,79 @@ pub fn test(ctx: &FilterCtx<'_>) -> FilterOutput {
     }
 }
 
+/// `cargo doc` — same compile-noise pattern as `cargo build`.
+pub fn doc(ctx: &FilterCtx<'_>) -> FilterOutput {
+    let mut o = build(ctx);
+    o.filter_id = "cargo_doc";
+    o
+}
+
+/// `cargo bench` — drop progress, keep benchmark result lines (typically
+/// `test name ... bench: X ns/iter`).
+pub fn bench(ctx: &FilterCtx<'_>) -> FilterOutput {
+    let mut combined = String::with_capacity(ctx.stdout.len() + ctx.stderr.len());
+    combined.push_str(ctx.stdout);
+    combined.push_str(ctx.stderr);
+    let progress = progress_re();
+    let mut out = String::with_capacity(combined.len() / 3);
+    let mut benches = 0_u32;
+    for line in combined.lines() {
+        let trimmed = line.trim_start();
+        if progress.is_match(trimmed) {
+            continue;
+        }
+        if trimmed.starts_with("test ") && trimmed.contains("bench:") {
+            benches += 1;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "[engraph: cargo bench {benches} results, exit {}]\n",
+        ctx.exit_code
+    ));
+    FilterOutput {
+        text: out,
+        filter_id: "cargo_bench",
+    }
+}
+
+/// `cargo audit` — drop database-fetch chatter; keep vulnerability blocks.
+pub fn audit(ctx: &FilterCtx<'_>) -> FilterOutput {
+    let mut combined = String::with_capacity(ctx.stdout.len() + ctx.stderr.len());
+    combined.push_str(ctx.stdout);
+    combined.push_str(ctx.stderr);
+    let mut out = String::with_capacity(combined.len() / 2);
+    for line in combined.lines() {
+        let t = line.trim_start();
+        if t.starts_with("Fetching advisory database")
+            || t.starts_with("Loaded")
+            || t.starts_with("Updating crates.io index")
+            || t.starts_with("Scanning")
+        {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&format!("[engraph: cargo audit exit {}]\n", ctx.exit_code));
+    FilterOutput {
+        text: out,
+        filter_id: "cargo_audit",
+    }
+}
+
+/// `cargo tree` — truncate by depth using the same indent-aware logic as the
+/// `tree` filter.
+pub fn tree_cmd(ctx: &FilterCtx<'_>) -> FilterOutput {
+    use crate::filters::tree;
+    let r = tree::tree(ctx);
+    FilterOutput {
+        text: r.text,
+        filter_id: "cargo_tree",
+    }
+}
+
 fn progress_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {

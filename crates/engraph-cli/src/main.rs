@@ -223,7 +223,7 @@ fn main() -> Result<()> {
         }
         Cmd::Hook { cmd } => match cmd {
             HookCmd::PreBash => {
-                if let Err(e) = run_pre_bash_hook() {
+                if let Err(e) = run_pre_bash_hook(&conn) {
                     tracing::warn!(?e, "pre-bash hook failed; allowing through");
                 }
             }
@@ -579,14 +579,147 @@ fn open_bugs(conn: &db::PooledConn, project: &str, limit: i64) -> Result<Vec<Str
 /// PreToolUse(Bash) hook: read tool_input.command, and if we have a wrapper
 /// for it (and it isn't already wrapped via `engraph run`), emit a deny+suggest
 /// JSON. Otherwise stay silent and exit 0.
-fn run_pre_bash_hook() -> Result<()> {
+/// Decision returned by the pre-bash analysis. Phase A of v2: prefer Rewrite
+/// (silent allow + updatedInput); fall back to DenySuggest only when the
+/// command can't be safely re-wrapped.
+#[derive(Debug, PartialEq, Eq)]
+enum RewriteOutcome {
+    Rewrite { new_command: String, filter_id: &'static str },
+    DenySuggest { reason: String, filter_id: &'static str },
+    Passthrough,
+}
+
+fn try_auto_rewrite(command: &str) -> RewriteOutcome {
+    let command = command.trim();
+    if command.is_empty() {
+        return RewriteOutcome::Passthrough;
+    }
+    // Recursion guard: never wrap something that already routes through engraph.
+    if command.starts_with("engraph ") || command.contains(" engraph run ") {
+        return RewriteOutcome::Passthrough;
+    }
+
+    let argv = match shell_words::split(command) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return RewriteOutcome::Passthrough,
+    };
+
+    // Env-var prefix (FOO=bar cmd ...): the first token is "KEY=value". Don't
+    // wrap; we'd swallow the env if we re-shelled through `engraph run`.
+    if is_env_assignment(&argv[0]) {
+        return RewriteOutcome::Passthrough;
+    }
+
+    // Compound / pipeline detection — checked on the raw string with quote
+    // awareness so things like `git log --grep='foo && bar'` don't trip.
+    // For compound commands we scan the parsed argv for ANY wrappable token,
+    // so `cd /tmp && git log` and `git log | head` both surface a suggestion.
+    if has_unquoted_shell_meta(command) {
+        for (i, tok) in argv.iter().enumerate() {
+            let next = argv.get(i + 1).map(String::as_str).unwrap_or("");
+            let (_fn, fid) = filters::pick(tok, &[next.to_string()]);
+            if fid != "generic" {
+                let reason = format!(
+                    "engraph has a wrapper for `{tok} {next}` but the command contains shell operators we can't auto-rewrap. Re-run the wrappable part as: engraph run {tok} {next}"
+                );
+                return RewriteOutcome::DenySuggest { reason, filter_id: fid };
+            }
+        }
+        return RewriteOutcome::Passthrough;
+    }
+
+    let cmd_word = argv[0].as_str();
+    let arg_word = argv.get(1).map(String::as_str).unwrap_or("");
+    let (_filter_fn, filter_id) = filters::pick(cmd_word, &[arg_word.to_string()]);
+    if filter_id == "generic" {
+        return RewriteOutcome::Passthrough;
+    }
+
+    // Build the wrapped command. shell_words::quote preserves any whitespace
+    // or special-char arg the user supplied.
+    let mut wrapped: Vec<String> = Vec::with_capacity(argv.len() + 2);
+    wrapped.push("engraph".to_string());
+    wrapped.push("run".to_string());
+    wrapped.extend(argv);
+    let new_command = wrapped
+        .iter()
+        .map(|w| shell_words::quote(w).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    RewriteOutcome::Rewrite { new_command, filter_id }
+}
+
+fn is_env_assignment(tok: &str) -> bool {
+    // Identifier=anything → env-var prefix. Match shell rule for variable names.
+    let mut chars = tok.chars();
+    let first = match chars.next() {
+        Some(c) => c,
+        None => return false,
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    let mut saw_eq = false;
+    for c in chars {
+        if c == '=' {
+            saw_eq = true;
+            break;
+        }
+        if !(c.is_ascii_alphanumeric() || c == '_') {
+            return false;
+        }
+    }
+    saw_eq
+}
+
+/// Scan for shell operators outside of single/double quotes. Tracks backslash
+/// escapes and `$(...)` / backtick command substitutions. False positives are
+/// fine — they fall back to deny+suggest, which is safe. False negatives are
+/// the concern; we err conservative.
+fn has_unquoted_shell_meta(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && !in_single {
+            i += 2;
+            continue;
+        }
+        if b == b'\'' && !in_double {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+        if b == b'"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+        if !in_single && !in_double {
+            match b {
+                b'|' | b';' | b'&' | b'<' | b'>' | b'`' => return true,
+                b'$' if i + 1 < bytes.len() && bytes[i + 1] == b'(' => return true,
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn run_pre_bash_hook(conn: &db::PooledConn) -> Result<()> {
     use std::io::Read;
     let mut buf = String::new();
     std::io::stdin().read_to_string(&mut buf)?;
     if buf.trim().is_empty() {
         return Ok(());
     }
-    let v: serde_json::Value = serde_json::from_str(&buf)?;
+    let v: serde_json::Value = match serde_json::from_str::<serde_json::Value>(&buf) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
     let command = v
         .pointer("/tool_input/command")
         .and_then(|c| c.as_str())
@@ -596,30 +729,57 @@ fn run_pre_bash_hook() -> Result<()> {
     if command.is_empty() {
         return Ok(());
     }
-    if command.starts_with("engraph ") || command.contains(" engraph run ") {
-        return Ok(());
-    }
-    // Tokenize the first two words (cmd + first arg) for filter lookup.
-    let mut parts = command.split_whitespace();
-    let cmd_word = parts.next().unwrap_or("");
-    let arg_word = parts.next().unwrap_or("");
-    let args_vec = vec![arg_word.to_string()];
-    let (_fn, filter_id) = filters::pick(cmd_word, &args_vec);
-    if filter_id == "generic" {
-        return Ok(());
-    }
-    let reason = format!(
-        "engraph has a wrapper for `{cmd_word} {arg_word}` that compresses its output. Re-run as: engraph run {cmd_word} {rest}",
-        rest = command.trim_start_matches(cmd_word).trim_start(),
-    );
-    let decision = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason
+
+    let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
+    match try_auto_rewrite(&command) {
+        RewriteOutcome::Rewrite { new_command, filter_id } => {
+            let decision = serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "updatedInput": { "command": new_command }
+                }
+            });
+            println!("{decision}");
+            telemetry::record_event(
+                conn,
+                EventInput {
+                    session_id: session_id.as_deref(),
+                    kind: EventKind::Hook,
+                    feature: "F1_rewrite",
+                    filter_id: Some(filter_id),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    latency_ms: 0,
+                },
+            )
+            .ok();
         }
-    });
-    println!("{decision}");
+        RewriteOutcome::DenySuggest { reason, filter_id } => {
+            let decision = serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason
+                }
+            });
+            println!("{decision}");
+            telemetry::record_event(
+                conn,
+                EventInput {
+                    session_id: session_id.as_deref(),
+                    kind: EventKind::Hook,
+                    feature: "F1_deny",
+                    filter_id: Some(filter_id),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    latency_ms: 0,
+                },
+            )
+            .ok();
+        }
+        RewriteOutcome::Passthrough => {}
+    }
     Ok(())
 }
 

@@ -14,12 +14,33 @@ Six phases of the implementation plan are shipped:
 | Session token budget with escalation levels | `engraph-core::budget` | `engraph budget {status, set}` |
 | Deterministic compressor (F6) | `engraph-compress` | `engraph compress` |
 | Per-command Bash wrappers (F1) | `engraph-compress::filters` | `engraph run` |
-| PreToolUse(Bash) deny-suggest backstop | `engraph-cli` | `engraph hook pre-bash` |
+| PreToolUse(Bash) auto-rewrite + deny fallback | `engraph-cli` | `engraph hook pre-bash` |
 | JSONL ingest with rotation guard | `engraph-ingest` | `engraph ingest` |
 | FTS5 + scoped retrieval + KG (F3) | `engraph-retrieve` | `engraph recall` |
 | SessionStart auto-context inject (F4) | `engraph-cli` | `engraph hook session-start` |
 | Compress-existing sweep | `engraph-ingest` | `engraph compress-existing` |
 | Local embeddings + hybrid retrieval | `engraph-core::embedding`, `engraph-retrieve::hybrid` | `engraph init-embeddings`, `engraph reindex-embeddings`, `engraph recall --hybrid` |
+
+### Supported wrapper commands (v2)
+
+The `engraph run` registry (and the auto-rewrite hook) recognizes:
+
+| Bucket | Commands |
+|---|---|
+| git | `log`, `diff`, `status`, `show` (all forms, incl. `--graph`, `--stat`, `--oneline`) |
+| cargo | `test`, `build`, `check`, `clippy`, `doc`, `bench`, `audit`, `tree` |
+| npm | `install` (+ `i`, `ci`), `test` (+ `t`) |
+| Python | `pytest`, `pip install`, `pip list`, `uv install`/`sync`/`add` |
+| Lint | `ruff`, `mypy`, `eslint`, `tsc` |
+| Go | `go test`, `go build`, `go vet`, `go mod tidy` |
+| JS/TS extras | `yarn install`/`add`, `pnpm install`/`add`/`i`, `jest`/`vitest`/`mocha` |
+| Containers | `docker ps`/`images`, `docker logs`, `docker compose ps`/`logs`, `kubectl get`/`logs`/`describe` |
+| GitHub CLI | `gh pr`/`issue`/`repo` with `list` or `view` |
+| Build systems | `make`, `mvn`, `gradle` (and `./gradlew`) |
+| Search | `rg`, `grep` |
+| Listings | `tree`, `fd`, `ls` |
+
+Unrecognized commands route through a generic fallback that strips ANSI, dedupes consecutive lines, and applies extractive ranking. Adding a new filter is a single function in `crates/engraph-compress/src/filters/` plus an arm in `filters::pick`.
 
 ## Install
 
@@ -51,7 +72,23 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-PostToolUse output rewriting is intentionally absent — Claude Code hooks can only *append* to the transcript, not replace tool results. The wrapper pattern (`engraph run <cmd>`) is the supported way to compress shell output.
+### How `pre-bash` rewrites commands
+
+The PreToolUse hook on Bash uses Claude Code's `hookSpecificOutput.updatedInput` to **silently rewrite eligible commands** through `engraph run` before they execute. When Claude tries `git log -n 5`, the hook returns:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow",
+    "updatedInput": { "command": "engraph run git log -n 5" }
+  }
+}
+```
+
+Claude Code substitutes the new command before running it. The rewrite is invisible to Claude's reasoning loop — it sees the wrapped command in the transcript with the compressed output. PostToolUse hooks cannot replace tool results (they can only append), so this PreToolUse-rewrite pattern is the only path to transparent compression inside Claude Code.
+
+Compound commands (`cd /tmp && git log`, `git log | head`, env-prefixed forms) fall back to a deny+suggest decision pointing Claude at the wrappable subcommand. Quoted args with spaces or shell metacharacters are preserved through `shell-words` quoting.
 
 ## Storage
 

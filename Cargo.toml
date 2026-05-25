@@ -37,6 +37,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 dirs = "5"
 sha2 = "0.10"
 regex = "1"
+shell-words = "1"
 
 [profile.release]
 lto = "thin"
