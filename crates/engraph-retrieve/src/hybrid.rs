@@ -1,6 +1,7 @@
 //! Hybrid retrieval: Reciprocal Rank Fusion (RRF) over a lexical ranking
-//! (BM25 from FTS5) and a semantic ranking (cosine over stored embeddings).
-//! Gated behind the `embeddings` Cargo feature.
+//! (BM25 from FTS5), a semantic ranking (cosine over stored embeddings), and
+//! a recency ranking (newest `ts` first). Gated behind the `embeddings`
+//! Cargo feature.
 //!
 //! ## Algorithm
 //!
@@ -10,7 +11,7 @@
 //! rather than scores. For each candidate document `d`:
 //!
 //! ```text
-//! rrf_score(d) = w_lex / (k + rank_lex(d)) + w_sem / (k + rank_sem(d))
+//! rrf_score(d) = w_lex / (k + rank_lex(d)) + w_sem / (k + rank_sem(d)) + w_rec / (k + rank_rec(d))
 //! ```
 //!
 //! Constants:
@@ -18,18 +19,23 @@
 //!   (SIGIR 2009). Larger `k` flattens the weighting of the top of each list.
 //! - `w_lex = W_LEXICAL = 1.0` — weight applied to the BM25/FTS ranking.
 //! - `w_sem = W_SEMANTIC = 1.0` — weight applied to the embedding-cosine ranking.
+//! - `w_rec = W_RECENCY = 0.5` — weight applied to the recency ranking. Lower
+//!   default than the content signals because freshness alone should not beat
+//!   content matches; it's a tiebreaker, not a primary signal.
 //!
 //! Documents missing from a list contribute zero to that term (RRF handles
-//! missing positions naturally — equivalent to rank = ∞).
+//! missing positions naturally — equivalent to rank = ∞). Candidates without
+//! a `ts` are treated as missing from the recency list.
 //!
 //! ## Pipeline
 //! 1. Run the FTS5 path with a `q.limit * CANDIDATE_MULT` candidate pool.
 //! 2. Embed the query text once; fetch stored vectors for every candidate
 //!    under the current model id; rank candidates by cosine descending.
-//! 3. Compute RRF score per candidate by combining its FTS rank and its
-//!    cosine rank (1-based; missing → contributes 0 for that source).
-//! 4. Sort by RRF score descending; stable secondary sort by `target_id`.
-//! 5. Truncate to `q.limit`.
+//! 3. Rank candidates by `ts` descending (RFC3339 ISO sorts chronologically).
+//! 4. Compute RRF score per candidate by combining its FTS, cosine, and
+//!    recency ranks (1-based; missing → contributes 0 for that source).
+//! 5. Sort by RRF score descending; stable secondary sort by `target_id`.
+//! 6. Truncate to `q.limit`.
 
 use crate::{search, Hit, Query, ScopeFilter, Strategy};
 use engraph_core::{
@@ -45,6 +51,9 @@ pub const K_RRF: f64 = 60.0;
 pub const W_LEXICAL: f64 = 1.0;
 /// Weight on the semantic (embedding-cosine) ranking.
 pub const W_SEMANTIC: f64 = 1.0;
+/// Weight on the recency ranking (newest `ts` first). Half the weight of the
+/// content signals: freshness is a tiebreaker, not a primary criterion.
+pub const W_RECENCY: f64 = 0.5;
 /// Pull this many candidates from the FTS stage per output slot. Larger pools
 /// give the semantic reranker more headroom at the cost of more embedding
 /// lookups.
@@ -112,6 +121,23 @@ pub fn search_hybrid(
         .map(|(i, (key, _))| (key.clone(), i + 1))
         .collect();
 
+    // Step 3b: recency rank. Newest `ts` first; RFC3339 strings sort
+    // chronologically, so a lexicographic descending sort is correct.
+    // Candidates without a `ts` are absent from the recency list (rank = ∞).
+    let mut rec_scored: Vec<((String, String), &str)> = candidates
+        .iter()
+        .filter_map(|h| {
+            h.ts.as_deref()
+                .map(|ts| ((h.target_kind.clone(), h.target_id.clone()), ts))
+        })
+        .collect();
+    rec_scored.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0 .1.cmp(&b.0 .1)));
+    let rec_rank: std::collections::HashMap<(String, String), usize> = rec_scored
+        .into_iter()
+        .enumerate()
+        .map(|(i, (key, _))| (key, i + 1))
+        .collect();
+
     // Step 4: RRF score per candidate. Missing source → 0 contribution.
     let mut hits: Vec<Hit> = candidates
         .into_iter()
@@ -125,7 +151,11 @@ pub fn search_hybrid(
                 .get(&key)
                 .map(|r| W_SEMANTIC / (K_RRF + *r as f64))
                 .unwrap_or(0.0);
-            h.score = l + s;
+            let r = rec_rank
+                .get(&key)
+                .map(|r| W_RECENCY / (K_RRF + *r as f64))
+                .unwrap_or(0.0);
+            h.score = l + s + r;
             h
         })
         .collect();

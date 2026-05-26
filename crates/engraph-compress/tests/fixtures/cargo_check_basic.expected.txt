@@ -1,0 +1,3 @@
+warning: unused variable: `x`
+   --> src/lib.rs:10:9
+[engraph: 1 warnings, 0 errors, exit 0]

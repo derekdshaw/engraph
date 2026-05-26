@@ -15,7 +15,7 @@ Six phases of the implementation plan are shipped:
 | Deterministic compressor (F6) | `engraph-compress` | `engraph compress` |
 | Per-command Bash wrappers (F1) | `engraph-compress::filters` | `engraph run` |
 | PreToolUse(Bash) auto-rewrite + deny fallback | `engraph-cli` | `engraph hook pre-bash` |
-| JSONL ingest with rotation guard | `engraph-ingest` | `engraph ingest` |
+| JSONL ingest with rotation guard, sidechain filtering, per-file transactional commit | `engraph-ingest` | `engraph ingest` |
 | FTS5 + scoped retrieval + KG (F3) | `engraph-retrieve` | `engraph recall` |
 | SessionStart auto-context inject (F4) | `engraph-cli` | `engraph hook session-start` |
 | Compress-existing sweep | `engraph-ingest` | `engraph compress-existing` |
@@ -41,6 +41,8 @@ The `engraph run` registry (and the auto-rewrite hook) recognizes:
 | Listings | `tree`, `fd`, `ls` |
 
 Unrecognized commands route through a generic fallback that strips ANSI, dedupes consecutive lines, and applies extractive ranking. Adding a new filter is a single function in `crates/engraph-compress/src/filters/` plus an arm in `filters::pick`.
+
+The cargo test wrapper recognizes both libtest (`test foo ... ok` / `---- foo stdout ----`) and cargo-nextest (`PASS [   0.005s] pkg test` / `FAIL [   0.005s] pkg test`) output, so passing test lines are dropped and failure counts are accurate against either runner.
 
 ## Install
 
@@ -92,7 +94,7 @@ Compound commands (`cd /tmp && git log`, `git log | head`, env-prefixed forms) f
 
 ## Storage
 
-One SQLite DB, WAL mode, schema migrations under `engraph-core/src/schema.rs`.
+One SQLite DB, WAL mode, schema migrations under `engraph-core/src/schema.rs`. Current schema version is `5`. The v5 migration drops the `AFTER UPDATE` triggers on `messages` and `context_items`, so in-place compression via `engraph compress-existing` no longer overwrites the FTS index — recall continues to hit the user's original phrasing after a sweep.
 
 | Table | Purpose |
 |---|---|
@@ -118,6 +120,8 @@ TOTAL_SAVED                                                    8684
 ```
 
 `saved_tk` is only meaningful for kinds where input represents the pre-compression size (`compress`, `wrapped_cmd`); other kinds show `-`.
+
+When `CLAUDE_SESSION_ID` is set in the environment of an `engraph run` invocation, the post-filter output token count is also charged to that session's `session_budget` row — so `engraph budget status --session-id <sid>` reflects real consumption from wrapped commands. Running outside a Claude session (no env var) skips the budget charge.
 
 ## Hybrid retrieval (semantic + lexical)
 
@@ -154,6 +158,7 @@ Constants used by Engraph:
 | `K_RRF` | `60.0` | Smoothing — the standard value from the RRF paper. Larger `k` flattens the bonus for top-of-list documents. |
 | `W_LEXICAL` | `1.0` | Weight on the BM25 ranking. |
 | `W_SEMANTIC` | `1.0` | Weight on the embedding-cosine ranking. |
+| `W_RECENCY` | `0.5` | Weight on the recency ranking (newest `ts` first). Half the content weight: freshness is a tiebreaker, not a primary signal. |
 | `CANDIDATE_MULT` | `4` | The FTS stage pulls `q.limit * 4` candidates so the reranker has headroom. |
 
 Why this works:
@@ -161,7 +166,7 @@ Why this works:
 - **Robust to missing data.** A document with no embedding still gets its full lexical contribution; nothing collapses to zero.
 - **Composable.** Adding a third source (e.g., recency) is just another term in the sum.
 
-The maximum achievable score is `(W_LEXICAL + W_SEMANTIC) / (K_RRF + 1)` ≈ `0.0328` with the defaults — a document ranked first in both sources.
+The maximum achievable score is `(W_LEXICAL + W_SEMANTIC + W_RECENCY) / (K_RRF + 1)` ≈ `0.0410` with the defaults — a document ranked first in all three sources.
 
 ### Pipeline
 
@@ -197,7 +202,12 @@ engraph recall --hybrid "auth flow"
 
 ### Future signals
 
-The RRF combinator is intentionally open-ended. The natural next signal is recency — a third source list ranking candidates by `exp(−age / τ)` and joining it into the same `Σ w_i / (k + rank_i(d))` formula. The plan reserves this; it isn't wired today because raw `ts` recency on synthetic test data has no meaningful signal yet.
+The RRF combinator is intentionally open-ended. Recency is wired in today as a
+third source list (`W_RECENCY = 0.5`), ranking candidates by `ts` descending
+(RFC3339 strings sort chronologically). Candidates without a `ts` are treated
+as missing from the recency list. Natural future signals — engagement, scope
+proximity, author — would each enter as one more term in the same
+`Σ w_i / (k + rank_i(d))` formula.
 
 ## Reading the events table
 
@@ -254,11 +264,13 @@ cargo clippy --all-targets --features embeddings -- -D warnings
 
 The plan's verification gates are wired as tests:
 - `engraph-compress/tests/git_log_ratio.rs` — F6 ratio < 0.5 on a 2k-line git log
-- `engraph-compress/tests/filter_ratios.rs` — per-filter token-reduction gates
+- `engraph-compress/tests/filter_ratios.rs` — per-filter token-reduction gates, plus a picker/`FilterOutput.filter_id` agreement check that pins every wrapped command
+- `engraph-compress/tests/golden_fixtures.rs` — byte-exact snapshot tests for high-signal filters (`git log`, `cargo check`, `cargo test` against nextest output) to catch format drift
 - `engraph-retrieve/tests/end_to_end.rs` — ingest + recall, scope restriction, KG entity search
-- `engraph-retrieve/tests/hybrid_path.rs` — RRF reordering vs FTS, unembedded-candidate fallback, idempotent upsert
-- `engraph-ingest/src/lib.rs` (unit) — incremental re-ingest, rotation/truncation replay, sweep idempotency and recoverability
+- `engraph-retrieve/tests/hybrid_path.rs` — RRF reordering vs FTS, recency tiebreak toward newer `ts`, unembedded-candidate fallback, idempotent upsert
+- `engraph-ingest/src/lib.rs` (unit) — incremental re-ingest, rotation/truncation replay, mid-write partial-line hold, sidechain event filtering, sweep idempotency and recoverability, FTS-retention through `compress_existing`
 - `engraph-cli/tests/session_start_hook.rs` — empty brief on unknown project, populated brief includes rules/bugs, size cap respected
+- `engraph-cli/tests/run_budget.rs` — `engraph run` charges `session_budget` when `CLAUDE_SESSION_ID` is set, no-ops cleanly when not
 
 ## License
 

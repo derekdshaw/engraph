@@ -205,10 +205,11 @@ fn main() -> Result<()> {
                 tokens::count(&stdout) as i64 + tokens::count(&stderr) as i64;
             let output_tokens = tokens::count(&result.text) as i64;
             let elapsed = start.elapsed().as_millis() as i64;
+            let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
             telemetry::record_event(
                 &conn,
                 EventInput {
-                    session_id: std::env::var("CLAUDE_SESSION_ID").ok().as_deref(),
+                    session_id: session_id.as_deref(),
                     kind: EventKind::WrappedCmd,
                     feature: "F1",
                     filter_id: Some(filter_id),
@@ -217,6 +218,13 @@ fn main() -> Result<()> {
                     latency_ms: elapsed,
                 },
             )?;
+            // Charge the budget the post-filter cost — what actually lands in
+            // Claude's context. Pre-filter input is recorded for telemetry but
+            // never gets sent. No session id (CLI run outside a Claude session)
+            // means budget enforcement is opted out for that invocation.
+            if let Some(sid) = session_id.as_deref() {
+                budget::add_used(&conn, sid, output_tokens)?;
+            }
 
             print!("{}", result.text);
             std::process::exit(exit_code);
@@ -446,13 +454,6 @@ fn run_session_start_hook(conn: &db::PooledConn) -> Result<()> {
                 signal_sections.push(format!("- {r}"));
             }
         }
-        let decisions = recent_decisions(conn, cwd, 5)?;
-        if !decisions.is_empty() {
-            signal_sections.push("## recent decisions".to_string());
-            for d in decisions {
-                signal_sections.push(format!("- {d}"));
-            }
-        }
         let bugs = open_bugs(conn, cwd, 5)?;
         if !bugs.is_empty() {
             signal_sections.push("## open bugs".to_string());
@@ -533,23 +534,6 @@ fn truncate_to_bytes(s: &str, max: usize) -> String {
     let mut out = s[..cut].to_string();
     out.push_str(TRUNCATE_MARKER);
     out
-}
-
-fn recent_decisions(conn: &db::PooledConn, project: &str, limit: i64) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT c.content FROM context_items c
-         JOIN scope_members sm ON sm.target_kind = 'context_item' AND sm.target_id = c.id
-         JOIN scopes s ON s.id = sm.scope_id AND s.kind = 'project' AND s.name = ?1
-         WHERE c.kind IN ('decision','note')
-         ORDER BY c.ts DESC LIMIT ?2",
-    )?;
-    let out = stmt
-        .query_map(rusqlite::params![project, limit], |r| {
-            let content: String = r.get(0)?;
-            Ok(content.chars().take(180).collect::<String>())
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(out)
 }
 
 fn recent_do_not_repeat(

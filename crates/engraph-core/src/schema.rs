@@ -198,6 +198,17 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE ingestion_log ADD COLUMN last_inode INTEGER;
     ALTER TABLE ingestion_log ADD COLUMN last_size INTEGER;
     "#,
+    // v5 — drop the AFTER UPDATE triggers on messages / context_items so that
+    // in-place compression (engraph compress-existing) does NOT replace the
+    // original text in the FTS index. Recall continues to hit the user's
+    // original phrasing after compression. The INSERT trigger still indexes
+    // new rows, and the DELETE trigger still removes them; only UPDATE is
+    // intentionally non-propagating. SQLite rowids are stable across UPDATEs
+    // when the primary key (TEXT) is unchanged, so FTS stays anchored.
+    r#"
+    DROP TRIGGER IF EXISTS messages_au;
+    DROP TRIGGER IF EXISTS context_items_au;
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {

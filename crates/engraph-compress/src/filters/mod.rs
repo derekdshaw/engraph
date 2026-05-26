@@ -47,7 +47,7 @@ pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
         // cargo / rust
         ("cargo", "test") => (cargo::test, "cargo_test"),
         ("cargo", "build") => (cargo::build, "cargo_build"),
-        ("cargo", "check") => (cargo::build, "cargo_check"),
+        ("cargo", "check") => (cargo::check, "cargo_check"),
         ("cargo", "clippy") => (cargo::clippy, "cargo_clippy"),
         ("cargo", "doc") => (cargo::doc, "cargo_doc"),
         ("cargo", "bench") => (cargo::bench, "cargo_bench"),

@@ -108,12 +108,64 @@ fn hybrid_reorders_vs_fts() {
         "m_pure should outrank off-axis rows; got {hits_hybrid:?}"
     );
 
-    // RRF score bound: with W_LEXICAL = W_SEMANTIC = 1 and best rank = 1,
-    // any score is at most 2 / (K_RRF + 1).
-    let max_rrf = 2.0 / (engraph_retrieve::hybrid::K_RRF + 1.0);
+    // RRF score bound: with W_LEXICAL = W_SEMANTIC = 1, W_RECENCY = 0.5 and
+    // best rank = 1 in every source, any score is at most
+    // (W_LEXICAL + W_SEMANTIC + W_RECENCY) / (K_RRF + 1).
+    use engraph_retrieve::hybrid::{K_RRF, W_LEXICAL, W_RECENCY, W_SEMANTIC};
+    let max_rrf = (W_LEXICAL + W_SEMANTIC + W_RECENCY) / (K_RRF + 1.0);
     for h in &hits_hybrid {
         assert!(h.score <= max_rrf + 1e-9, "score {} > {}", h.score, max_rrf);
     }
+}
+
+#[test]
+fn hybrid_recency_tiebreaks_toward_newer() {
+    // Two messages with identical content. Content signals (FTS and semantic)
+    // are essentially tied; recency must surface the newer message first.
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("rec.db")).unwrap();
+    let conn = pool.get().unwrap();
+    conn.execute(
+        "INSERT INTO sessions (id, project, cwd, started_at) VALUES ('s','/p','/p','t')",
+        [],
+    )
+    .unwrap();
+    // Newer id is lexically LATER on purpose so a no-recency tiebreaker
+    // (alphabetical target_id) would order them old-first. With recency wired,
+    // ts wins.
+    conn.execute(
+        "INSERT INTO messages (id, session_id, role, content, ts)
+         VALUES ('a_old','s','user','login session manager','2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO messages (id, session_id, role, content, ts)
+         VALUES ('z_new','s','user','login session manager','2026-05-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    let provider = MockProvider;
+    reindex_messages(&conn, &provider, 100).unwrap();
+
+    let hits = search_hybrid(
+        &conn,
+        &Query {
+            text: "login",
+            scope: ScopeFilter::All,
+            kinds: &[Target::Messages],
+            limit: 5,
+            strategy: Strategy::Hybrid,
+        },
+        &provider,
+    )
+    .unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(
+        hits[0].target_id, "z_new",
+        "newer ts must rank first; got {hits:?}"
+    );
+    assert!(hits[0].score > hits[1].score, "recency must yield a strictly higher score for the newer doc");
 }
 
 #[test]

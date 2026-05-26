@@ -1,0 +1,5 @@
+        Starting 3 tests across 1 binary
+        FAIL [   0.010s] my_crate test_c
+------------
+     Summary [   0.011s] 3 tests run: 2 passed, 1 failed
+[engraph: tests 3 (passed 2, failed 1, ignored 0), exit 1]

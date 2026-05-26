@@ -1,0 +1,13 @@
+commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+Author: Dev <d@x>
+Date: Mon Jan 1 12:00:00 2026 -0700
+
+    Fix the parser
+
+commit bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+Author: Dev <d@x>
+Date: Mon Jan 1 12:00:00 2026 -0700
+
+    Add tests
+    extra body line that should be dropped
+

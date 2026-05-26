@@ -1,6 +1,6 @@
 //! Integration tests for the SessionStart hook (Phase 4):
 //! - Empty project / empty budget → empty additionalContext
-//! - Project with do-not-repeat / bugs / decisions → brief contains them
+//! - Project with do-not-repeat / bugs → brief contains them
 //! - Brief stays under MAX_BRIEF_BYTES
 
 use std::io::Write;

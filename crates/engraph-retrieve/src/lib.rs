@@ -110,15 +110,17 @@ fn search_messages(
     scope_ids: Option<&[String]>,
     limit: usize,
 ) -> Result<Vec<Hit>> {
+    use rusqlite::types::Value;
     let base = "
         SELECT m.id, m.session_id, m.content, m.ts, bm25(messages_fts) AS rank
         FROM messages_fts
         JOIN messages m ON m.rowid = messages_fts.rowid
     ";
+    let limit_val = Value::Integer(limit as i64);
     let (sql, params) = match scope_ids {
         None => (
             format!("{base} WHERE messages_fts MATCH ?1 ORDER BY rank LIMIT ?2"),
-            vec![fts_q.to_string(), limit.to_string()],
+            vec![Value::Text(fts_q.to_string()), limit_val],
         ),
         Some([]) => return Ok(vec![]),
         Some(ids) => {
@@ -130,9 +132,9 @@ fn search_messages(
                 q_idx = ids.len() + 1,
                 lim_idx = ids.len() + 2,
             );
-            let mut p: Vec<String> = ids.to_vec();
-            p.push(fts_q.to_string());
-            p.push(limit.to_string());
+            let mut p: Vec<Value> = ids.iter().map(|i| Value::Text(i.clone())).collect();
+            p.push(Value::Text(fts_q.to_string()));
+            p.push(limit_val);
             (q, p)
         }
     };
@@ -160,15 +162,17 @@ fn search_context_items(
     scope_ids: Option<&[String]>,
     limit: usize,
 ) -> Result<Vec<Hit>> {
+    use rusqlite::types::Value;
     let base = "
         SELECT c.id, c.session_id, c.content, c.ts, bm25(context_items_fts) AS rank
         FROM context_items_fts
         JOIN context_items c ON c.rowid = context_items_fts.rowid
     ";
+    let limit_val = Value::Integer(limit as i64);
     let (sql, params) = match scope_ids {
         None => (
             format!("{base} WHERE context_items_fts MATCH ?1 ORDER BY rank LIMIT ?2"),
-            vec![fts_q.to_string(), limit.to_string()],
+            vec![Value::Text(fts_q.to_string()), limit_val],
         ),
         Some([]) => return Ok(vec![]),
         Some(ids) => {
@@ -180,9 +184,9 @@ fn search_context_items(
                 q_idx = ids.len() + 1,
                 lim_idx = ids.len() + 2,
             );
-            let mut p: Vec<String> = ids.to_vec();
-            p.push(fts_q.to_string());
-            p.push(limit.to_string());
+            let mut p: Vec<Value> = ids.iter().map(|i| Value::Text(i.clone())).collect();
+            p.push(Value::Text(fts_q.to_string()));
+            p.push(limit_val);
             (q, p)
         }
     };

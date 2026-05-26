@@ -340,3 +340,35 @@ fn unknown_command_falls_back_to_generic() {
     let (_, id) = filters::pick("totally-made-up", &args);
     assert_eq!(id, "generic");
 }
+
+#[test]
+fn picker_and_filter_output_agree_on_filter_id() {
+    // Regression: the picker's id and the FilterOutput.filter_id must match
+    // for every wrapped command. A drift here was the cargo_check / cargo_build
+    // mismatch flagged in the v1 review.
+    let cases: &[(&str, &[&str], &str)] = &[
+        ("cargo", &["build"], "cargo_build"),
+        ("cargo", &["check"], "cargo_check"),
+        ("cargo", &["clippy"], "cargo_clippy"),
+        ("cargo", &["doc"], "cargo_doc"),
+        ("cargo", &["test"], "cargo_test"),
+        ("cargo", &["bench"], "cargo_bench"),
+        ("cargo", &["audit"], "cargo_audit"),
+        ("cargo", &["tree"], "cargo_tree"),
+        ("git", &["log"], "git_log"),
+        ("git", &["diff"], "git_diff"),
+        ("git", &["status"], "git_status"),
+        ("git", &["show"], "git_show"),
+    ];
+    for (cmd, args, expected) in cases {
+        let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let (filter_fn, picker_id) = filters::pick(cmd, &args_owned);
+        assert_eq!(picker_id, *expected, "picker id mismatch for {cmd} {args:?}");
+        let out = filter_fn(&ctx(cmd, &args_owned, ""));
+        assert_eq!(
+            out.filter_id, picker_id,
+            "FilterOutput.filter_id ({}) != picker id ({}) for {cmd} {args:?}",
+            out.filter_id, picker_id,
+        );
+    }
+}

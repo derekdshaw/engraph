@@ -1,0 +1,5 @@
+   Compiling foo v0.1.0
+   Checking foo v0.1.0
+warning: unused variable: `x`
+   --> src/lib.rs:10:9
+    Finished `dev` profile [unoptimized] target(s) in 1.23s

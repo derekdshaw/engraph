@@ -1,0 +1,6 @@
+        Starting 3 tests across 1 binary
+        PASS [   0.005s] my_crate test_a
+        PASS [   0.006s] my_crate test_b
+        FAIL [   0.010s] my_crate test_c
+------------
+     Summary [   0.011s] 3 tests run: 2 passed, 1 failed
