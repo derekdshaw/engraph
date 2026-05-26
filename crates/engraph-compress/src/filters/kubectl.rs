@@ -47,18 +47,14 @@ pub fn describe(ctx: &FilterCtx<'_>) -> FilterOutput {
     let mut out = String::with_capacity(text.len() / 2);
     let mut in_dropped_section = false;
     for line in text.lines() {
-        let is_header = !line.is_empty()
-            && !line.starts_with(' ')
-            && line.contains(':');
+        let is_header = !line.is_empty() && !line.starts_with(' ') && line.contains(':');
         if is_header {
             let header = line.split_whitespace().next().unwrap_or("");
             if drop_sections.iter().any(|h| line.starts_with(h)) {
                 in_dropped_section = true;
                 continue;
             }
-            if keep_sections.iter().any(|h| line.starts_with(h))
-                || header.ends_with(':')
-            {
+            if keep_sections.iter().any(|h| line.starts_with(h)) || header.ends_with(':') {
                 in_dropped_section = false;
                 out.push_str(line);
                 out.push('\n');
@@ -70,7 +66,10 @@ pub fn describe(ctx: &FilterCtx<'_>) -> FilterOutput {
             out.push('\n');
         }
     }
-    out.push_str(&format!("[engraph: kubectl describe trimmed, exit {}]\n", ctx.exit_code));
+    out.push_str(&format!(
+        "[engraph: kubectl describe trimmed, exit {}]\n",
+        ctx.exit_code
+    ));
     FilterOutput {
         text: out,
         filter_id: "kubectl_describe",

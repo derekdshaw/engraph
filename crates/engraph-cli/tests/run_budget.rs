@@ -47,7 +47,10 @@ fn wrapped_run_charges_session_budget() {
             |r| r.get(0),
         )
         .unwrap();
-    assert!(used > 0, "expected non-zero used_tokens after `engraph run`, got {used}");
+    assert!(
+        used > 0,
+        "expected non-zero used_tokens after `engraph run`, got {used}"
+    );
 
     // events table should also have the wrapped_cmd row.
     let count: i64 = conn

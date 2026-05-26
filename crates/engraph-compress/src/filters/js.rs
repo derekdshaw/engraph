@@ -6,9 +6,8 @@ use std::sync::OnceLock;
 pub fn yarn_install(ctx: &FilterCtx<'_>) -> FilterOutput {
     let text = combine(ctx.stdout, ctx.stderr);
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"^\[\d+/\d+\] (Resolving|Fetching|Linking|Building)").unwrap()
-    });
+    let re = RE
+        .get_or_init(|| Regex::new(r"^\[\d+/\d+\] (Resolving|Fetching|Linking|Building)").unwrap());
     let (filtered, dropped) = drop_matching(&text, re);
     let mut out = filtered;
     out.push_str(&format!(

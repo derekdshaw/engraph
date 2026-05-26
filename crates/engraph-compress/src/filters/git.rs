@@ -62,7 +62,15 @@ fn is_subject_line(stripped: &str) -> bool {
     if stripped.is_empty() {
         return false;
     }
-    for prefix in ["Author:", "AuthorDate:", "Date:", "CommitDate:", "Commit:", "Merge:", "Refs:"] {
+    for prefix in [
+        "Author:",
+        "AuthorDate:",
+        "Date:",
+        "CommitDate:",
+        "Commit:",
+        "Merge:",
+        "Refs:",
+    ] {
         if stripped.starts_with(prefix) {
             return false;
         }
@@ -94,23 +102,21 @@ pub fn diff(ctx: &FilterCtx<'_>) -> FilterOutput {
     let mut added = 0_u32;
     let mut removed = 0_u32;
     let mut hunk_preview: Option<String> = None;
-    let flush_hunk = |out: &mut String,
-                     added: &mut u32,
-                     removed: &mut u32,
-                     preview: &mut Option<String>| {
-        if *added > 0 || *removed > 0 {
-            out.push_str(&format!(
-                "  +{added} -{removed}{}\n",
-                preview
-                    .as_ref()
-                    .map(|p| format!(" :: {}", truncate(p, 80)))
-                    .unwrap_or_default(),
-            ));
-        }
-        *added = 0;
-        *removed = 0;
-        *preview = None;
-    };
+    let flush_hunk =
+        |out: &mut String, added: &mut u32, removed: &mut u32, preview: &mut Option<String>| {
+            if *added > 0 || *removed > 0 {
+                out.push_str(&format!(
+                    "  +{added} -{removed}{}\n",
+                    preview
+                        .as_ref()
+                        .map(|p| format!(" :: {}", truncate(p, 80)))
+                        .unwrap_or_default(),
+                ));
+            }
+            *added = 0;
+            *removed = 0;
+            *preview = None;
+        };
     for line in ctx.stdout.lines() {
         if line.starts_with("diff --git") || line.starts_with("--- ") || line.starts_with("+++ ") {
             if in_hunk {

@@ -9,7 +9,10 @@ pub fn make(ctx: &FilterCtx<'_>) -> FilterOutput {
     let re = RE.get_or_init(|| {
         // Drop "Entering/Leaving directory" + recipe-line echoes (lines starting
         // with a compiler invocation we recognize).
-        Regex::new(r"^(make\[\d+\]: (Entering|Leaving) directory|cc -c |g\+\+ -c |gcc -c |clang -c )").unwrap()
+        Regex::new(
+            r"^(make\[\d+\]: (Entering|Leaving) directory|cc -c |g\+\+ -c |gcc -c |clang -c )",
+        )
+        .unwrap()
     });
     let (filtered, dropped) = drop_matching(&text, re);
     let mut out = filtered;

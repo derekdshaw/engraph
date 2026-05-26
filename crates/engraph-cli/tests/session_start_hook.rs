@@ -42,7 +42,10 @@ fn empty_project_emits_empty_additional_context() {
         .pointer("/hookSpecificOutput/additionalContext")
         .and_then(|c| c.as_str())
         .unwrap();
-    assert_eq!(body, "", "expected empty brief on unknown project, got: {body}");
+    assert_eq!(
+        body, "",
+        "expected empty brief on unknown project, got: {body}"
+    );
 }
 
 #[test]
@@ -93,7 +96,10 @@ fn brief_respects_max_bytes() {
     for i in 0..100 {
         conn.execute(
             "INSERT INTO do_not_repeat (id, project, rule) VALUES (?1, '/big', ?2)",
-            rusqlite::params![format!("d{i}"), format!("rule number {i} that takes a fair number of characters")],
+            rusqlite::params![
+                format!("d{i}"),
+                format!("rule number {i} that takes a fair number of characters")
+            ],
         )
         .unwrap();
     }

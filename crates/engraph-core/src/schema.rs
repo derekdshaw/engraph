@@ -239,10 +239,7 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()> {
         }
         let tx = conn.transaction()?;
         tx.execute_batch(sql)?;
-        tx.execute(
-            "INSERT INTO migrations (version) VALUES (?1)",
-            [target],
-        )?;
+        tx.execute("INSERT INTO migrations (version) VALUES (?1)", [target])?;
         tx.commit()?;
         tracing::info!(version = target, "applied migration");
     }

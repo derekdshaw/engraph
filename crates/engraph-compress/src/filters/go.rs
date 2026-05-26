@@ -7,9 +7,7 @@ use std::sync::OnceLock;
 pub fn test(ctx: &FilterCtx<'_>) -> FilterOutput {
     let text = combine(ctx.stdout, ctx.stderr);
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"^(=== (RUN|PAUSE|CONT)|--- PASS:|PASS$)").unwrap()
-    });
+    let re = RE.get_or_init(|| Regex::new(r"^(=== (RUN|PAUSE|CONT)|--- PASS:|PASS$)").unwrap());
     let (filtered, _dropped) = drop_matching(&text, re);
     let mut ok_pkgs = 0_u32;
     let mut fail_pkgs = 0_u32;
@@ -63,9 +61,8 @@ pub fn vet(ctx: &FilterCtx<'_>) -> FilterOutput {
 pub fn mod_tidy(ctx: &FilterCtx<'_>) -> FilterOutput {
     let text = combine(ctx.stdout, ctx.stderr);
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"^go: (downloading|finding|extracting|upgraded) ").unwrap()
-    });
+    let re =
+        RE.get_or_init(|| Regex::new(r"^go: (downloading|finding|extracting|upgraded) ").unwrap());
     let (filtered, dropped) = drop_matching(&text, re);
     let mut out = filtered;
     out.push_str(&format!(

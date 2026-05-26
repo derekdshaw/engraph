@@ -63,7 +63,10 @@ struct TxGuard<'a> {
 impl<'a> TxGuard<'a> {
     fn begin(conn: &'a PooledConn) -> Result<Self> {
         conn.execute_batch("BEGIN")?;
-        Ok(Self { conn, finished: false })
+        Ok(Self {
+            conn,
+            finished: false,
+        })
     }
 
     fn commit(mut self) -> Result<()> {
@@ -112,12 +115,7 @@ pub fn compress_existing(conn: &PooledConn, batch: usize) -> Result<SweepStats> 
     Ok(stats)
 }
 
-fn sweep_table(
-    conn: &PooledConn,
-    table: &str,
-    batch: usize,
-    stats: &mut SweepStats,
-) -> Result<()> {
+fn sweep_table(conn: &PooledConn, table: &str, batch: usize, stats: &mut SweepStats) -> Result<()> {
     // Read candidate rows in one prepared statement, then update in a loop.
     // `batch` caps the number of rows processed per call.
     let select_sql = format!(
@@ -148,7 +146,11 @@ fn sweep_table(
         if original_tokens < COMPRESS_THRESHOLD_TOKENS {
             // Below threshold — still mark as compressed so we don't re-scan
             // the same rows every sweep.
-            update.execute(rusqlite::params![rowid, content, sha256(content.as_bytes())])?;
+            update.execute(rusqlite::params![
+                rowid,
+                content,
+                sha256(content.as_bytes())
+            ])?;
             continue;
         }
         let r = compress(CompressInput {
@@ -245,7 +247,14 @@ pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
 
     if (last_offset as u64) >= total_size {
         // Still record the up-to-date fingerprint so a later append sees fresh metadata.
-        write_ingestion_log(conn, &abs_str, last_offset, current_inode, total_size as i64, &meta)?;
+        write_ingestion_log(
+            conn,
+            &abs_str,
+            last_offset,
+            current_inode,
+            total_size as i64,
+            &meta,
+        )?;
         return Ok(IngestStats {
             messages_inserted: 0,
             messages_compressed: 0,
@@ -337,8 +346,7 @@ pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
             .and_then(|m| m.role.as_deref())
             .unwrap_or(kind);
 
-        let (stored, compressed_flag, orig_tokens, comp_tokens) =
-            maybe_compress(&content_str)?;
+        let (stored, compressed_flag, orig_tokens, comp_tokens) = maybe_compress(&content_str)?;
         if compressed_flag {
             messages_compressed += 1;
         }
@@ -586,7 +594,10 @@ mod tests {
         // Without rotation handling, this would return 0 inserted; with the fix,
         // the new content gets re-ingested from offset 0.
         let s2 = ingest_file(&conn, &jp).unwrap();
-        assert_eq!(s2.messages_inserted, 1, "rotation should replay the new file");
+        assert_eq!(
+            s2.messages_inserted, 1,
+            "rotation should replay the new file"
+        );
 
         let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
@@ -603,7 +614,9 @@ mod tests {
         let jp = dir.path().join("t.jsonl");
         write_jsonl(
             &jp,
-            &[r#"{"type":"user","sessionId":"s","cwd":"/p","timestamp":"t","uuid":"a","message":{"role":"user","content":"one"}}"#],
+            &[
+                r#"{"type":"user","sessionId":"s","cwd":"/p","timestamp":"t","uuid":"a","message":{"role":"user","content":"one"}}"#,
+            ],
         );
         let s1 = ingest_file(&conn, &jp).unwrap();
         assert_eq!(s1.messages_inserted, 1);
@@ -652,7 +665,10 @@ mod tests {
         .unwrap();
         let stats = compress_existing(&conn, 100).unwrap();
         assert_eq!(stats.rows_scanned, 2);
-        assert_eq!(stats.rows_compressed, 1, "only the large row should compress");
+        assert_eq!(
+            stats.rows_compressed, 1,
+            "only the large row should compress"
+        );
         assert!(stats.bytes_after < stats.bytes_before);
 
         // Second pass: idempotent, nothing left to scan.
@@ -706,9 +722,14 @@ mod tests {
         // After compression the stored content has shrunk, but the FTS row
         // still holds the original — recall still hits.
         let stored: String = conn
-            .query_row("SELECT content FROM messages WHERE id = 'm'", [], |r| r.get(0))
+            .query_row("SELECT content FROM messages WHERE id = 'm'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert!(stored.len() < large.len(), "content should be smaller after compress");
+        assert!(
+            stored.len() < large.len(),
+            "content should be smaller after compress"
+        );
         let post: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?1",
@@ -716,7 +737,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(post, 1, "FTS must still match original phrase after compression");
+        assert_eq!(
+            post, 1,
+            "FTS must still match original phrase after compression"
+        );
     }
 
     #[test]
@@ -738,7 +762,11 @@ mod tests {
         .unwrap();
         compress_existing(&conn, 100).unwrap();
         let stored_hash: Vec<u8> = conn
-            .query_row("SELECT content_hash FROM messages WHERE id = 'm'", [], |r| r.get(0))
+            .query_row(
+                "SELECT content_hash FROM messages WHERE id = 'm'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(stored_hash, expected_hash);
     }
@@ -763,7 +791,10 @@ mod tests {
             f.write_all(partial_head.as_bytes()).unwrap();
         }
         let s1 = ingest_file(&conn, &jp).unwrap();
-        assert_eq!(s1.messages_inserted, 1, "only the complete line should ingest");
+        assert_eq!(
+            s1.messages_inserted, 1,
+            "only the complete line should ingest"
+        );
         let offset1: i64 = conn
             .query_row(
                 "SELECT last_offset FROM ingestion_log WHERE jsonl_path = ?1",
@@ -771,7 +802,11 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(offset1, (full.len() + 1) as i64, "offset must stop at end of completed line");
+        assert_eq!(
+            offset1,
+            (full.len() + 1) as i64,
+            "offset must stop at end of completed line"
+        );
 
         // Now the writer completes the partial line. Re-ingest must pick it up.
         let tail = r#"d":"u2","message":{"role":"user","content":"completed two"}}"#;
@@ -782,7 +817,10 @@ mod tests {
             writeln!(f).unwrap();
         }
         let s2 = ingest_file(&conn, &jp).unwrap();
-        assert_eq!(s2.messages_inserted, 1, "completed second line must ingest on next run");
+        assert_eq!(
+            s2.messages_inserted, 1,
+            "completed second line must ingest on next run"
+        );
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
             .unwrap();
@@ -804,7 +842,10 @@ mod tests {
             ],
         );
         let s = ingest_file(&conn, &jp).unwrap();
-        assert_eq!(s.messages_inserted, 1, "sidechain events must not be ingested");
+        assert_eq!(
+            s.messages_inserted, 1,
+            "sidechain events must not be ingested"
+        );
         let stored: String = conn
             .query_row("SELECT content FROM messages", [], |r| r.get(0))
             .unwrap();
@@ -819,7 +860,9 @@ mod tests {
         let jp = dir.path().join("t.jsonl");
         write_jsonl(
             &jp,
-            &[r#"{"type":"user","sessionId":"s1","cwd":"/p","timestamp":"t","uuid":"u1","message":{"role":"user","content":"first"}}"#],
+            &[
+                r#"{"type":"user","sessionId":"s1","cwd":"/p","timestamp":"t","uuid":"u1","message":{"role":"user","content":"first"}}"#,
+            ],
         );
         let s1 = ingest_file(&conn, &jp).unwrap();
         assert_eq!(s1.messages_inserted, 1);

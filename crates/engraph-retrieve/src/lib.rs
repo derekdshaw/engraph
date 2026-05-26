@@ -62,9 +62,9 @@ pub struct Hit {
     pub ts: Option<String>,
 }
 
-pub mod scope;
 #[cfg(feature = "embeddings")]
 pub mod hybrid;
+pub mod scope;
 
 pub fn search(conn: &PooledConn, q: &Query<'_>) -> Result<Vec<Hit>> {
     let scope_ids = scope::resolve(conn, &q.scope)?;
@@ -74,7 +74,12 @@ pub fn search(conn: &PooledConn, q: &Query<'_>) -> Result<Vec<Hit>> {
     for kind in q.kinds {
         match kind {
             Target::Messages => {
-                hits.extend(search_messages(conn, &fts_query, scope_ids.as_deref(), q.limit)?);
+                hits.extend(search_messages(
+                    conn,
+                    &fts_query,
+                    scope_ids.as_deref(),
+                    q.limit,
+                )?);
             }
             Target::ContextItems => {
                 hits.extend(search_context_items(
@@ -124,7 +129,10 @@ fn search_messages(
         ),
         Some([]) => return Ok(vec![]),
         Some(ids) => {
-            let placeholders = (1..=ids.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
+            let placeholders = (1..=ids.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(",");
             let q = format!(
                 "{base} JOIN scope_members sm ON sm.target_kind = 'message' AND sm.target_id = m.id
                  WHERE messages_fts MATCH ?{q_idx} AND sm.scope_id IN ({placeholders})
@@ -176,7 +184,10 @@ fn search_context_items(
         ),
         Some([]) => return Ok(vec![]),
         Some(ids) => {
-            let placeholders = (1..=ids.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
+            let placeholders = (1..=ids.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(",");
             let q = format!(
                 "{base} JOIN scope_members sm ON sm.target_kind = 'context_item' AND sm.target_id = c.id
                  WHERE context_items_fts MATCH ?{q_idx} AND sm.scope_id IN ({placeholders})

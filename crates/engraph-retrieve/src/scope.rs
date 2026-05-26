@@ -14,9 +14,8 @@ pub fn resolve(conn: &PooledConn, f: &ScopeFilter) -> Result<Option<Vec<String>>
 }
 
 fn ids_by_project(conn: &PooledConn, name: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT id FROM scopes WHERE kind = 'project' AND name = ?1 AND archived = 0",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id FROM scopes WHERE kind = 'project' AND name = ?1 AND archived = 0")?;
     let rows = stmt
         .query_map([name], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;

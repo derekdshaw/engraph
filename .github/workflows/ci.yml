@@ -1,0 +1,218 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --workspace --verbose
+
+      - name: Test
+        run: cargo test --workspace --verbose
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+  tag-and-release:
+    name: Tag and release
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.current.outputs.version }}
+      created: ${{ steps.create_tag.outputs.created }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Get current version
+        id: current
+        run: |
+          VERSION=$(sed -n '/\[workspace\.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p;}' Cargo.toml)
+          echo "version=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if tag already exists
+        id: tag_exists
+        run: |
+          if git rev-parse "${{ steps.current.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get latest existing tag
+        id: previous
+        if: steps.tag_exists.outputs.exists == 'false'
+        run: |
+          PREV=$(git tag --sort=-v:refname | head -n1 || echo "")
+          echo "version=$PREV" >> $GITHUB_OUTPUT
+
+      - name: Create tag if version is newer than latest tag
+        id: create_tag
+        if: |
+          steps.tag_exists.outputs.exists == 'false' &&
+          steps.current.outputs.version != steps.previous.outputs.version
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ steps.current.outputs.version }}
+          git push origin ${{ steps.current.outputs.version }}
+          echo "created=true" >> $GITHUB_OUTPUT
+
+  build-release:
+    name: Build (${{ matrix.target }})
+    needs: tag-and-release
+    if: needs.tag-and-release.outputs.created == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} --bin engraph
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          ARCHIVE="engraph-${{ needs.tag-and-release.outputs.version }}-${{ matrix.target }}.tar.gz"
+          mkdir dist
+          cp target/${{ matrix.target }}/release/engraph dist/
+          cp README.md dist/
+          cp LICENSE dist/ 2>/dev/null || true
+          cp scripts/install.sh dist/
+          cp scripts/install.ps1 dist/
+          chmod +x dist/install.sh
+          tar -czf "$ARCHIVE" -C dist .
+          echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $archive = "engraph-${{ needs.tag-and-release.outputs.version }}-${{ matrix.target }}.zip"
+          New-Item -ItemType Directory -Path dist
+          Copy-Item "target\${{ matrix.target }}\release\engraph.exe" dist\
+          Copy-Item "README.md" dist\
+          if (Test-Path "LICENSE") { Copy-Item "LICENSE" dist\ }
+          Copy-Item "scripts\install.sh" dist\
+          Copy-Item "scripts\install.ps1" dist\
+          Compress-Archive -Path "dist\*" -DestinationPath $archive
+          echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: engraph-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+
+  publish-release:
+    name: Create GitHub release
+    needs: [tag-and-release, build-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.tag-and-release.outputs.version }}
+          files: artifacts/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(needs.tag-and-release.outputs.version, '-') }}

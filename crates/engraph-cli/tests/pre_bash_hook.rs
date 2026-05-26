@@ -111,7 +111,10 @@ fn compound_command_falls_back_to_deny() {
         .pointer("/hookSpecificOutput/permissionDecisionReason")
         .and_then(|s| s.as_str())
         .unwrap();
-    assert!(reason.contains("engraph run"), "missing suggestion in {reason}");
+    assert!(
+        reason.contains("engraph run"),
+        "missing suggestion in {reason}"
+    );
 }
 
 #[test]

@@ -36,11 +36,7 @@ fn ingest_then_recall_finds_known_phrase() {
 
     ingest_file(&conn, &jp).unwrap();
 
-    let hits = search(
-        &conn,
-        &Query::new("xyzzyplover"),
-    )
-    .unwrap();
+    let hits = search(&conn, &Query::new("xyzzyplover")).unwrap();
     assert_eq!(hits.len(), 1, "expected exactly one hit");
     assert!(hits[0].preview.to_lowercase().contains("xyzzyplover"));
     assert_eq!(hits[0].target_kind, "message");
@@ -54,8 +50,18 @@ fn scoped_query_restricts_to_project() {
 
     let jp = dir.path().join("t.jsonl");
     let mut f = std::fs::File::create(&jp).unwrap();
-    write!(f, "{}", jsonl_with_phrase("alpha bravo charlie", "/projA", "sA")).unwrap();
-    write!(f, "{}", jsonl_with_phrase("alpha delta echo", "/projB", "sB")).unwrap();
+    write!(
+        f,
+        "{}",
+        jsonl_with_phrase("alpha bravo charlie", "/projA", "sA")
+    )
+    .unwrap();
+    write!(
+        f,
+        "{}",
+        jsonl_with_phrase("alpha delta echo", "/projB", "sB")
+    )
+    .unwrap();
     drop(f);
     ingest_file(&conn, &jp).unwrap();
 

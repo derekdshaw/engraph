@@ -43,7 +43,9 @@ fn git_log_under_quarter() {
 fn cargo_test_drops_passes() {
     let mut stdout = String::from("running 100 tests\n");
     for i in 0..100 {
-        stdout.push_str(&format!("test some::very::nested::module::test_function_{i} ... ok\n"));
+        stdout.push_str(&format!(
+            "test some::very::nested::module::test_function_{i} ... ok\n"
+        ));
     }
     stdout.push_str("\ntest result: ok. 100 passed; 0 failed; 0 ignored\n");
     let args = vec!["test".to_string()];
@@ -106,7 +108,11 @@ fn git_log_graph_handles_decoration() {
     let args = vec!["log".to_string(), "--graph".to_string()];
     let (filter, _) = filters::pick("git", &args);
     let out = filter(&ctx("git", &args, input));
-    assert!(out.text.contains("aaaaaaa Fix something"), "missing first commit subject in {out:?}", out = out.text);
+    assert!(
+        out.text.contains("aaaaaaa Fix something"),
+        "missing first commit subject in {out:?}",
+        out = out.text
+    );
     assert!(out.text.contains("2 commits"));
 }
 
@@ -177,9 +183,7 @@ fn tree_ratio_below_half() {
 
 #[test]
 fn fd_truncates_long_lists() {
-    let input: String = (0..400)
-        .map(|i| format!("src/path/file{i}.rs\n"))
-        .collect();
+    let input: String = (0..400).map(|i| format!("src/path/file{i}.rs\n")).collect();
     let args = vec![];
     let (filter, _) = filters::pick("fd", &args);
     let out = filter(&ctx("fd", &args, &input));
@@ -275,7 +279,9 @@ fn yarn_install_drops_resolution_spam() {
 
 #[test]
 fn docker_ps_truncates_long_table() {
-    let input: String = (0..150).map(|i| format!("container-{i}  running\n")).collect();
+    let input: String = (0..150)
+        .map(|i| format!("container-{i}  running\n"))
+        .collect();
     let args = vec!["ps".to_string()];
     let (filter, _) = filters::pick("docker", &args);
     let out = filter(&ctx("docker", &args, &input));
@@ -363,7 +369,10 @@ fn picker_and_filter_output_agree_on_filter_id() {
     for (cmd, args, expected) in cases {
         let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let (filter_fn, picker_id) = filters::pick(cmd, &args_owned);
-        assert_eq!(picker_id, *expected, "picker id mismatch for {cmd} {args:?}");
+        assert_eq!(
+            picker_id, *expected,
+            "picker id mismatch for {cmd} {args:?}"
+        );
         let out = filter_fn(&ctx(cmd, &args_owned, ""));
         assert_eq!(
             out.filter_id, picker_id,

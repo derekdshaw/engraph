@@ -3,8 +3,18 @@
 //! and only for kinds where verbatim fidelity isn't required.
 
 const FILLERS: &[&str] = &[
-    "just", "really", "very", "actually", "basically", "literally", "simply", "quite",
-    "rather", "somewhat", "perhaps", "maybe",
+    "just",
+    "really",
+    "very",
+    "actually",
+    "basically",
+    "literally",
+    "simply",
+    "quite",
+    "rather",
+    "somewhat",
+    "perhaps",
+    "maybe",
 ];
 
 pub(crate) fn strip_fillers(text: &str) -> String {
@@ -15,8 +25,7 @@ pub(crate) fn strip_fillers(text: &str) -> String {
         let mut first = true;
         for tok in tokenize_keeping_punct(line) {
             let lower = tok.to_lowercase();
-            if lower == "a" || lower == "an" || lower == "the" || fillers.contains(lower.as_str())
-            {
+            if lower == "a" || lower == "an" || lower == "the" || fillers.contains(lower.as_str()) {
                 continue;
             }
             if !first && !tok.starts_with(|c: char| c.is_ascii_punctuation()) {

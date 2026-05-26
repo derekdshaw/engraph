@@ -50,8 +50,7 @@ fn fixtures_dir() -> PathBuf {
 
 fn load(name: &str, suffix: &str) -> String {
     let path = fixtures_dir().join(format!("{name}.{suffix}.txt"));
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
 #[test]

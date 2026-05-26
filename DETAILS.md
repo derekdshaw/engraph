@@ -1,0 +1,938 @@
+# Engraph — Architecture & Algorithms
+
+This document is the technical companion to `README.md`. Where the README
+says *what* you can do, this file says *how* each piece is built and *why*
+the design landed where it did. Read alongside the source.
+
+File paths use `crate/path:line` form so you can jump straight to the code.
+
+---
+
+## 1. Guiding principles
+
+These are the constraints every feature is measured against. They explain
+why the codebase is shaped the way it is.
+
+- **Local-first.** Storage is one SQLite file. No daemon, no cloud
+  dependency, no per-machine schema bootstrap. The full session memory and
+  telemetry are inspectable with `sqlite3` from any shell.
+- **Deterministic where possible.** The compressor, the per-command
+  filters, and the retrieval scoring are all deterministic given the
+  same input. This is what lets us write fixed-point ("idempotent") and
+  byte-exact golden snapshot tests.
+- **Idempotency over integrity.** Compressing already-compressed text is a
+  no-op (sentinel fast-path), not an error. The system is built to be
+  called twice; double-application never corrupts state.
+- **No bypass paths.** When a wrapped command exists, the PreToolUse hook
+  rewrites Claude's raw command to route through `engraph run`. Claude
+  can't accidentally "forget" to use the wrapper — the hook substitutes
+  silently. The escape hatch (`engraph run` already in the command, env
+  prefix, compound shell) is detected explicitly and falls back cleanly.
+- **Telemetry pays for itself.** Every compression, retrieval, and wrapped
+  command writes a row to `events` with input/output tokens. `engraph
+  gain` reports the running savings; nothing is asked to be trusted on
+  faith.
+- **Cross-platform Rust.** Unix-only APIs (file inode, POSIX signals) are
+  `#[cfg(unix)]` gated. Everything else is portable; CI runs on Linux,
+  macOS, and Windows.
+
+---
+
+## 2. Architecture
+
+### 2.1 Crate layout
+
+```
+crates/
+├── engraph-core/          schema, db pool, telemetry, budget, tokens, embedding trait
+├── engraph-compress/      F6 compressor + per-command filters (git, cargo, npm, …)
+├── engraph-retrieve/      FTS+scoping+KG, hybrid (feature-gated)
+├── engraph-ingest/        JSONL → SQLite, rotation guard, compress-existing sweep
+└── engraph-cli/           the `engraph` binary (subcommands + hooks)
+```
+
+The dependency graph is strictly downward: `engraph-cli` consumes everything,
+`engraph-ingest` and `engraph-retrieve` consume `engraph-core` and
+`engraph-compress`. There are no cycles. `engraph-core` has no
+dependencies on the other engraph crates — it's where shared types
+(database pool, telemetry, error type, token counter, embedding trait) live.
+
+### 2.2 Runtime data flow
+
+```
+                ┌─────────────────────────────┐
+                │  Claude Code session         │
+                └─────┬───────────────────────┘
+                      │ stdin JSON
+   SessionStart hook ─┤                     ┌──── stdout JSON
+                      ▼                     │     (additionalContext)
+              ┌─────────────────┐           │
+              │ engraph hook    ├───────────┘
+              │   session-start │
+              └─────────────────┘
+                      │
+                      │ reads context_items, bugs, do_not_repeat,
+                      │ session_budget; emits ≤ 2KB markdown brief
+                      ▼
+                ┌─────────────────────────────┐
+                │ ~/.local/share/engraph/     │
+                │   engraph.db (SQLite WAL)   │
+                └─────┬─────────────┬─────────┘
+                      ▲             ▲
+                      │             │
+   PreToolUse(Bash) ──┤             │── F6 sweep, recall, telemetry
+                      │             │
+                      ▼             │
+              ┌─────────────────┐   │
+              │ engraph hook    │   │
+              │   pre-bash      │   │
+              └─────┬───────────┘   │
+                    │ stdout JSON   │
+                    │ (allow/deny/  │
+                    │  updatedInput)│
+                    ▼               │
+              ┌─────────────────┐   │
+              │ Claude Code     │   │
+              │ runs wrapped:   │   │
+              │ `engraph run …` │───┘
+              └─────────────────┘
+                    │
+                    │ child process output → per-command filter → compressed text
+                    ▼
+                stdout to Claude
+```
+
+The arrows make explicit the two transactional surfaces:
+
+1. **PreToolUse(Bash)**: Claude proposes a command; engraph rewrites it
+   (or denies with a suggestion). Output going back into Claude's
+   transcript is compressed.
+2. **SessionStart**: Claude opens a session; engraph injects a brief.
+
+Everything else (ingest, compress-existing sweep, recall) is initiated
+manually or via additional hooks the user wires up.
+
+### 2.3 Storage: SQLite WAL, schema versioning
+
+One database, opened by `db::open_pool` (`engraph-core/src/db.rs`).
+
+- **WAL mode** set once per DB; multiple readers + one writer without
+  blocking. `synchronous = NORMAL` is the WAL-appropriate durability /
+  speed tradeoff.
+- **r2d2 connection pool** (`max_size = 4`). Per-call `busy_timeout = 5s`
+  absorbs incidental contention.
+- **Schema migrations** are a `&[&str]` array; each entry is one SQL batch
+  applied inside its own transaction and recorded in `migrations`
+  (`engraph-core/src/schema.rs`). `SCHEMA_VERSION` is a compile-time
+  constant; `check_drift` refuses to run if the on-disk schema is *newer*
+  than the binary expects.
+- The path defaults to `dirs::data_local_dir()/engraph/engraph.db`,
+  overridable with `ENGRAPH_DB_PATH`.
+
+#### Why one file, not many
+
+Two reasons. First, FTS5 + a knowledge graph + telemetry + session memory
+all want the same connection so they can be queried as one transaction.
+Second, distribution is brutal: shipping one SQLite file makes the
+backup-and-restore story trivial.
+
+#### Schema highlights
+
+| Table | Role |
+|---|---|
+| `messages`, `sessions` | The JSONL ingest output. Messages have `content_compressed` + `content_hash` so a compressed message stays auditable. |
+| `messages_fts`, `context_items_fts` | FTS5 external-content indexes. `INSERT`/`DELETE` triggers keep them aligned; `UPDATE` triggers were intentionally dropped in v5 so `compress-existing` doesn't overwrite the index with compressed text (see §6.4). |
+| `embeddings` | `(target_kind, target_id, model_id)` PK so vectors under different model versions coexist; cosine search ignores wrong-model rows. |
+| `events`, `session_budget` | The telemetry + budget surface. |
+| `entities`, `relations` | Knowledge-graph tables with `provenance ∈ {extracted, inferred, ambiguous, generated}` so future codegraph work can flag generated symbols out of default queries. |
+| `scopes`, `scope_members` | Mempalace-style hierarchical scoping (project / topic / time-window / custom). Used by recall to restrict results to a `cwd` or named scope. |
+| `ingestion_log` | One row per JSONL path with `(last_offset, last_inode, last_size, last_mtime)` so we can detect rotation/truncation (§5.1). |
+
+---
+
+## 3. The compression pipeline (F6)
+
+Entry: `compress(CompressInput)` → `CompressResult`
+(`engraph-compress/src/lib.rs:77`).
+
+Six steps, in strict order. Each step is independently testable.
+
+### 3.1 Step 1 — sentinel fast-path
+
+```
+text.starts_with("<<engraph:v1:compressed>>") ? return as-is
+```
+
+This is the idempotency guarantee (`sentinel.rs:4`). Compressing a
+compressed string is the literal-bytes identity. The cost: a 25-byte
+string compare. The benefit: callers never need to track whether a row
+has been compressed before, and accidental double-compression in a sweep
+is a no-op rather than a destructive re-paraphrase.
+
+We do *not* validate integrity in the fast-path: anything that happens
+to start with the sentinel round-trips. Integrity belongs in
+`content_hash` adjacent to the stored text (see schema), where the caller
+can verify against the original-bytes SHA-256 if they care.
+
+### 3.2 Step 2 — whitespace normalization
+
+`normalize_whitespace` (`lib.rs:141`): collapse runs of spaces/tabs to one
+space per line, trim trailing whitespace, drop trailing empty lines.
+Paragraph breaks (single `\n\n`) are preserved.
+
+This is a determinism gate. Without it, two inputs that differ only in
+trailing whitespace would produce different sentinel'd output, breaking
+re-ingest idempotency on transcripts written by editors with different
+newline conventions.
+
+### 3.3 Step 3 — per-kind preprocessing
+
+`preprocess::apply` (`preprocess.rs:5`) dispatches on `CompressKind`:
+
+| Kind | Preprocessing |
+|---|---|
+| `ToolOutput` | strip ANSI escapes → drop progress lines (carriage-return-overwrite + `[#=>\-_.\d%/|]*$`) → dedupe consecutive identical lines (`a\na\na\n` → `a (x3)\n`) |
+| `SessionMessage` | strip `{"type":"tool_use"/...}` envelope lines → truncate long base64/hex blobs to `head…[NB]…tail` |
+| `ProjectNotes` | strip HTML comments → collapse blank-line runs |
+| `Generic` | no-op |
+
+Each is an additive filter chain over `&str`. Per-kind separation means
+the ranking step (next) operates on already-denoised content; the same
+ranking math behaves well across very different content classes.
+
+#### Why dedupe consecutive instead of global
+
+Two reasons. First, "global dedupe" loses structural meaning: a tool-output
+log that repeats `OK` 50 times across different stages is meaningfully
+different from one that repeats `OK` 50 times in a row. Second, consecutive
+dedupe is O(n) without auxiliary state. The `(x3)` annotation preserves
+count for diagnosability.
+
+### 3.4 Step 4 — extractive sentence ranking
+
+`rank::extract` (`rank.rs:10`).
+
+The math:
+
+```
+for each non-stopword term t in document:
+    freq[t] = count of t across whole doc
+
+for each sentence s:
+    ws = non-stopword tokens in s
+    if ws is empty: drop sentence entirely
+    score(s) = sum_{t in ws}(freq[t]) / sqrt(|ws|)
+
+sort sentences by score desc, original-index asc for ties
+greedy-fill until cumulative tokens ≥ target_tokens
+emit kept sentences in original document order
+```
+
+Why this exact shape:
+
+- **Sum of term frequencies, not TF-IDF.** TF-IDF needs a corpus; we
+  have one document at compression time. Plain TF gives a robust
+  document-internal salience signal: if a term keeps reappearing, it's
+  probably what the document is about.
+- **Divide by `sqrt(|ws|)`.** Plain sum-of-frequencies massively favors
+  long sentences (more terms, more frequency mass). `/ sqrt(|ws|)` is
+  the BM25-flavored length normalization that prevents that, without
+  overcorrecting into a length-anti-preference like `/|ws|` would.
+- **Drop stopword-only sentences instead of zero-scoring them.** A
+  zero-scoring sentence ties against any other low-score sentence in
+  the original-index tiebreaker, and could be picked when it carries
+  zero information. Dropping them is the simpler, correcter behavior.
+- **Tie-break on original index ascending.** Determinism plus: when two
+  sentences score identically, the earlier one wins. Combined with the
+  "emit in original document order" final step, this preserves
+  narrative flow.
+- **Greedy fill with token check.** `target_tokens` is a soft floor —
+  the algorithm stops once cumulative ≥ target, with a minimum of 32
+  tokens (`lib.rs:117`) so very short inputs aren't compressed below
+  intelligibility.
+
+### 3.5 Step 5 — caveman brevity (opt-in)
+
+`brevity::strip_fillers` (`brevity.rs:20`). Removes articles (`a`, `an`,
+`the`) and a fixed list of filler words (`just`, `really`, `very`,
+`actually`, `basically`, `literally`, `simply`, `quite`, `rather`,
+`somewhat`, `perhaps`, `maybe`).
+
+Opt-in per call, never per-kind default. Articles carry meaning in prose
+("the foo" vs "a foo" is sometimes the whole point); we only apply this
+to inputs where verbatim grammar isn't preserved anyway, like noisy tool
+output.
+
+### 3.6 Step 6 — sentinel stamp
+
+`sentinel::stamp` (`sentinel.rs:13`) prepends `<<engraph:v1:compressed>>\n`.
+No trailer: an in-band hash trailer would be indistinguishable from
+arbitrary content, breaking the "anything starting with sentinel
+round-trips" contract. Provenance (`original_hash`, `original_tokens`,
+`compressed_tokens`, `algorithm_id`) lives in `CompressResult` and is
+persisted alongside the row by the caller.
+
+### 3.7 Idempotency: the fixed-point property
+
+Compose the six steps and you get a function `f` such that `f(f(x)) =
+f(x)` for all `x`. The sentinel fast-path makes this trivially true on
+the second invocation; the normalization steps before it are what make
+the first invocation produce a stable output that the fast-path will
+recognize. The unit test `idempotent_on_second_pass`
+(`engraph-compress/src/lib.rs:203`) pins this.
+
+This is why `compress-existing` is safe to run repeatedly: every row
+either passes the sentinel check (no-op) or gets compressed once and
+sentinel'd, after which it joins the no-op group.
+
+---
+
+## 4. Per-command output filters (F1)
+
+`engraph run <cmd> [args...]` spawns the wrapped command, picks a filter
+based on `(cmd, first arg)`, runs it on the captured `(stdout, stderr,
+exit_code)`, prints the filtered text, and exits with the child's exit
+code (`engraph-cli/src/main.rs` `Cmd::Run` branch).
+
+### 4.1 Dispatch
+
+`filters::pick(cmd, args)` (`engraph-compress/src/filters/mod.rs:37`) is a
+single big `match` returning `(FilterFn, &'static str)`. The unknown
+fallback is `(generic::filter, "generic")`.
+
+Each `FilterFn` has signature
+`fn(&FilterCtx) -> FilterOutput` where `FilterCtx` carries the four
+fields the filter needs (`cmd`, `args`, `stdout`, `stderr`, `exit_code`).
+This keeps filters trivially testable: no DB, no IO, no global state.
+
+The filter ID returned by the picker and the `filter_id` stamped on the
+`FilterOutput` must agree — a regression test pins every cargo and git
+arm to enforce this (`tests/filter_ratios.rs::picker_and_filter_output_agree_on_filter_id`).
+The mismatch we paid for once was `cargo check` (picker said
+`cargo_check`, but the underlying `cargo::build` stamped `cargo_build`);
+the v2.1 fix introduced a thin `cargo::check` wrapper.
+
+### 4.2 Filter taxonomy
+
+Each filter has the same broad shape:
+
+```
+combined = stdout + stderr        (filters that care about both)
+out = String::with_capacity(...)
+for line in combined.lines():
+    if line matches "noise pattern": skip
+    else: out.push_str(line); out.push('\n')
+out.push_str("[engraph: <counts>, exit <code>]\n")
+```
+
+Specific noise patterns by family:
+
+| Family | Drop | Keep | Summarize |
+|---|---|---|---|
+| cargo (build/check/clippy/doc) | `^\s*(Compiling\|Checking\|Downloading\|Updating\|Fresh\|Finished\|...)\b` | warnings, errors | counts |
+| cargo test (libtest) | `^test \S+ \.\.\. (ok\|ignored)\b` | `---- foo stdout ----` headers, failure panics, `test result:` summary | passed/failed/ignored counts |
+| cargo test (nextest) | `^PASS \[\s*\d+\.\d+s\]` | `^FAIL \[\s*\d+\.\d+s\]` lines, summary | counts |
+| git log | full commit blocks | one line per commit: `<7-char hash> <subject>` | total commit count; `--oneline` passes through |
+| git diff | non-stat hunks summarized as `+X -Y :: first changed line` | `diff --git`, `--- ` / `+++ ` headers, `@@` hunks | hunk-level adds/removes |
+| tree / fd / ls | depth-truncated; long flat lists capped | first N entries; depth limit | `truncated N more entries` |
+| rg / grep | flat match lists capped | first N matches | `truncated N more matches` |
+| docker / kubectl | annotations / spec blobs | events, container/pod summaries | row caps |
+| npm / pnpm / yarn | per-package "added N" progress | totals, vulnerability count | summary |
+| pytest / pip / go test | pass-progress lines | failed test output, summary | counts |
+
+### 4.3 Why per-command not generic
+
+A single generic compressor running over `git log` would extract whatever
+TF-IDF said was salient and lose the structure ("which commits exist in
+what order"). Per-command filters know that `git log` is N commit
+blocks and can collapse each to its subject without losing the count.
+The ratio gains are dramatic: `git_log_under_quarter`
+(`tests/filter_ratios.rs:25`) demonstrates < 0.3 on 50 commits.
+
+The unknown-command fallback (`generic::filter`) routes through
+`compress(CompressKind::ToolOutput)`, so users still get *some* savings
+even on tools we haven't written a filter for.
+
+### 4.4 Golden snapshot pinning
+
+`tests/golden_fixtures.rs` walks `tests/fixtures/<name>.in.txt` →
+`<name>.expected.txt` pairs and asserts byte-exact match after running
+the right filter. Three pinned today (`git_log_basic`,
+`cargo_check_basic`, `cargo_test_nextest`). Output-format drift in a
+filter shows up as a diff in the golden assertion, not as a subtle
+behavior change. A negative test ensures missing fixtures panic rather
+than silently passing.
+
+---
+
+## 5. PreToolUse(Bash) auto-rewrite hook
+
+`run_pre_bash_hook` (`engraph-cli/src/main.rs:698`). Reads Claude's
+tool-input JSON from stdin, decides one of three outcomes, emits the
+appropriate JSON on stdout, exits 0.
+
+### 5.1 Decision tree
+
+```
+command empty? → Passthrough
+command starts with "engraph " or contains " engraph run "? → Passthrough (recursion guard)
+command's first token is "KEY=value"? → Passthrough (env-prefix; wrapping would swallow the env)
+command has unquoted shell meta (|, ;, &, <, >, `, $())?
+    → scan argv for any wrappable token
+    → first match → DenySuggest with engraph run hint
+    → no match    → Passthrough
+otherwise:
+    pick(argv[0], argv[1..])
+    filter_id == "generic"? → Passthrough
+    else → Rewrite: `engraph run <argv...>` with shell-words-quoted args
+```
+
+Three outcomes, returned as a `RewriteOutcome` enum
+(`engraph-cli/src/main.rs:560`), each mapping to a Claude Code hook response:
+
+- **Rewrite**: `permissionDecision: "allow"` + `updatedInput.command =
+  "engraph run …"`. Claude Code substitutes the new command before
+  executing. The rewrite is invisible to Claude's reasoning loop — Claude
+  sees the wrapped command run, with the compressed output, in the
+  transcript.
+- **DenySuggest**: `permissionDecision: "deny"` +
+  `permissionDecisionReason` containing the wrappable subcommand. Used
+  when the command is too complex to rewrite safely (compound pipelines,
+  etc.) but engraph still has something useful to say.
+- **Passthrough**: no JSON, exit 0. Claude Code treats this as "no
+  decision," runs the original command unchanged.
+
+### 5.2 Why PreToolUse, not PostToolUse
+
+Claude Code's PostToolUse hooks **cannot replace** the tool's output —
+they can only append. To get the compressed output into Claude's
+transcript, the command itself must be rewritten before execution. The
+PreToolUse `updatedInput.command` is the only path; the rest of the
+hook machinery is built around using it.
+
+### 5.3 Quote-aware shell-meta detection
+
+`has_unquoted_shell_meta` (`engraph-cli/src/main.rs:665`) tracks single quotes, double
+quotes, backslash escapes, and `$(...)` substitutions while scanning for
+meta characters. False positives are tolerated (the fallback is the safe
+DenySuggest); false negatives would be catastrophic (rewriting a
+compound pipeline that the wrapper doesn't actually handle), so the
+detection errs conservative.
+
+`is_env_assignment` (`engraph-cli/src/main.rs:638`) is a tight identifier-equals-anything
+check matching POSIX variable-name rules. We never wrap `FOO=bar git
+log` because the `FOO` would be lost when we re-shelled through `engraph
+run` instead of inheriting it.
+
+Tests in `crates/engraph-cli/tests/pre_bash_hook.rs` pin each branch
+(rewrite, deny, passthrough) plus tricky cases like `git log
+--grep='foo && bar'` (meta inside single quotes — must not deny).
+
+---
+
+## 6. JSONL ingest pipeline
+
+`engraph_ingest::ingest_file(conn, path)` is the entry point
+(`engraph-ingest/src/lib.rs:194`). It walks the Claude Code transcript
+file at `path` and inserts new messages into the DB, tracking offsets so
+re-ingest is incremental.
+
+### 6.1 Rotation / truncation / partial-line detection
+
+Three failure modes for naïve "last offset" tracking:
+
+1. **Rotation**: log rotated; new inode at same path.
+2. **Truncation**: writer opened with `O_TRUNC`; same inode, smaller size.
+3. **Partial trailing line**: a writer flushed mid-line; our `read_line`
+   returns the partial bytes without a newline terminator.
+
+The fix uses the fingerprint `(last_offset, last_inode, last_size)` stored
+in `ingestion_log`:
+
+```
+prev_inode mismatches OR
+file_size < prev_size (shrunk) OR
+file_size < last_offset (truncated)
+    → re-ingest from offset 0
+otherwise → resume from last_offset
+
+inside the read loop:
+    line = reader.read_line()
+    if line is empty (EOF): break
+    if line doesn't end with '\n': partial — break WITHOUT advancing offset
+    else: advance offset, process line
+```
+
+The partial-line fix is critical (regression test
+`ingest_holds_offset_when_trailing_line_is_partial`,
+`engraph-ingest/src/lib.rs`). Without it, a writer flushing mid-line
+would commit our offset past the unparsed bytes, permanently skipping
+that line on the next ingest.
+
+### 6.2 Sidechain filtering
+
+Claude Code's sub-agent feature emits transcript events with
+`isSidechain: true`. `RawEvent::is_sidechain` (`engraph-ingest/src/lib.rs:42`)
+catches them at parse time and skips them — those events would otherwise
+pollute the main session memory with sub-agent chatter.
+
+### 6.3 Per-file transactional commit
+
+The previous auto-commit path issued ~3 statements per message
+(`upsert_session`, `INSERT` into `messages`, scope membership). On a
+5k-message transcript that's ~15k fsyncs in WAL mode. The current
+implementation wraps the whole file's writes in a single SQL transaction
+via a `TxGuard` RAII helper (`engraph-ingest/src/lib.rs:58`).
+
+```rust
+struct TxGuard<'a> {
+    conn: &'a PooledConn,
+    finished: bool,
+}
+impl Drop for TxGuard<'_> {
+    fn drop(&mut self) {
+        if !self.finished { let _ = self.conn.execute_batch("ROLLBACK"); }
+    }
+}
+```
+
+The guard exists because raw `BEGIN`/`COMMIT` via a pooled connection
+would, on any `?` error in the loop, return the connection to the pool
+with an open transaction. The RAII rollback closes that hole. We don't
+use `rusqlite::Transaction` directly because that would require either
+changing every downstream function signature from `&PooledConn` to
+`&Connection`, or sprinkling `&*tx` at every call site — both noisier
+than the small guard.
+
+Expected throughput improvement is 5–10× on real transcripts (3
+statements per message → 1 fsync for the whole file).
+
+### 6.4 Compress-existing sweep + FTS retention
+
+`compress_existing(conn, batch)` (`engraph-ingest/src/lib.rs:100`) walks
+`messages` and `context_items`, compresses any row whose
+`content_compressed = 0` and whose token count exceeds the threshold,
+and writes the compressed text back. Idempotent: the sentinel fast-path
+makes a re-run a no-op even if `content_compressed` wasn't updated;
+rows are also marked `content_compressed = 1` to skip re-tokenization
+on the next sweep.
+
+#### The FTS retention problem
+
+Original schema: `messages_au` AFTER UPDATE trigger fires on every
+content change, deletes the old FTS row, inserts the new one. After a
+sweep, FTS would index the *compressed* text. Recall against the user's
+original phrasing would degrade silently.
+
+v5 migration drops `messages_au` and `context_items_au`. The INSERT
+trigger still indexes new rows; the DELETE trigger still removes them.
+UPDATE no longer touches FTS. Since SQLite's rowid is immutable across
+UPDATEs when the primary key (TEXT) is unchanged, the FTS row remains
+anchored to the same message after compression.
+
+Tested by `compress_existing_keeps_fts_pointed_at_original` which seeds
+a distinctive phrase, runs the sweep, and asserts FTS recall still
+hits the original phrase against the compressed message.
+
+---
+
+## 7. Retrieval (F3)
+
+`engraph_retrieve::search(conn, &Query)` returns `Vec<Hit>` sorted by
+score (`engraph-retrieve/src/lib.rs:69`).
+
+### 7.1 Targets
+
+A `Query` can request any combination of:
+
+- `Target::Messages` (FTS5 over `messages_fts`, BM25-ranked)
+- `Target::ContextItems` (FTS5 over `context_items_fts`)
+- `Target::Bugs` (substring LIKE on summary/content)
+- `Target::Entities` (substring LIKE on name)
+
+Messages/ContextItems are full-text-indexed; Bugs/Entities use a simpler
+substring filter because their content is typically short and structured.
+
+### 7.2 FTS5 query sanitization
+
+`sanitize_fts(s)` (`engraph-retrieve/src/lib.rs:272`) strips FTS5
+meta-characters (`"`, `*`, `(`, `)`, `:`), then quotes each remaining
+word and joins with whitespace (implicit AND). The empty case yields
+`"\"\""`, a valid no-match query — avoids a syntax error when sanitizing
+strips everything.
+
+This means user-supplied text like `auth: token?` is rendered as
+`"auth" "token?"`, AND-ed, with FTS5 quote semantics for each word.
+
+### 7.3 Scoping
+
+`ScopeFilter::All` runs unfiltered. `ScopeFilter::Project(name)`
+resolves to the set of `scope_members` whose scope has
+`kind = 'project' AND name = ?`. `ScopeFilter::Scope(id)` is a single
+scope. Resolution happens once per query (`scope::resolve`,
+`engraph-retrieve/src/scope.rs:8`).
+
+The SQL is built dynamically because the placeholder count varies with
+the number of scope IDs (`?{i}` per ID, then the FTS query, then the
+limit). The `limit` is bound as `Value::Integer`, not `Value::Text`, so
+SQLite doesn't type-coerce.
+
+### 7.4 BM25 ranking
+
+FTS5's `bm25(messages_fts)` returns a *negative-is-better* number
+(SQLite convention so an `ORDER BY rank` ascending matches relevance
+descending). `Hit::score` flips the sign so all consumers can sort
+descending uniformly.
+
+### 7.5 The hybrid path (Reciprocal Rank Fusion)
+
+Behind the `embeddings` Cargo feature, `Strategy::Hybrid` fuses three
+sources via RRF (`engraph-retrieve/src/hybrid.rs:53`):
+
+```
+                ┌────────────────────────────┐
+                │  FTS5 candidate pool        │
+                │  (limit * CANDIDATE_MULT)   │   ┌── ranks by BM25
+                └─────┬──────────────────────┘   │
+                      │                          │
+                      ▼                          ▼
+              ┌─────────────────┐
+              │ embed query     │
+              │ (one call)      │
+              └────┬────────────┘
+                   │
+                   ▼ for each candidate, fetch stored vector
+              ┌─────────────────┐
+              │ rank by cosine  │── ranks by semantic similarity
+              └────┬────────────┘
+                   │
+                   ▼ sort candidates by ts desc
+              ┌─────────────────┐
+              │ rank by ts      │── ranks by recency
+              └────┬────────────┘
+                   │
+                   ▼
+              ┌─────────────────────────────────────────────────────┐
+              │  rrf(d) = w_lex/(k+lex_rank(d))                      │
+              │        + w_sem/(k+sem_rank(d))                       │
+              │        + w_rec/(k+rec_rank(d))                       │
+              │  missing source → 0 contribution                     │
+              └─────────────────────────────────────────────────────┘
+```
+
+#### Why not weighted-sum of scores
+
+The natural-looking `α·BM25 + β·cosine` is scale-broken. BM25 is
+unbounded positive (typically 0–20+); cosine sits in `[-1, 1]`. The
+larger-scale source dominates regardless of weights, no matter what `α`
+and `β` you pick. Min-max normalization fixes the scales but is sensitive
+to outliers and varies per query.
+
+#### Why ranks, not scores
+
+Ranks are unitless. Combining ranks is composable: a new source slots in
+as one more term in the sum without reweighting anyone else. Adding the
+recency source (v2.1) literally added one line to the RRF accumulator.
+
+#### Constants
+
+| Constant | Value | Rationale |
+|---|---|---|
+| `K_RRF` | `60.0` | Standard value from the original RRF paper (Cormack/Clarke/Büttcher SIGIR 2009). Larger `k` flattens the top-of-list weighting. |
+| `W_LEXICAL` | `1.0` | Equal-weight with semantic — the two are co-equal content signals. |
+| `W_SEMANTIC` | `1.0` | See above. |
+| `W_RECENCY` | `0.5` | Half-weight — freshness is a tiebreaker, not a primary criterion. |
+| `CANDIDATE_MULT` | `4` | The FTS stage pulls `q.limit * 4` candidates so the reranker has headroom. |
+
+Max achievable score: `(1 + 1 + 0.5) / (60 + 1) ≈ 0.041`. The bound is
+checked in the hybrid test suite.
+
+#### Recency wiring
+
+RFC3339 ISO strings sort chronologically as lexicographic strings (this
+is the standard's point). Candidates without a `ts` are absent from
+the recency list — a contribution of zero rather than a synthesized
+worst-rank. This matters: an unsorted "no ts" message shouldn't be
+penalized by a content-orthogonal signal it never had.
+
+Tested in `hybrid_recency_tiebreaks_toward_newer`: two messages with
+identical content but different `ts` — the newer ranks first, by a
+margin that's exactly `W_RECENCY/(K+1) - W_RECENCY/(K+2)` ≈ 0.000132.
+Without recency wired (`W_RECENCY = 0`), the alphabetical `target_id`
+tiebreak would put the older message first. The test discriminates the
+wire-up by setting `target_id` to alphabetically disagree with `ts`.
+
+### 7.6 Embedding provider trait
+
+`EmbeddingProvider` (`engraph-core/src/embedding.rs:10`):
+
+```rust
+pub trait EmbeddingProvider: Send + Sync {
+    fn embed(&self, text: &str) -> Result<Vec<f32>>;
+    fn model_id(&self) -> &str;
+    fn dim(&self) -> usize;
+}
+```
+
+Three methods. `embed` produces the vector. `model_id` is stored in the
+`embeddings` table alongside each row; queries filter by it so a model
+upgrade can detect stale rows ("vectors under `bge-small-en-v1.5`" vs
+"vectors under `next-model-v2`"). `dim` exists for schema validation
+hooks.
+
+Default implementation (`fastembed_provider::FastEmbedProvider`,
+`engraph-core/src/embedding.rs:41`) wraps `fastembed-rs` with the
+`bge-small-en-v1.5` model (~130MB on disk, 384 dims). The `Mutex` around
+the underlying `TextEmbedding` matches fastembed's `&mut self`
+requirement on `embed`; for our workload (compress-existing sweep +
+ad-hoc recall) the lock contention is negligible.
+
+A cloud provider — call it `OpenAIEmbeddingProvider` — would slot in by
+implementing the same trait. No call site changes needed.
+
+---
+
+## 8. SessionStart brief hook (F4)
+
+`run_session_start_hook` (`engraph-cli/src/main.rs:421`). Reads Claude's
+SessionStart JSON from stdin, produces a markdown brief, emits it as
+`hookSpecificOutput.additionalContext`.
+
+### 8.1 What goes in
+
+For the resolved `cwd`:
+
+- `## do-not-repeat` — top 5 rules from `do_not_repeat WHERE project = ?`.
+- `## open bugs` — top 5 unresolved rows from `bugs`.
+
+For the resolved `session_id`:
+
+- `## budget` — if usage > 0 or limits diverge from defaults.
+
+Empty briefs are emitted as the empty string. A truly fresh project
+costs zero injected tokens. The cap is `MAX_BRIEF_BYTES = 2048`;
+overflow is truncated with a `…[truncated]` marker preserving UTF-8
+boundaries (`truncate_to_bytes`, `engraph-cli/src/main.rs:516`).
+
+### 8.2 Why this exact set
+
+The brief is the per-session opening cost. Every byte injected costs
+context Claude could spend on the actual task, so the bar is high:
+each section must surface information Claude would otherwise have to
+hunt for. Do-not-repeat rules are obvious wins (the user explicitly
+told us to avoid these); open bugs come second (the user expects
+continuity across sessions). Decisions/notes were *also* in this
+brief originally, but the query was dead (no producer ever wrote those
+rows) — fixed in the v2.1 polish by deleting the query rather than
+building the producer (F8 deferred).
+
+---
+
+## 9. Budget enforcement (F11)
+
+`engraph-core/src/budget.rs`. Per-session token budget with escalation
+levels.
+
+### 9.1 Schema
+
+```
+session_budget(session_id PK, soft_limit, hard_limit, used_tokens, escalation_level, updated_at)
+```
+
+`get_or_init` creates a row with defaults
+(`DEFAULT_SOFT_LIMIT = 100_000`, `DEFAULT_HARD_LIMIT = 150_000`) on first
+read. `add_used` increments `used_tokens` and recomputes the escalation
+level atomically inside the UPDATE statement.
+
+### 9.2 Escalation levels
+
+```
+used ≥ hard            → level 3
+used ≥ soft            → level 2
+used ≥ soft / 2        → level 1
+otherwise              → level 0
+```
+
+The intent: filters and retrieval can read the level and apply stricter
+caps when the budget is tight (e.g., shorter `tree` depth, fewer recall
+candidates). The level is *advisory* — nothing in the runtime hard-stops
+on it today. Adaptive compression based on the level is a deferred
+roadmap item.
+
+### 9.3 Atomicity
+
+The level computation lives inside the SQL `UPDATE` so concurrent
+`add_used` calls don't race. Tested by
+`add_used_is_atomic_under_threads` which fires 16 threads × 25
+increments and verifies the final sum is exactly 400.
+
+### 9.4 When charges happen
+
+`Cmd::Run` (`engraph-cli/src/main.rs`) calls `budget::add_used` with
+the post-filter `output_tokens` if `CLAUDE_SESSION_ID` is set in the
+environment. The post-filter count is what actually lands in Claude's
+context; the pre-filter input is recorded for telemetry but never gets
+sent. No session id means the budget path is skipped — the CLI still
+works for standalone invocations.
+
+---
+
+## 10. Telemetry
+
+`events` table (one row per significant operation), `engraph gain`
+report.
+
+### 10.1 Event shape
+
+```
+events(seq INT PK, id UUIDv7, session_id, kind, feature, filter_id,
+       input_tokens, output_tokens, latency_ms, ts)
+kind ∈ {compress, retrieve, hook, wrapped_cmd}
+```
+
+UUIDv7 IDs are time-ordered for natural chronological indexing without
+needing a separate `created_at` column.
+
+`record_event` (`engraph-core/src/telemetry.rs:15`) is the single insert
+point. Every feature that compresses, retrieves, hooks, or runs a
+wrapped command writes a row.
+
+### 10.2 Savings semantics
+
+`saved_tokens = input - output` is only meaningful for kinds where the
+input is the pre-compression size and the output is the post-compression
+size: `compress` and `wrapped_cmd`. `retrieve` and `hook` have no
+savings semantic (input is zero or doesn't represent the same thing), so
+`GainRow::saved_tokens = None` for them, rendered as `-` in the table.
+
+This is the contract `engraph gain` is built around. The `TOTAL_SAVED`
+row at the bottom sums only the rows that contributed a numeric
+`saved_tokens`.
+
+---
+
+## 11. Cross-platform
+
+### 11.1 Unix-only code paths
+
+Exactly two places.
+
+- **File inode** (`engraph-ingest/src/lib.rs:414`): used in the rotation
+  fingerprint. On non-Unix the function returns `None`, and the rotation
+  detection relies entirely on `(size, mtime)` — slightly weaker but
+  functional.
+- **Signal handling** (`engraph-cli/src/main.rs:791`): `tokio::signal::unix`
+  installs no-op handlers for SIGINT/SIGTERM during `engraph run` so
+  the parent doesn't die before draining the child's output. The block
+  is `#[cfg(unix)]`; on Windows the terminal Ctrl-C still reaches the
+  child via its own console handling.
+
+Everything else — SQLite, FTS5, tokio process spawning, `bundled`
+rusqlite, regex — is portable.
+
+### 11.2 Tokio runtime in the CLI
+
+`Cmd::Run` is the only async surface. The CLI builds a single-threaded
+tokio runtime *inside* the synchronous main loop (`run_wrapped_command`,
+`engraph-cli/src/main.rs`). This keeps the rest of the CLI sync and
+avoids paying tokio's startup cost for subcommands that don't need it
+(`gain`, `recall`, `compress`, `ingest`, `budget`, …).
+
+Tokio's job inside that runtime:
+
+- `tokio::process::Command` spawns the child with inherited stdin (so
+  pagers, interactive commands work).
+- `child.wait_with_output()` drains stdout and stderr concurrently, so
+  neither can deadlock by filling its 64KB pipe buffer while we wait on
+  the other.
+- The `tokio::signal::unix` handlers keep the parent alive while the
+  child processes terminal signals on its own.
+
+Tested by `wrapped_run_inherits_stdin` (positive: round-trips a phrase
+through `engraph run cat`) and
+`wrapped_run_drains_large_concurrent_output_without_deadlock` (negative:
+200KB on each of stdout/stderr from a shell command, well past the pipe
+buffer).
+
+---
+
+## 12. Schema migrations & drift detection
+
+`engraph-core/src/schema.rs`.
+
+`MIGRATIONS: &[&str]` — each entry is one SQL batch. On open,
+`run_migrations` applies any whose index ≥ current version, inside a
+transaction, and records `INSERT INTO migrations (version)`.
+
+`check_drift(expected)` runs after migrations. If the on-disk schema
+version is *higher* than the binary's `SCHEMA_VERSION`, it returns
+`Error::SchemaDrift` — running an older binary against a newer DB
+risks corrupting tables the binary doesn't know about, so we refuse.
+A lower version after a migration run is impossible by construction
+but logs a warning if it ever happens.
+
+### 12.1 Migration history
+
+| v | What |
+|---|---|
+| 1 | Foundation: `sessions`, `messages`, `events`, `session_budget`. |
+| 2 | Retrieval + ingest: `scopes`/`scope_members`/`context_items`/`bugs`/`do_not_repeat`/`ingestion_log`/`entities`/`relations`, plus FTS5 virtual tables + their INSERT/DELETE/UPDATE triggers. |
+| 3 | `embeddings` table (always present; feature-gated only at query time). |
+| 4 | `ingestion_log` rotation fingerprint columns (`last_inode`, `last_size`). |
+| 5 | Drop `messages_au` / `context_items_au` triggers so `compress-existing` doesn't overwrite the FTS index (§6.4). |
+
+---
+
+## 13. Test coverage map
+
+Where each behavior is pinned. Use this as the navigation index.
+
+| Behavior | Test |
+|---|---|
+| Schema migrations idempotent | `engraph-core/src/schema.rs::tests::migrations_apply_idempotently` |
+| Schema drift refused | `db::tests::open_pool_creates_and_migrates` |
+| Budget escalation thresholds | `budget::tests::escalation_thresholds` |
+| Budget atomic under threads | `budget::tests::add_used_is_atomic_under_threads` |
+| Compress idempotent (fixed-point) | `engraph-compress/src/lib.rs::tests::idempotent_on_second_pass` |
+| Compress sentinel marker | `tests::sentinel_marker_present_after_compress` |
+| Compress ratio < 1 on long input | `tests::ratio_under_one_for_long_input` |
+| Ranking determinism | `rank::tests::deterministic` |
+| Brevity drops articles | `brevity::tests::drops_articles_and_fillers` |
+| Per-filter ratio gates | `engraph-compress/tests/filter_ratios.rs` (one test per filter) |
+| Picker / FilterOutput id agreement | `picker_and_filter_output_agree_on_filter_id` |
+| Golden snapshot fixtures | `engraph-compress/tests/golden_fixtures.rs` |
+| cargo-nextest format | `filters::cargo::tests::nextest_failures_counted_and_pass_lines_dropped` |
+| Pre-bash auto-rewrite branches | `engraph-cli/tests/pre_bash_hook.rs` |
+| Session-start brief content | `engraph-cli/tests/session_start_hook.rs` |
+| `engraph run` budget tracking | `engraph-cli/tests/run_budget.rs::wrapped_run_charges_session_budget` |
+| `engraph run` stdin inheritance | `wrapped_run_inherits_stdin` |
+| `engraph run` no pipe-buffer deadlock | `wrapped_run_drains_large_concurrent_output_without_deadlock` |
+| Ingest M2 partial trailing line | `ingest_holds_offset_when_trailing_line_is_partial` |
+| Ingest rotation/truncation replay | `ingest_detects_truncation_and_replays` |
+| Ingest sidechain skip | `ingest_skips_sidechain_events` |
+| Sweep preserves FTS recall | `compress_existing_keeps_fts_pointed_at_original` |
+| Sweep recoverability hash | `compress_existing_preserves_recoverability_hash` |
+| FTS query sanitization | `engraph-retrieve/src/lib.rs::tests::sanitize_quotes_words` |
+| Recall + scoping end-to-end | `engraph-retrieve/tests/end_to_end.rs` |
+| Hybrid RRF reordering | `hybrid_path.rs::hybrid_reorders_vs_fts` |
+| Hybrid recency tiebreak | `hybrid_recency_tiebreaks_toward_newer` |
+| Hybrid handles missing embeddings | `hybrid_handles_unembedded_candidates` |
+| Embedding upsert idempotent | `upsert_is_idempotent` |
+| Cosine basics + length mismatch | `embedding::tests::cosine_basics` / `cosine_handles_mismatched_lengths` |
+
+---
+
+## 14. Forward pointers
+
+The roadmap (`ROADMAP.md`) tracks features that aren't built. The two
+biggest pending items are:
+
+- **F2 structure-aware code retrieval** (codegraph): SCIP-driven symbol
+  graph + 2-hop neighborhood markdown output. The
+  `entities`/`relations`/`provenance` tables already exist for this.
+- **MCP server** wrapping `engraph recall` / future `engraph subgraph`:
+  worthwhile once there are 5+ tools to expose. Today, the Bash-CLI
+  path covers the use cases.
+
+Everything else listed under "Shipped in the v2.1 polish pass" in the
+roadmap is in this document under the corresponding feature section.

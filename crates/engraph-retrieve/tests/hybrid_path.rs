@@ -78,7 +78,10 @@ fn hybrid_reorders_vs_fts() {
     };
     let hits_fts = engraph_retrieve::search(
         &conn,
-        &Query { strategy: Strategy::Fts, ..q.clone() },
+        &Query {
+            strategy: Strategy::Fts,
+            ..q.clone()
+        },
     )
     .unwrap();
     let hits_hybrid = search_hybrid(&conn, &q, &provider).unwrap();
@@ -165,7 +168,10 @@ fn hybrid_recency_tiebreaks_toward_newer() {
         hits[0].target_id, "z_new",
         "newer ts must rank first; got {hits:?}"
     );
-    assert!(hits[0].score > hits[1].score, "recency must yield a strictly higher score for the newer doc");
+    assert!(
+        hits[0].score > hits[1].score,
+        "recency must yield a strictly higher score for the newer doc"
+    );
 }
 
 #[test]
@@ -178,10 +184,7 @@ fn hybrid_handles_unembedded_candidates() {
         [],
     )
     .unwrap();
-    for (id, content) in [
-        ("u1", "login problem one"),
-        ("u2", "login problem two"),
-    ] {
+    for (id, content) in [("u1", "login problem one"), ("u2", "login problem two")] {
         conn.execute(
             "INSERT INTO messages (id, session_id, role, content, ts) VALUES (?1,'s','user',?2,'t')",
             rusqlite::params![id, content],

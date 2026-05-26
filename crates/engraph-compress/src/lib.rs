@@ -213,7 +213,10 @@ mod tests {
 
     #[test]
     fn sentinel_marker_present_after_compress() {
-        let r = compress(CompressInput::new(&long_input(), CompressKind::ProjectNotes));
+        let r = compress(CompressInput::new(
+            &long_input(),
+            CompressKind::ProjectNotes,
+        ));
         assert!(is_compressed(&r.text));
     }
 

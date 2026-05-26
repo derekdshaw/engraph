@@ -262,7 +262,11 @@ warning: unused variable: `x`
 ";
         let o = test(&ctx("", stderr, 1));
         // PASS lines should be dropped from output.
-        assert!(!o.text.contains("PASS ["), "PASS lines should be dropped: {}", o.text);
+        assert!(
+            !o.text.contains("PASS ["),
+            "PASS lines should be dropped: {}",
+            o.text
+        );
         // FAIL lines should be retained.
         assert!(o.text.contains("FAIL ["));
         // Counts are correct.

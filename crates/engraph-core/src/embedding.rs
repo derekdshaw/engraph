@@ -84,7 +84,9 @@ pub mod fastembed_provider {
 
 #[cfg(feature = "embeddings")]
 pub fn default_provider() -> Result<Box<dyn EmbeddingProvider>> {
-    Ok(Box::new(fastembed_provider::FastEmbedProvider::bge_small_en()?))
+    Ok(Box::new(
+        fastembed_provider::FastEmbedProvider::bge_small_en()?,
+    ))
 }
 
 #[cfg(not(feature = "embeddings"))]

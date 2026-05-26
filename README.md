@@ -4,6 +4,8 @@ A Rust toolchain that cuts Claude Code token usage by combining persistent sessi
 
 Engraph is local-first. Storage is one SQLite file under `~/.local/share/engraph/engraph.db` (override with `ENGRAPH_DB_PATH`). The cloud path is reserved through a thin `EmbeddingProvider` trait and append-only ingest log; no service is required.
 
+For a deeper walkthrough of the architecture and the algorithm behind each feature, see [`DETAILS.md`](DETAILS.md).
+
 ## Status
 
 Six phases of the implementation plan are shipped:
@@ -46,12 +48,49 @@ The cargo test wrapper recognizes both libtest (`test foo ... ok` / `---- foo st
 
 ## Install
 
+Engraph builds and runs on Linux, macOS, and Windows. Two paths:
+
+### From a release archive (recommended)
+
+Pre-built archives are attached to each GitHub Release. Each archive ships
+`engraph` (or `engraph.exe`), the README, and platform-specific install
+scripts (`install.sh` / `install.ps1`).
+
+**Targets published:** `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
+
+```bash
+# macOS / Linux
+tar -xzf engraph-<version>-<target>.tar.gz
+cd engraph-<version>-<target>
+./install.sh
+```
+
+```powershell
+# Windows
+Expand-Archive engraph-<version>-x86_64-pc-windows-msvc.zip
+cd engraph-<version>-x86_64-pc-windows-msvc
+.\install.ps1
+```
+
+The script assumes the `engraph` binary lives in the same directory it does
+(the release-archive layout), installs it under a per-user prefix, and merges
+the SessionStart + PreToolUse(Bash) hooks into `~/.claude/settings.json`.
+Re-running replaces engraph's entries in-place rather than duplicating them.
+
+### From source
+
 ```bash
 git clone <repo>
 cd engraph
 cargo build --release                       # default build, no embeddings
 cargo build --release --features embeddings # opt-in semantic retrieval (~150MB ONNX runtime + model)
+
+# Either install the binary by hand:
 install -m 0755 target/release/engraph ~/.local/bin/engraph
+
+# …or run the bundled installer (auto-falls-back to ./target/release):
+./scripts/install.sh
 ```
 
 ## Wiring into Claude Code
@@ -256,11 +295,19 @@ crates/
 # Default build:
 cargo test
 cargo clippy --all-targets -- -D warnings
+cargo fmt --all --check
 
 # With embeddings:
 cargo test --features embeddings
 cargo clippy --all-targets --features embeddings -- -D warnings
 ```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs `cargo build`, `cargo test`,
+`cargo clippy -- -D warnings`, and `cargo fmt --check` on `ubuntu-latest`,
+`macos-latest`, and `windows-latest` for every push and pull request. On
+pushes to `main`, a separate `tag-and-release` job detects a workspace
+version bump, pushes the tag, fans out a build matrix across the five
+release targets, and publishes the archives to a GitHub Release.
 
 The plan's verification gates are wired as tests:
 - `engraph-compress/tests/git_log_ratio.rs` — F6 ratio < 0.5 on a 2k-line git log

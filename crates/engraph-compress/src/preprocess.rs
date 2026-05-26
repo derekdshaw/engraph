@@ -108,8 +108,7 @@ fn strip_tool_envelope_lines(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for line in s.lines() {
         let t = line.trim_start();
-        if t.starts_with(r#"{"type":"tool_use""#) || t.starts_with(r#"{"type":"tool_result""#)
-        {
+        if t.starts_with(r#"{"type":"tool_use""#) || t.starts_with(r#"{"type":"tool_result""#) {
             continue;
         }
         out.push_str(line);

@@ -109,18 +109,9 @@ mod tests {
             used: 0,
         };
         assert_eq!(g.escalation_level(), 0);
-        assert_eq!(
-            BudgetGate { used: 60, ..g }.escalation_level(),
-            1
-        );
-        assert_eq!(
-            BudgetGate { used: 100, ..g }.escalation_level(),
-            2
-        );
-        assert_eq!(
-            BudgetGate { used: 150, ..g }.escalation_level(),
-            3
-        );
+        assert_eq!(BudgetGate { used: 60, ..g }.escalation_level(), 1);
+        assert_eq!(BudgetGate { used: 100, ..g }.escalation_level(), 2);
+        assert_eq!(BudgetGate { used: 150, ..g }.escalation_level(), 3);
     }
 
     #[test]

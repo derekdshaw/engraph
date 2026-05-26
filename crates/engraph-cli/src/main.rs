@@ -199,8 +199,7 @@ fn main() -> Result<()> {
                 exit_code,
             });
 
-            let input_tokens =
-                tokens::count(&stdout) as i64 + tokens::count(&stderr) as i64;
+            let input_tokens = tokens::count(&stdout) as i64 + tokens::count(&stderr) as i64;
             let output_tokens = tokens::count(&result.text) as i64;
             let elapsed = start.elapsed().as_millis() as i64;
             let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
@@ -333,11 +332,7 @@ fn main() -> Result<()> {
         #[cfg(feature = "embeddings")]
         Cmd::ReindexEmbeddings { batch } => {
             let provider = engraph_core::embedding::default_provider()?;
-            let n = engraph_retrieve::hybrid::reindex_messages(
-                &conn,
-                provider.as_ref(),
-                batch,
-            )?;
+            let n = engraph_retrieve::hybrid::reindex_messages(&conn, provider.as_ref(), batch)?;
             println!("embedded {n} messages (model {})", provider.model_id());
         }
         Cmd::Compress {
@@ -436,7 +431,9 @@ fn run_session_start_hook(conn: &db::PooledConn) -> Result<()> {
     };
     let cwd = match parsed.as_ref() {
         Some(v) => v.get("cwd").and_then(|c| c.as_str()).map(|s| s.to_string()),
-        None => std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()),
+        None => std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned()),
     };
     let session_id = parsed
         .as_ref()
@@ -463,8 +460,8 @@ fn run_session_start_hook(conn: &db::PooledConn) -> Result<()> {
     if let Some(sid) = session_id.as_deref() {
         let g = budget::get_or_init(conn, sid)?;
         // Surface when usage is non-zero OR limits diverge from defaults.
-        let limits_default = g.soft == budget::DEFAULT_SOFT_LIMIT
-            && g.hard == budget::DEFAULT_HARD_LIMIT;
+        let limits_default =
+            g.soft == budget::DEFAULT_SOFT_LIMIT && g.hard == budget::DEFAULT_HARD_LIMIT;
         if g.used > 0 || !limits_default {
             signal_sections.push(format!(
                 "## budget\nsession={sid} used={used} soft={soft} hard={hard} level={lvl}",
@@ -534,14 +531,9 @@ fn truncate_to_bytes(s: &str, max: usize) -> String {
     out
 }
 
-fn recent_do_not_repeat(
-    conn: &db::PooledConn,
-    project: &str,
-    limit: i64,
-) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT rule FROM do_not_repeat WHERE project = ?1 ORDER BY ts DESC LIMIT ?2",
-    )?;
+fn recent_do_not_repeat(conn: &db::PooledConn, project: &str, limit: i64) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare("SELECT rule FROM do_not_repeat WHERE project = ?1 ORDER BY ts DESC LIMIT ?2")?;
     let out = stmt
         .query_map(rusqlite::params![project, limit], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -566,8 +558,14 @@ fn open_bugs(conn: &db::PooledConn, project: &str, limit: i64) -> Result<Vec<Str
 /// command can't be safely re-wrapped.
 #[derive(Debug, PartialEq, Eq)]
 enum RewriteOutcome {
-    Rewrite { new_command: String, filter_id: &'static str },
-    DenySuggest { reason: String, filter_id: &'static str },
+    Rewrite {
+        new_command: String,
+        filter_id: &'static str,
+    },
+    DenySuggest {
+        reason: String,
+        filter_id: &'static str,
+    },
     Passthrough,
 }
 
@@ -604,7 +602,10 @@ fn try_auto_rewrite(command: &str) -> RewriteOutcome {
                 let reason = format!(
                     "engraph has a wrapper for `{tok} {next}` but the command contains shell operators we can't auto-rewrap. Re-run the wrappable part as: engraph run {tok} {next}"
                 );
-                return RewriteOutcome::DenySuggest { reason, filter_id: fid };
+                return RewriteOutcome::DenySuggest {
+                    reason,
+                    filter_id: fid,
+                };
             }
         }
         return RewriteOutcome::Passthrough;
@@ -628,7 +629,10 @@ fn try_auto_rewrite(command: &str) -> RewriteOutcome {
         .map(|w| shell_words::quote(w).into_owned())
         .collect::<Vec<_>>()
         .join(" ");
-    RewriteOutcome::Rewrite { new_command, filter_id }
+    RewriteOutcome::Rewrite {
+        new_command,
+        filter_id,
+    }
 }
 
 fn is_env_assignment(tok: &str) -> bool {
@@ -714,7 +718,10 @@ fn run_pre_bash_hook(conn: &db::PooledConn) -> Result<()> {
 
     let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
     match try_auto_rewrite(&command) {
-        RewriteOutcome::Rewrite { new_command, filter_id } => {
+        RewriteOutcome::Rewrite {
+            new_command,
+            filter_id,
+        } => {
             let decision = serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
@@ -772,10 +779,7 @@ fn run_pre_bash_hook(conn: &db::PooledConn) -> Result<()> {
 /// while we wait on the other. Terminal SIGINT/SIGTERM still reach the child
 /// directly via the shared process group; the parent ignores them so it stays
 /// alive long enough to drain the child's last output and record telemetry.
-fn run_wrapped_command(
-    command: &str,
-    args: &[String],
-) -> Result<std::process::Output> {
+fn run_wrapped_command(command: &str, args: &[String]) -> Result<std::process::Output> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;

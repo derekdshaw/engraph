@@ -18,11 +18,7 @@ pub fn logs(ctx: &FilterCtx<'_>) -> FilterOutput {
 
 pub fn compose(ctx: &FilterCtx<'_>) -> FilterOutput {
     // docker compose ps → table truncate; docker compose logs → tail.
-    let is_logs = ctx
-        .args
-        .get(1)
-        .map(|a| a == "logs")
-        .unwrap_or(false);
+    let is_logs = ctx.args.get(1).map(|a| a == "logs").unwrap_or(false);
     let text = combine(ctx.stdout, ctx.stderr);
     let body = if is_logs {
         tail_lines(&text, 200)
