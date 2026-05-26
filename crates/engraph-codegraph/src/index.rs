@@ -1,4 +1,4 @@
-use crate::{driver, scip_loader};
+use crate::{bazel, driver, scip_loader};
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
 use std::path::{Path, PathBuf};
@@ -64,6 +64,24 @@ pub fn index_repo(
 ) -> Result<IndexStats> {
     let start = Instant::now();
 
+    // Phase 2.3: a Bazel workspace takes the bazel-query path unless the
+    // caller explicitly passed --scip <path> (which says "load this SCIP
+    // file no matter what") or --lang <name> (which forces a specific SCIP
+    // driver). Symbol-level Bazel indexing for Java/Go/TS via Bazel-resolved
+    // classpaths is deferred to a follow-up; today the Bazel path is
+    // target-level only.
+    if scip_override.is_none() && lang_override.is_none() && bazel::detect_bazel(repo) {
+        tracing::info!("Bazel workspace detected; running target-level index");
+        let bazel_stats = bazel::index_bazel_workspace(conn, repo, project)?;
+        return Ok(IndexStats {
+            entities_inserted: bazel_stats.targets_inserted,
+            relations_inserted: bazel_stats.deps_inserted,
+            scip_bytes: 0,
+            elapsed_ms: start.elapsed().as_millis() as i64,
+            driver_name: "bazel-query",
+        });
+    }
+
     let (scip_path, driver_name): (PathBuf, &'static str) = match scip_override {
         Some(p) => (p.to_path_buf(), "prebuilt"),
         None => {
@@ -105,7 +123,7 @@ pub fn discover_workspace_repos(workspace_root: &Path) -> Result<Vec<PathBuf>> {
     if !workspace_root.is_dir() {
         anyhow::bail!("workspace root is not a directory: {}", workspace_root.display());
     }
-    if driver::registry().iter().any(|d| d.detect(workspace_root)) {
+    if is_indexable_root(workspace_root) {
         return Ok(vec![workspace_root.to_path_buf()]);
     }
     let mut out = Vec::new();
@@ -119,11 +137,22 @@ pub fn discover_workspace_repos(workspace_root: &Path) -> Result<Vec<PathBuf>> {
         if !path.is_dir() {
             continue;
         }
-        if driver::registry().iter().any(|d| d.detect(&path)) {
+        if is_indexable_root(&path) {
             out.push(path);
         }
     }
     Ok(out)
+}
+
+fn is_indexable_root(path: &Path) -> bool {
+    // Bazel takes precedence: a Bazel monorepo often *also* has a Cargo.toml
+    // / pyproject.toml in some subdirectory for IDE integration, but the
+    // single-language SCIP driver would just thrash on the polyglot layout.
+    // The target-level Bazel path is the right one for these.
+    if bazel::detect_bazel(path) {
+        return true;
+    }
+    driver::registry().iter().any(|d| d.detect(path))
 }
 
 /// Index every repo discovered under `workspace_root`. Each repo's

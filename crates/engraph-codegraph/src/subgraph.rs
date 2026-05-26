@@ -208,6 +208,7 @@ pub fn format_markdown(n: &Neighborhood, byte_cap: usize) -> String {
     let mut calls = Vec::new();
     let mut refs = Vec::new();
     let mut imports = Vec::new();
+    let mut bazel_deps = Vec::new();
     let mut seen_out: std::collections::HashSet<(&str, &str)> = std::collections::HashSet::new();
     for e in &n.outgoing {
         if e.other.name.is_empty() {
@@ -219,6 +220,7 @@ pub fn format_markdown(n: &Neighborhood, byte_cap: usize) -> String {
         match e.kind.as_str() {
             "CALLS" => calls.push(e),
             "IMPORTS" => imports.push(e),
+            "BAZEL_DEPENDS_ON" => bazel_deps.push(e),
             _ => refs.push(e),
         }
     }
@@ -233,6 +235,16 @@ pub fn format_markdown(n: &Neighborhood, byte_cap: usize) -> String {
         push_capped(
             &mut out,
             &format!("**References**: {}\n", join_short(&refs, head_project)),
+            byte_cap,
+        );
+    }
+    if !bazel_deps.is_empty() {
+        push_capped(
+            &mut out,
+            &format!(
+                "**Bazel deps**: {}\n",
+                join_short(&bazel_deps, head_project)
+            ),
             byte_cap,
         );
     }

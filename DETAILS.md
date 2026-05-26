@@ -933,10 +933,17 @@ Where each behavior is pinned. Use this as the navigation index.
 | Cross-repo subgraph annotation | `subgraph::tests::cross_repo_edge_gets_repo_annotation` |
 | Workspace discovery (single root, children, exclusions) | `engraph-codegraph/tests/workspace_cross_repo.rs::discover_*` |
 | Workspace cross-repo CALLS edge end-to-end | `workspace_cross_repo.rs::workspace_links_app_b_caller_to_lib_a_foo` |
+| Bazel detection markers | `bazel::tests::detect_bazel_recognizes_markers` |
+| Bazel JSON-proto parser | `bazel::tests::parse_jsonproto_lines_extracts_rules` |
+| Bazel location string parser | `bazel::tests::parse_location_handles_file_line_col` |
+| Bazel target display name | `bazel::tests::target_display_name_strips_pkg_prefix` |
+| Bazel discovery as workspace root | `engraph-codegraph/tests/bazel_live.rs::discover_recognizes_workspace_file` |
+| Bazel target-level index end-to-end | `bazel_live.rs::target_level_index_creates_targets_and_deps` (soft-skips when bazel/bazelisk absent) |
+| Bazel re-index idempotency | `bazel_live.rs::reindex_is_idempotent` |
 
 ---
 
-## 14. Codegraph (F2 Phases 2.1 + 2.2)
+## 14. Codegraph (F2 Phases 2.1 + 2.2 + 2.3 target-level)
 
 `engraph index <repo>` runs an external SCIP indexer for the detected
 language, decodes the resulting `index.scip` protobuf, and writes
@@ -1162,6 +1169,94 @@ symbol-stability test suite (a snapshot of 50 known monikers across
 indexer versions). Both pay back only once there's drift in practice —
 add them when telemetry shows a real failure mode.
 
+### 14.8 Phase 2.3 — target-level Bazel via `bazel query`
+
+`bazel.rs` adds the target-level half of Phase 2.3: one `bazel query
+--output=streamed_jsonproto 'kind(rule, //...)'` invocation enumerates
+every rule target with its direct deps, and the loader writes them as
+`bazel_target` entities plus `BAZEL_DEPENDS_ON` edges. No build runs;
+no per-language SCIP indexer is involved. This is intentionally the
+language-agnostic, deterministic, fast cut — the symbol-level half
+(driving `scip-java` / `scip-go` / `scip-typescript` from Bazel-
+resolved classpaths) is deferred.
+
+**Detection precedence.** `detect_bazel(repo)` checks for `WORKSPACE`,
+`WORKSPACE.bazel`, or `MODULE.bazel` at the root. Phase 2.3 routes
+Bazel workspaces away from the SCIP driver registry: in `index_repo`
+the Bazel path takes precedence over the per-language drivers when no
+`--scip` or `--lang` override is passed, because polyglot Bazel
+monorepos commonly have a `Cargo.toml` / `pyproject.toml` / `package.json`
+in some sub-directory for IDE integration that would otherwise mislead
+the single-language drivers. `discover_workspace_repos` mirrors the
+precedence so `engraph index --workspace <bazel-root>` picks the Bazel
+path automatically.
+
+**Output base placement.** Bazel keeps its analysis cache in an
+`output_base` directory. Engraph defaults that to
+`~/.cache/engraph/bazel-out/<sha-of-workspace-path>` so:
+
+- The cache lives outside the workspace (Bazel placing it inside
+  creates a self-referencing symlink loop that breaks subsequent
+  `bazel query` invocations).
+- Engraph's runs don't churn the user's own `~/.cache/bazel`.
+- Re-runs against the same workspace reuse the same cache (fast).
+- Override via `ENGRAPH_BAZEL_OUTPUT_BASE` (used by the live tests so
+  per-test caches stay tempdir-scoped).
+
+**Streamed JSON proto.** `bazel query --output=streamed_jsonproto`
+emits one JSON object per line per target. Engraph parses with serde,
+decoding only the fields it consumes (`name`, `ruleClass`, `location`,
+`ruleInput`) — the full attribute list is dozens of fields per target
+and would be wasted parsing. The loader skips non-`RULE` entries
+(`SOURCE_FILE`, `PACKAGE_GROUP`, …).
+
+**Edge filtering.** A target's `ruleInput` list typically contains
+both first-party deps (`//foo:foo`) and Bazel-internal deps
+(`@bazel_tools//tools/genrule:genrule-setup.sh`). The loader only
+emits a `BAZEL_DEPENDS_ON` edge when the dep is itself a target in
+the current workspace (i.e. appears as a `name` in the JSON stream).
+Cross-workspace edges to `@external_repo//...` targets are skipped
+until Phase 2.3 grows a notion of imported repos.
+
+**Idempotent re-index.** Following the Phase 2.2 pattern, the Bazel
+loader deletes only its own outgoing `BAZEL_DEPENDS_ON` edges
+(`WHERE kind = 'BAZEL_DEPENDS_ON' AND src_entity IN (SELECT id FROM
+entities WHERE project = ? AND kind = 'bazel_target')`) before
+re-inserting. Entities are upserted with `ON CONFLICT(id) DO UPDATE
+SET project, file_path, line_range`.
+
+**Subgraph rendering.** `format_markdown` gives `BAZEL_DEPENDS_ON`
+edges their own `**Bazel deps**` line rather than folding them into
+`**References**`. Same `repo:<basename>` cross-project annotation as
+v2.2 still applies if a Bazel monorepo and a downstream Cargo
+workspace both live under the same `--workspace`.
+
+**Bazel binary resolution.** The loader prefers `bazel` over
+`bazelisk` (so a user with bazelisk symlinked as `bazel` gets
+per-workspace version pinning via `.bazelversion`), and reports a
+clear error if neither is on PATH. The companion install script
+ships `bazelisk` via `go install`.
+
+**End-to-end test.** `tests/bazel_live.rs` writes a two-genrule
+fixture (no external rules), runs `index_repo`, and asserts both
+targets land as `bazel_target` entities with the expected
+`BAZEL_DEPENDS_ON` edge between them and repo-relative `file_path`s.
+A separate test pins idempotency under re-index. Soft-skips when no
+`bazel`/`bazelisk` is on PATH.
+
+**What Phase 2.3 explicitly does NOT do.**
+- **Symbol-level Java via Bazel**: the `scip-java` aspect workflow
+  (write `scip_java.bzl` into the workspace, `bazel build
+  --aspects=...`, harvest per-target SemanticDB → SCIP). Real and
+  doable, but each language's quirks are 1-2 sessions of debugging
+  on its own.
+- **Symbol-level Go / TypeScript via Bazel**: same pattern with
+  `scip-go` / `scip-typescript` against Bazel-resolved srcs.
+- **Cross-workspace `@external_repo//...` edges**: today these are
+  filtered. A future mode would let users register external
+  workspaces and stitch them like Phase 2.2's cross-repo path does
+  for non-Bazel projects.
+
 ---
 
 ## 15. Forward pointers
@@ -1169,10 +1264,9 @@ add them when telemetry shows a real failure mode.
 The roadmap (`ROADMAP.md`) tracks features that aren't built. The two
 biggest pending items are:
 
-- **F2 Phase 2.3**: polyglot Bazel via `scip-bazel` + `bazel query`.
-  Phases 2.1 + 2.2 are shipped (§14); cross-repo stitching works
-  today for canonically-published deps under any indexer that
-  emits stable monikers.
+- **F2 Phase 2.3 symbol-level**: target-level Bazel ships today
+  (§14.8); driving scip-java/scip-go/scip-typescript from
+  Bazel-resolved classpaths is the remaining piece.
 - **F2 polish items deferred from 2.2**: per-driver moniker
   normalization rules (the rewrite hook in `scip_loader::
   normalize_moniker` is a no-op today) and the 50-symbol stability

@@ -22,7 +22,7 @@ Six phases of the implementation plan are shipped:
 | SessionStart auto-context inject (F4) | `engraph-cli` | `engraph hook session-start` |
 | Compress-existing sweep | `engraph-ingest` | `engraph compress-existing` |
 | Local embeddings + hybrid retrieval | `engraph-core::embedding`, `engraph-retrieve::hybrid` | `engraph init-embeddings`, `engraph reindex-embeddings`, `engraph recall --hybrid` |
-| Structure-aware code retrieval (F2 Phases 2.1 + 2.2) | `engraph-codegraph` | `engraph index`, `engraph index --workspace`, `engraph subgraph` |
+| Structure-aware code retrieval (F2 Phases 2.1 + 2.2 + 2.3 target-level) | `engraph-codegraph` | `engraph index`, `engraph index --workspace`, `engraph subgraph` |
 
 ### Supported wrapper commands (v2)
 
@@ -314,8 +314,35 @@ If `<dir>` itself carries a build manifest (a cargo workspace root, a
 single-crate root, etc.) only `<dir>` is indexed; otherwise each
 immediate child whose `Driver::detect()` matches gets indexed
 separately. Per-repo failures are reported but do not abort the run.
-Deeper recursion and Bazel polyglot detection are tracked as Phase 2.3
-in `ROADMAP.md`.
+
+### Bazel monorepos (Phase 2.3, target-level)
+
+`engraph index` on a directory containing `WORKSPACE`,
+`WORKSPACE.bazel`, or `MODULE.bazel` runs `bazel query
+--output=streamed_jsonproto 'kind(rule, //...)'` once and writes one
+`bazel_target` entity per rule target plus `BAZEL_DEPENDS_ON` edges
+between them. No build runs; no per-language SCIP indexer is invoked
+on this path. Coarse-grained but deterministic and fast.
+
+```bash
+engraph index path/to/bazel/monorepo
+# indexed /path/to/bazel/monorepo (482 entities, 1731 relations, 0 SCIP bytes, 4200ms, driver=bazel-query)
+
+engraph subgraph bar
+## Symbol `bar` (defined in bar/BUILD.bazel:1)
+**Bazel deps**: `foo` (foo/BUILD.bazel:1)
+```
+
+`bazel` (or `bazelisk` symlinked as `bazel`) must be on PATH; the
+companion installer covers `bazelisk` via `go install
+github.com/bazelbuild/bazelisk@latest`. Bazel's analysis cache lands
+under `~/.cache/engraph/bazel-out/<sha-of-workspace-path>` (override
+with `ENGRAPH_BAZEL_OUTPUT_BASE`) to keep it isolated from the user's
+own `~/.cache/bazel`.
+
+**Symbol-level Bazel indexing** (driving `scip-java`/`scip-go`/
+`scip-typescript` from Bazel-resolved classpaths) is the remaining
+half of Phase 2.3 and tracked in `ROADMAP.md`.
 
 ## Reading the events table
 
@@ -393,6 +420,7 @@ The plan's verification gates are wired as tests:
 - `engraph-codegraph/tests/drivers_detect.rs` — pure file-probe tests, one per build system (Cargo, pyproject, go.mod, package.json+tsconfig, pom.xml/build.gradle*/build.sbt/build.sc); also pins that a Bazel-only workspace does **not** pick scip-java (Phase 2.3 territory)
 - `engraph-codegraph/tests/drivers_live.rs` — per-language end-to-end runs against tiny fixtures; soft-skip when the upstream indexer (or, for scip-java, the JVM build tool) is absent
 - `engraph-codegraph/tests/workspace_cross_repo.rs` — Phase 2.2 cross-repo workspace fixture (two crates with a path dep). Asserts both repos land in `entities` with their canonical projects, a `CALLS` edge spans them, and the rendered markdown carries the `repo:<name>` annotation. Soft-skips when rust-analyzer is absent.
+- `engraph-codegraph/tests/bazel_live.rs` — Phase 2.3 target-level Bazel: two-genrule fixture (no external rules), asserts both targets land as `bazel_target` entities with the right `BAZEL_DEPENDS_ON` edge and repo-relative `file_path`. Separate test pins re-index idempotency. Soft-skips when neither `bazel` nor `bazelisk` is on PATH.
 
 ## License
 

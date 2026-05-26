@@ -711,12 +711,14 @@ name = "engraph-codegraph"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs 5.0.1",
  "engraph-core",
  "protobuf",
  "rusqlite",
  "scip",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tracing",
  "uuid",
