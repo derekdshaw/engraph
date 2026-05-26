@@ -144,7 +144,7 @@ backup-and-restore story trivial.
 | `messages_fts`, `context_items_fts` | FTS5 external-content indexes. `INSERT`/`DELETE` triggers keep them aligned; `UPDATE` triggers were intentionally dropped in v5 so `compress-existing` doesn't overwrite the index with compressed text (see §6.4). |
 | `embeddings` | `(target_kind, target_id, model_id)` PK so vectors under different model versions coexist; cosine search ignores wrong-model rows. |
 | `events`, `session_budget` | The telemetry + budget surface. |
-| `entities`, `relations` | Knowledge-graph tables with `provenance ∈ {extracted, inferred, ambiguous, generated}` so future codegraph work can flag generated symbols out of default queries. |
+| `entities`, `relations` | Knowledge-graph tables with `provenance ∈ {extracted, inferred, ambiguous, generated}`. F2 codegraph populates these from SCIP per-language indexers; `entities` carries `file_path`, `line_range`, `signature` (v6). |
 | `scopes`, `scope_members` | Mempalace-style hierarchical scoping (project / topic / time-window / custom). Used by recall to restrict results to a `cwd` or named scope. |
 | `ingestion_log` | One row per JSONL path with `(last_offset, last_inode, last_size, last_mtime)` so we can detect rotation/truncation (§5.1). |
 
@@ -880,6 +880,7 @@ but logs a warning if it ever happens.
 | 3 | `embeddings` table (always present; feature-gated only at query time). |
 | 4 | `ingestion_log` rotation fingerprint columns (`last_inode`, `last_size`). |
 | 5 | Drop `messages_au` / `context_items_au` triggers so `compress-existing` doesn't overwrite the FTS index (§6.4). |
+| 6 | F2 codegraph: add `file_path`, `line_range`, `signature` columns to `entities` plus `idx_entities_file_path`. `relations.kind` is validated in Rust (`RelationKind` enum) rather than via DB CHECK; SQLite can't `ALTER ADD CHECK` and rebuilding the FK-referenced table risked dropping rows. |
 
 ---
 
@@ -919,20 +920,183 @@ Where each behavior is pinned. Use this as the navigation index.
 | Hybrid handles missing embeddings | `hybrid_handles_unembedded_candidates` |
 | Embedding upsert idempotent | `upsert_is_idempotent` |
 | Cosine basics + length mismatch | `embedding::tests::cosine_basics` / `cosine_handles_mismatched_lengths` |
+| Schema v6 entity columns present | `schema::tests::migrates_through_v6_entity_columns` |
+| SCIP loader two-pass emits CALLS edges | `engraph-codegraph/tests/loader_unit.rs::loader_emits_entities_and_a_calls_edge` |
+| SCIP loader idempotency (re-load is a no-op) | `loader_unit.rs::reloading_same_bytes_is_idempotent` |
+| SCIP loader scopes DELETE to project | `loader_unit.rs::loader_scopes_deletes_to_project` |
+| Subgraph markdown shape + sections | `subgraph::tests::subgraph_returns_calls_called_by_and_siblings` |
+| Subgraph ambiguity disambiguation | `subgraph::tests::ambiguous_name_emits_disambiguation` |
+| Subgraph byte-cap truncation | `subgraph::tests::byte_cap_truncates_with_marker` |
+| Driver file-probe detection | `engraph-codegraph/tests/drivers_detect.rs` (one per build system) |
+| Driver live end-to-end (per language) | `engraph-codegraph/tests/drivers_live.rs` (soft-skips when the indexer or build tool is absent) |
 
 ---
 
-## 14. Forward pointers
+## 14. Codegraph (F2 Phase 2.1)
+
+`engraph index <repo>` runs an external SCIP indexer for the detected
+language, decodes the resulting `index.scip` protobuf, and writes
+symbols and references into the existing `entities`/`relations`
+tables. `engraph subgraph <symbol>` then returns a 2-hop markdown
+neighborhood that typically compresses 100× against the file-Read +
+grep loop Claude would otherwise run.
+
+### 14.1 Crate boundary
+
+`crates/engraph-codegraph/` is its own workspace member. Five modules:
+
+| Module | Role |
+|---|---|
+| `driver.rs` | `trait Driver { name, detect, command, output_path }` + five impls (`RustAnalyzer`, `ScipPython`, `ScipGo`, `ScipTypescript`, `ScipJava`) + `registry()` |
+| `relation_kind.rs` | `enum RelationKind { Defines, References, Calls, Implements, Extends, Imports }` — the in-Rust validator that replaces a DB-level CHECK on `relations.kind` |
+| `scip_loader.rs` | SCIP protobuf bytes → entity/relation rows, two-pass (§14.3) |
+| `index.rs` | `index_repo()` orchestrator: pick driver → spawn → load |
+| `subgraph.rs` | `subgraph_for()` + `format_markdown()` (§14.4) |
+
+The crate depends on `scip = "0.5"` and `protobuf = "3.7"` (rust-protobuf;
+scip 0.5 ships pre-generated message code so no `protoc` is needed at
+build time). Bumping to scip 0.7 would require raising the workspace
+MSRV from 1.75 to 1.81.
+
+### 14.2 Driver registry
+
+Each driver is a small adapter: file-probe `detect()` + argv-builder
+`command()`. Engraph shells out to the language-specific indexer rather
+than re-implementing type resolution per language — there is no single
+crate that does cross-file `who-calls` across Rust/Python/Go/TS/Java.
+
+| Driver | `detect()` trigger | `command()` |
+|---|---|---|
+| `RustAnalyzer` | `Cargo.toml` | `rust-analyzer scip <repo> --output <repo>/index.scip` (chdir into repo) |
+| `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <repo>/index.scip --project-name <basename>` |
+| `ScipGo` | `go.mod` | `scip-go --module-root <repo>` (chdir into repo) |
+| `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index` (chdir into repo) |
+| `ScipJava` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java index --output <repo>/index.scip` (chdir into repo) |
+
+scip-java's `--bazel-*` flags exist for a manual aspect workflow only;
+its `index` subcommand auto-detects `{Maven, Gradle, sbt, mill}` and
+does not drive Bazel. Java-on-Bazel coverage will arrive with the
+separate `scip-bazel` tool in Phase 2.3.
+
+`scripts/install-scip-indexers.sh` is the companion installer: idempotent,
+per-toolchain prerequisite checks, surfaces WSL-specific failure modes
+(Windows npm prefix on `/mnt/c` is invisible to Linux PATH, etc.).
+
+### 14.3 SCIP loader — two-pass
+
+SCIP's `SymbolRole` is a bit-flag enum: `Definition | Import |
+WriteAccess | ReadAccess | Generated | Test | ForwardDefinition`. There
+is no "Call" bit — `CALLS` vs `REFERENCES` must be disambiguated using
+the *target* symbol's `SymbolInformation.kind`, which can live in any
+document of the Index.
+
+**Pass 1** walks every `Document.symbols[*]` (and `Index.external_symbols`)
+and builds `HashMap<String, Kind>`. **Pass 2** walks
+`Document.occurrences[*]` and decides:
+
+- `Definition` role set → upsert an entity row with `file_path =
+  Document.relative_path`, `line_range = "{start+1}:{end+1}"` (SCIP
+  ranges are 0-based; engraph stores 1-based for editor compatibility),
+  `signature` from `SymbolInformation.signature_documentation.text`.
+- `Import` role set → `IMPORTS` edge.
+- Non-definition, target kind ∈ {Function, Method, Constructor,
+  StaticMethod, AbstractMethod, Macro} → `CALLS`.
+- Non-definition, target kind ∈ {Class, Struct, Interface, Trait, Enum,
+  TypeAlias, Type, Protocol} → `REFERENCES`.
+- Target kind is a local (Variable, Parameter, Field, …) or unknown →
+  edge is **skipped entirely**. Recording these would flood the
+  subgraph with un-navigable noise (e.g. `Called by conn in budget.rs`).
+- `SymbolInformation.relationships[].is_implementation` → `IMPLEMENTS`.
+- `SymbolInformation.relationships[].is_reference` (and not also
+  is_implementation) → `EXTENDS`.
+- `Generated` role on the definition → `provenance = 'generated'`;
+  otherwise `'extracted'`.
+
+**Anchor heuristic.** Occurrences don't carry their enclosing function
+directly. The loader anchors each non-definition occurrence to the
+nearest preceding definition *whose kind is anchorable* (function,
+method, class, struct, etc.) — never to a local variable or field.
+This is what makes `engraph subgraph run_migrations` produce real
+callers (`open_pool` etc.) instead of nearby variable names.
+
+**Idempotent atomic swap.** A `TxGuard` (same pattern as
+`engraph-ingest`) wraps the whole load:
+
+1. `DELETE FROM relations WHERE src_entity IN (SELECT id FROM entities
+   WHERE project = ?)` (and same for `dst_entity`; FK enforcement
+   means relations must die before entities).
+2. `DELETE FROM entities WHERE project = ?`.
+3. Bulk re-insert from the current SCIP run.
+4. `COMMIT`.
+
+Readers see the prior snapshot until commit. Staging-tables-then-swap
+(the heavier pattern ROADMAP.md mentions) is overkill below ~10M
+edges; a single `BEGIN…COMMIT` is sufficient at SQLite scale.
+
+**ID strategy.** `entities.id` is the raw SCIP moniker
+(`rust-analyzer cargo engraph-core 0.1.0 schema/run_migrations().`).
+Cross-machine moniker normalization is deferred to Phase 2.2; without
+it, monikers from different indexer versions don't compare equal
+across machines, and cross-repo stitching doesn't work yet.
+
+### 14.4 Subgraph query + markdown
+
+`subgraph_for(conn, symbol, max_nodes)` returns a `Neighborhood`:
+
+1. **Resolve** name → entity row(s) via `WHERE name = ?1 OR id = ?1`.
+   More than one match → emit a disambiguation block, no edges.
+   No "best guess".
+2. **Outgoing** (CALLS / REFERENCES / IMPORTS): join `relations` and
+   `entities` on `dst_entity`, filter `r.src_entity = ?` and
+   `r.valid_to IS NULL`, limit `max_nodes / 2`.
+3. **Incoming** (Called by): same shape, swap src/dst.
+4. **Siblings** (same file): `WHERE file_path = ? AND id != ?
+   ORDER BY line_range LIMIT 10`.
+
+`format_markdown()` lays out the four sections, dedupes by
+`(kind, target_id)` for outgoing and by `target_id` for incoming
+(rust-analyzer emits one occurrence per call site, which would
+otherwise list `migrations_apply_idempotently` twice), filters out
+empty-name entries, and stops appending lines once cumulative byte
+size hits `DEFAULT_BYTE_CAP = 8192`. The roadmap's goal example is
+matched exactly. `engraph subgraph <sym> --json` emits the raw
+`Neighborhood` struct for programmatic callers.
+
+### 14.5 Telemetry
+
+`Index` events: `kind = WrappedCmd, feature = "F2", filter_id =
+<driver name>, input_tokens = scip_bytes, output_tokens = 0`. The
+driver name (`"rust-analyzer"`, `"scip-go"`, …) lets `engraph gain`
+slice per-language indexer cost.
+
+`Subgraph` events: `kind = Retrieve, feature = "F2", filter_id =
+"subgraph", output_tokens = tokens::count(&markdown)`. Token cost is
+the bytes-out into Claude's context — comparable to a `recall`
+event for savings accounting.
+
+### 14.6 Coverage on this machine
+
+| Driver | Status |
+|---|---|
+| `rust-analyzer` | Real end-to-end pass (`drivers_live.rs`); 2400+ entities + 1200+ relations indexed against engraph itself |
+| `scip-python` | Real end-to-end pass |
+| `scip-go` | Real end-to-end pass |
+| `scip-typescript` | Real end-to-end pass |
+| `scip-java` | `drivers_live.rs` soft-skips unless `mvn` or `gradle` is on PATH (build-tool dependency). `detect()` + argv covered by `drivers_detect.rs`. |
+
+---
+
+## 15. Forward pointers
 
 The roadmap (`ROADMAP.md`) tracks features that aren't built. The two
 biggest pending items are:
 
-- **F2 structure-aware code retrieval** (codegraph): SCIP-driven symbol
-  graph + 2-hop neighborhood markdown output. The
-  `entities`/`relations`/`provenance` tables already exist for this.
-- **MCP server** wrapping `engraph recall` / future `engraph subgraph`:
-  worthwhile once there are 5+ tools to expose. Today, the Bash-CLI
-  path covers the use cases.
+- **F2 Phases 2.2 + 2.3**: cross-repo moniker stitching (Phase 2.2)
+  and polyglot Bazel via `scip-bazel` + `bazel query` (Phase 2.3).
+  Phase 2.1 is shipped (§14).
+- **MCP server** wrapping `engraph recall` / `engraph subgraph`:
+  worthwhile once there are 5+ tools to expose. With F2 Phase 2.1
+  shipped, that threshold is closer.
 
 Everything else listed under "Shipped in the v2.1 polish pass" in the
 roadmap is in this document under the corresponding feature section.

@@ -22,6 +22,7 @@ Six phases of the implementation plan are shipped:
 | SessionStart auto-context inject (F4) | `engraph-cli` | `engraph hook session-start` |
 | Compress-existing sweep | `engraph-ingest` | `engraph compress-existing` |
 | Local embeddings + hybrid retrieval | `engraph-core::embedding`, `engraph-retrieve::hybrid` | `engraph init-embeddings`, `engraph reindex-embeddings`, `engraph recall --hybrid` |
+| Structure-aware code retrieval (F2 Phase 2.1) | `engraph-codegraph` | `engraph index`, `engraph subgraph` |
 
 ### Supported wrapper commands (v2)
 
@@ -133,14 +134,14 @@ Compound commands (`cd /tmp && git log`, `git log | head`, env-prefixed forms) f
 
 ## Storage
 
-One SQLite DB, WAL mode, schema migrations under `engraph-core/src/schema.rs`. Current schema version is `5`. The v5 migration drops the `AFTER UPDATE` triggers on `messages` and `context_items`, so in-place compression via `engraph compress-existing` no longer overwrites the FTS index — recall continues to hit the user's original phrasing after a sweep.
+One SQLite DB, WAL mode, schema migrations under `engraph-core/src/schema.rs`. Current schema version is `6`. v5 drops the `AFTER UPDATE` triggers on `messages` and `context_items`, so in-place compression via `engraph compress-existing` no longer overwrites the FTS index. v6 adds `file_path`, `line_range`, and `signature` columns to `entities` (plus an index on `file_path`) for the F2 codegraph; `relations.kind` is validated in Rust (`RelationKind` enum) rather than via a DB-level CHECK constraint.
 
 | Table | Purpose |
 |---|---|
 | `sessions`, `messages`, `tool_calls` | Session-state snapshot from JSONL ingestion |
 | `scopes`, `scope_members` | Hierarchical scoping (mempalace wings/rooms/drawers, generalized) |
 | `context_items`, `bugs`, `do_not_repeat` | Curated decisions and rules |
-| `entities`, `relations` | Knowledge graph with validity windows and provenance flags |
+| `entities`, `relations` | Knowledge graph with validity windows and provenance flags; F2 codegraph stores symbols here with `file_path` / `line_range` / `signature` (v6) |
 | `messages_fts`, `context_items_fts` | FTS5 virtual tables auto-synced via triggers |
 | `embeddings` | Vector store (populated only with `--features embeddings`) |
 | `events`, `session_budget` | Telemetry + per-session token budget |
@@ -248,6 +249,53 @@ as missing from the recency list. Natural future signals — engagement, scope
 proximity, author — would each enter as one more term in the same
 `Σ w_i / (k + rank_i(d))` formula.
 
+## Structure-aware code retrieval (F2 Phase 2.1)
+
+`engraph index <repo>` runs a per-language SCIP indexer (engraph shells
+out to the upstream binary), decodes the resulting `index.scip`, and
+populates the `entities` + `relations` tables with symbols, calls,
+references, imports, and inheritance edges. `engraph subgraph <symbol>`
+then returns a 2-hop markdown neighborhood — typically ~100× smaller
+than the Read+grep loop Claude would otherwise run to answer "what
+calls processOrder."
+
+### Supported drivers
+
+| Driver | `detect()` trigger | Upstream indexer |
+|---|---|---|
+| `rust-analyzer` | `Cargo.toml` | `rust-analyzer` (rustup component) |
+| `scip-python`   | `pyproject.toml` / `setup.py` | `@sourcegraph/scip-python` (npm) |
+| `scip-go`       | `go.mod` | `github.com/scip-code/scip-go/cmd/scip-go` (go install) |
+| `scip-typescript` | `package.json` + `tsconfig.json` | `@sourcegraph/scip-typescript` (npm) |
+| `scip-java`     | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java` via Coursier (`cs install --contrib scip-java`); also needs `mvn`/`gradle`/`sbt`/`mill` on PATH |
+
+`scripts/install-scip-indexers.sh` is an idempotent installer for all
+five upstream indexers with per-toolchain prerequisite checks. Phase 2.2
+(cross-repo moniker stitching) and Phase 2.3 (polyglot Bazel via the
+separate `scip-bazel` tool) are tracked in `ROADMAP.md`.
+
+### Example
+
+```bash
+engraph index .
+# indexed /home/me/project (2416 entities, 1236 relations, 1.1MB SCIP, 14s, driver=rust-analyzer)
+
+engraph subgraph run_migrations
+## Symbol `run_migrations` (defined in crates/engraph-core/src/schema.rs:244)
+```
+pub fn run_migrations(conn: &mut Connection) -> Result<()>
+```
+**Calls**: `current_version` (crates/engraph-core/src/schema.rs:225)
+**References**: `Result#` (crates/engraph-core/src/error.rs:21)
+**Called by**: `open_pool` (crates/engraph-core/src/db.rs:30), `migrations_apply_idempotently` (…), `tables_exist_after_migration` (…)
+**Sibling symbols** (same file): `current_version`, `check_drift`, `tests`, `MIGRATIONS`
+```
+
+`engraph subgraph <sym> --json` emits the structured `Neighborhood`
+record for programmatic consumers. Ambiguous names yield a
+disambiguation block listing each match by location, not a best-guess
+pick.
+
 ## Reading the events table
 
 ```bash
@@ -279,6 +327,7 @@ crates/
 ├── engraph-compress/      # F6 compressor + per-command filters (git, cargo, npm, tree, fd, ls)
 ├── engraph-retrieve/      # FTS+scoping+KG, hybrid (feature-gated)
 ├── engraph-ingest/        # JSONL → SQLite with rotation guard and in-place compression sweep
+├── engraph-codegraph/     # F2 codegraph: SCIP indexer drivers, loader, subgraph queries
 └── engraph-cli/           # the `engraph` binary
 ```
 
@@ -318,6 +367,10 @@ The plan's verification gates are wired as tests:
 - `engraph-ingest/src/lib.rs` (unit) — incremental re-ingest, rotation/truncation replay, mid-write partial-line hold, sidechain event filtering, sweep idempotency and recoverability, FTS-retention through `compress_existing`
 - `engraph-cli/tests/session_start_hook.rs` — empty brief on unknown project, populated brief includes rules/bugs, size cap respected
 - `engraph-cli/tests/run_budget.rs` — `engraph run` charges `session_budget` when `CLAUDE_SESSION_ID` is set, no-ops cleanly when not, inherits stdin (cat round-trip), and drains ~200KB of concurrent stdout+stderr without pipe-buffer deadlock (validates the `tokio::process` migration)
+- `engraph-codegraph/tests/loader_unit.rs` — SCIP loader two-pass emits a known `CALLS` edge from a synthesized in-memory `Index`, is idempotent on re-load, and scopes its DELETE to the requested `project`
+- `engraph-codegraph/tests/subgraph_format.rs` — embedded unit tests for the markdown formatter: section shape, ambiguity disambiguation, byte-cap truncation
+- `engraph-codegraph/tests/drivers_detect.rs` — pure file-probe tests, one per build system (Cargo, pyproject, go.mod, package.json+tsconfig, pom.xml/build.gradle*/build.sbt/build.sc); also pins that a Bazel-only workspace does **not** pick scip-java (Phase 2.3 territory)
+- `engraph-codegraph/tests/drivers_live.rs` — per-language end-to-end runs against tiny fixtures; soft-skip when the upstream indexer (or, for scip-java, the JVM build tool) is absent
 
 ## License
 

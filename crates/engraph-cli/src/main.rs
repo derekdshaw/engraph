@@ -97,6 +97,33 @@ enum Cmd {
         #[arg(long, default_value_t = 200)]
         batch: usize,
     },
+    /// Build / refresh the codegraph for a repo by running a SCIP indexer
+    /// (or loading a prebuilt index.scip).
+    Index {
+        /// Path to repo root
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+        /// Use a prebuilt SCIP file instead of running a driver
+        #[arg(long)]
+        scip: Option<PathBuf>,
+        /// Force a driver: rust-analyzer, scip-python, scip-go, scip-typescript, scip-java
+        #[arg(long)]
+        lang: Option<String>,
+        /// Project key for the indexed entities (default: canonical repo path)
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Show a 2-hop markdown neighborhood for a symbol from the codegraph
+    Subgraph {
+        /// Symbol name or full SCIP moniker
+        symbol: String,
+        /// Soft cap on outgoing + incoming + sibling rows shown
+        #[arg(long, default_value_t = 30)]
+        max_nodes: usize,
+        /// Emit the structured Neighborhood as JSON instead of markdown
+        #[arg(long)]
+        json: bool,
+    },
     /// One-shot deterministic compression of a file
     Compress {
         /// File to compress (use `-` for stdin)
@@ -297,6 +324,76 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&hits)?);
             } else {
                 print_hits(&hits);
+            }
+        }
+        Cmd::Index {
+            repo,
+            scip,
+            lang,
+            project,
+        } => {
+            let canonical = repo.canonicalize().unwrap_or_else(|_| repo.clone());
+            let project_key = project.unwrap_or_else(|| canonical.to_string_lossy().into_owned());
+            let start = Instant::now();
+            let stats = engraph_codegraph::index_repo(
+                &conn,
+                &repo,
+                scip.as_deref(),
+                lang.as_deref(),
+                &project_key,
+            )?;
+            telemetry::record_event(
+                &conn,
+                EventInput {
+                    session_id: std::env::var("CLAUDE_SESSION_ID").ok().as_deref(),
+                    kind: EventKind::WrappedCmd,
+                    feature: "F2",
+                    filter_id: Some(stats.driver_name),
+                    input_tokens: stats.scip_bytes as i64,
+                    output_tokens: 0,
+                    latency_ms: start.elapsed().as_millis() as i64,
+                },
+            )?;
+            println!(
+                "indexed {} ({} entities, {} relations, {} SCIP bytes, {}ms, driver={})",
+                project_key,
+                stats.entities_inserted,
+                stats.relations_inserted,
+                stats.scip_bytes,
+                stats.elapsed_ms,
+                stats.driver_name
+            );
+        }
+        Cmd::Subgraph {
+            symbol,
+            max_nodes,
+            json,
+        } => {
+            let start = Instant::now();
+            let neighborhood = engraph_codegraph::subgraph_for(&conn, &symbol, max_nodes)?;
+            let body = if json {
+                serde_json::to_string_pretty(&neighborhood)?
+            } else {
+                engraph_codegraph::format_markdown(
+                    &neighborhood,
+                    engraph_codegraph::subgraph::DEFAULT_BYTE_CAP,
+                )
+            };
+            telemetry::record_event(
+                &conn,
+                EventInput {
+                    session_id: std::env::var("CLAUDE_SESSION_ID").ok().as_deref(),
+                    kind: EventKind::Retrieve,
+                    feature: "F2",
+                    filter_id: Some("subgraph"),
+                    input_tokens: 0,
+                    output_tokens: tokens::count(&body) as i64,
+                    latency_ms: start.elapsed().as_millis() as i64,
+                },
+            )?;
+            print!("{body}");
+            if !body.ends_with('\n') {
+                println!();
             }
         }
         Cmd::Ingest { path } => {

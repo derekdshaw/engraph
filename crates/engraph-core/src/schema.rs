@@ -209,6 +209,17 @@ const MIGRATIONS: &[&str] = &[
     DROP TRIGGER IF EXISTS messages_au;
     DROP TRIGGER IF EXISTS context_items_au;
     "#,
+    // v6 — F2 codegraph: enrich entities with source location so the subgraph
+    // formatter can render file:line references. The `relations.kind` value is
+    // validated in Rust (RelationKind enum in engraph-codegraph) rather than at
+    // the DB level — SQLite cannot ALTER ADD CHECK on an existing column and a
+    // table rebuild would risk dropping FK-referenced rows.
+    r#"
+    ALTER TABLE entities ADD COLUMN file_path TEXT;
+    ALTER TABLE entities ADD COLUMN line_range TEXT;
+    ALTER TABLE entities ADD COLUMN signature TEXT;
+    CREATE INDEX IF NOT EXISTS idx_entities_file_path ON entities(file_path);
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
@@ -271,6 +282,30 @@ mod tests {
         assert_eq!(current_version(&conn).unwrap(), MIGRATIONS.len() as i64);
         run_migrations(&mut conn).unwrap();
         assert_eq!(current_version(&conn).unwrap(), MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn migrates_through_v6_entity_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        // v6 added file_path/line_range/signature to entities.
+        for col in &["file_path", "line_range", "signature"] {
+            let present: bool = conn
+                .query_row(
+                    "SELECT 1 FROM pragma_table_info('entities') WHERE name = ?1",
+                    [col],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            assert!(present, "missing entities column {col}");
+        }
+        // Inserting a row that exercises the new columns must succeed.
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range, signature)
+             VALUES ('e1', 'symbol', 'foo', '/p', 'src/lib.rs', '10:20', 'fn foo() -> i32')",
+            [],
+        )
+        .unwrap();
     }
 
     #[test]

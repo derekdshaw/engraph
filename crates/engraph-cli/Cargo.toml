@@ -22,6 +22,7 @@ engraph-core.workspace = true
 engraph-compress.workspace = true
 engraph-retrieve.workspace = true
 engraph-ingest.workspace = true
+engraph-codegraph.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 rusqlite.workspace = true

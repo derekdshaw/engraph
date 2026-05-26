@@ -5,6 +5,7 @@ members = [
     "crates/engraph-compress",
     "crates/engraph-retrieve",
     "crates/engraph-ingest",
+    "crates/engraph-codegraph",
     "crates/engraph-cli",
 ]
 
@@ -20,6 +21,7 @@ engraph-core = { path = "crates/engraph-core" }
 engraph-compress = { path = "crates/engraph-compress" }
 engraph-retrieve = { path = "crates/engraph-retrieve" }
 engraph-ingest = { path = "crates/engraph-ingest" }
+engraph-codegraph = { path = "crates/engraph-codegraph" }
 
 anyhow = "1"
 thiserror = "1"
@@ -39,6 +41,8 @@ sha2 = "0.10"
 regex = "1"
 shell-words = "1"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "process", "io-util", "signal"] }
+scip = "0.5"
+protobuf = "3.7"
 
 [profile.release]
 lto = "thin"
