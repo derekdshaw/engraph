@@ -13,6 +13,7 @@ use std::fmt::Write;
 pub struct EntityRow {
     pub id: String,
     pub name: String,
+    pub project: Option<String>,
     pub file_path: Option<String>,
     pub line_range: Option<String>,
     pub signature: Option<String>,
@@ -77,7 +78,7 @@ fn resolve_matches(conn: &PooledConn, symbol: &str) -> Result<Vec<EntityRow>> {
     // Match by name first (the common case), then by exact moniker. Limit to
     // 8 — more than that is a sign the user needs a more specific identifier.
     let mut stmt = conn.prepare(
-        "SELECT id, name, file_path, line_range, signature FROM entities
+        "SELECT id, name, project, file_path, line_range, signature FROM entities
          WHERE name = ?1 OR id = ?1
          ORDER BY (CASE WHEN id = ?1 THEN 0 ELSE 1 END)
          LIMIT 8",
@@ -102,7 +103,7 @@ fn query_edges(
 ) -> Result<Vec<EdgeRow>> {
     let sql = match dir {
         EdgeDir::Out => {
-            "SELECT r.kind, e.id, e.name, e.file_path, e.line_range, e.signature
+            "SELECT r.kind, e.id, e.name, e.project, e.file_path, e.line_range, e.signature
              FROM relations r
              JOIN entities e ON e.id = r.dst_entity
              WHERE r.src_entity = ?1 AND r.valid_to IS NULL
@@ -110,7 +111,7 @@ fn query_edges(
              LIMIT ?2"
         }
         EdgeDir::In => {
-            "SELECT r.kind, e.id, e.name, e.file_path, e.line_range, e.signature
+            "SELECT r.kind, e.id, e.name, e.project, e.file_path, e.line_range, e.signature
              FROM relations r
              JOIN entities e ON e.id = r.src_entity
              WHERE r.dst_entity = ?1 AND r.valid_to IS NULL
@@ -126,9 +127,10 @@ fn query_edges(
                 other: EntityRow {
                     id: r.get(1)?,
                     name: r.get(2)?,
-                    file_path: r.get(3)?,
-                    line_range: r.get(4)?,
-                    signature: r.get(5)?,
+                    project: r.get(3)?,
+                    file_path: r.get(4)?,
+                    line_range: r.get(5)?,
+                    signature: r.get(6)?,
                 },
             })
         })?
@@ -143,7 +145,7 @@ fn query_siblings(
     limit: usize,
 ) -> Result<Vec<EntityRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, file_path, line_range, signature FROM entities
+        "SELECT id, name, project, file_path, line_range, signature FROM entities
          WHERE file_path = ?1 AND id != ?2
          ORDER BY line_range
          LIMIT ?3",
@@ -161,9 +163,10 @@ fn row_to_entity(r: &rusqlite::Row<'_>) -> rusqlite::Result<EntityRow> {
     Ok(EntityRow {
         id: r.get(0)?,
         name: r.get(1)?,
-        file_path: r.get(2)?,
-        line_range: r.get(3)?,
-        signature: r.get(4)?,
+        project: r.get(2)?,
+        file_path: r.get(3)?,
+        line_range: r.get(4)?,
+        signature: r.get(5)?,
     })
 }
 
@@ -181,7 +184,7 @@ pub fn format_markdown(n: &Neighborhood, byte_cap: usize) -> String {
                 &format!(
                     "- `{}` ({})\n",
                     m.name,
-                    location(m).unwrap_or_else(|| "?".into())
+                    location(m, None).unwrap_or_else(|| "?".into())
                 ),
                 byte_cap,
             );
@@ -189,10 +192,11 @@ pub fn format_markdown(n: &Neighborhood, byte_cap: usize) -> String {
         return out;
     }
     let head = &n.matches[0];
-    let location = location(head).unwrap_or_else(|| "?".into());
+    let head_project = head.project.as_deref();
+    let head_loc = location(head, None).unwrap_or_else(|| "?".into());
     push_capped(
         &mut out,
-        &format!("## Symbol `{}` (defined in {})\n", head.name, location),
+        &format!("## Symbol `{}` (defined in {})\n", head.name, head_loc),
         byte_cap,
     );
     if let Some(sig) = head.signature.as_deref() {
@@ -221,14 +225,14 @@ pub fn format_markdown(n: &Neighborhood, byte_cap: usize) -> String {
     if !calls.is_empty() {
         push_capped(
             &mut out,
-            &format!("**Calls**: {}\n", join_short(&calls)),
+            &format!("**Calls**: {}\n", join_short(&calls, head_project)),
             byte_cap,
         );
     }
     if !refs.is_empty() {
         push_capped(
             &mut out,
-            &format!("**References**: {}\n", join_short(&refs)),
+            &format!("**References**: {}\n", join_short(&refs, head_project)),
             byte_cap,
         );
     }
@@ -243,7 +247,7 @@ pub fn format_markdown(n: &Neighborhood, byte_cap: usize) -> String {
         if !inc.is_empty() {
             push_capped(
                 &mut out,
-                &format!("**Called by**: {}\n", join_short(&inc)),
+                &format!("**Called by**: {}\n", join_short(&inc, head_project)),
                 byte_cap,
             );
         }
@@ -275,21 +279,39 @@ pub fn format_markdown(n: &Neighborhood, byte_cap: usize) -> String {
     out
 }
 
-fn location(e: &EntityRow) -> Option<String> {
+/// Render a "file_path:line" location for an entity. When `head_project` is
+/// passed and the entity belongs to a *different* project, prepends
+/// "repo:<basename> :: " so cross-repo edges are visually distinct in the
+/// subgraph markdown.
+fn location(e: &EntityRow, head_project: Option<&str>) -> Option<String> {
     let path = e.file_path.as_deref()?;
     let line = e.line_range.as_deref();
     let line_head = line.and_then(|s| s.split(':').next());
-    match line_head {
-        Some(l) if !l.is_empty() => Some(format!("{path}:{l}")),
-        _ => Some(path.to_string()),
-    }
+    let base = match line_head {
+        Some(l) if !l.is_empty() => format!("{path}:{l}"),
+        _ => path.to_string(),
+    };
+    let foreign = match (head_project, e.project.as_deref()) {
+        (Some(h), Some(p)) if h != p => Some(p),
+        _ => None,
+    };
+    Some(match foreign {
+        Some(other) => {
+            let repo = std::path::Path::new(other)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| other.to_string());
+            format!("repo:{repo} :: {base}")
+        }
+        None => base,
+    })
 }
 
-fn join_short(edges: &[&EdgeRow]) -> String {
+fn join_short(edges: &[&EdgeRow], head_project: Option<&str>) -> String {
     edges
         .iter()
         .map(|e| {
-            let loc = location(&e.other).unwrap_or_default();
+            let loc = location(&e.other, head_project).unwrap_or_default();
             if loc.is_empty() {
                 format!("`{}`", e.other.name)
             } else {
@@ -399,6 +421,56 @@ mod tests {
         assert!(md.starts_with("## Multiple matches"));
         assert!(md.contains("a.rs"));
         assert!(md.contains("b.rs"));
+    }
+
+    #[test]
+    fn cross_repo_edge_gets_repo_annotation() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range, signature)
+             VALUES ('e_caller', 'symbol', 'caller', '/proj/app_b', 'src/main.rs', '5:5', 'fn caller()')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range)
+             VALUES ('e_lib_foo', 'symbol', 'lib_foo', '/proj/lib_a', 'src/lib.rs', '10:10')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO relations (id, src_entity, dst_entity, kind, provenance)
+             VALUES ('r1', 'e_caller', 'e_lib_foo', 'CALLS', 'extracted')",
+            [],
+        )
+        .unwrap();
+        let n = subgraph_for(&conn, "caller", 30).unwrap();
+        let md = format_markdown(&n, DEFAULT_BYTE_CAP);
+        assert!(md.contains("repo:lib_a"), "missing cross-repo annotation: {md}");
+        assert!(md.contains("`lib_foo`"), "{md}");
+
+        // Same-project edge should NOT carry the annotation.
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range)
+             VALUES ('e_local', 'symbol', 'local_helper', '/proj/app_b', 'src/main.rs', '20:20')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO relations (id, src_entity, dst_entity, kind, provenance)
+             VALUES ('r2', 'e_caller', 'e_local', 'CALLS', 'extracted')",
+            [],
+        )
+        .unwrap();
+        let n = subgraph_for(&conn, "caller", 30).unwrap();
+        let md = format_markdown(&n, DEFAULT_BYTE_CAP);
+        // local_helper is same-project → no repo: prefix on its location.
+        assert!(
+            !md.contains("repo:app_b"),
+            "same-project edge should not carry annotation: {md}"
+        );
     }
 
     #[test]

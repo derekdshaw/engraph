@@ -929,10 +929,14 @@ Where each behavior is pinned. Use this as the navigation index.
 | Subgraph byte-cap truncation | `subgraph::tests::byte_cap_truncates_with_marker` |
 | Driver file-probe detection | `engraph-codegraph/tests/drivers_detect.rs` (one per build system) |
 | Driver live end-to-end (per language) | `engraph-codegraph/tests/drivers_live.rs` (soft-skips when the indexer or build tool is absent) |
+| Suffix-fallback kind classifier | `scip_loader::tests::suffix_kind_classifies_descriptors` |
+| Cross-repo subgraph annotation | `subgraph::tests::cross_repo_edge_gets_repo_annotation` |
+| Workspace discovery (single root, children, exclusions) | `engraph-codegraph/tests/workspace_cross_repo.rs::discover_*` |
+| Workspace cross-repo CALLS edge end-to-end | `workspace_cross_repo.rs::workspace_links_app_b_caller_to_lib_a_foo` |
 
 ---
 
-## 14. Codegraph (F2 Phase 2.1)
+## 14. Codegraph (F2 Phases 2.1 + 2.2)
 
 `engraph index <repo>` runs an external SCIP indexer for the detected
 language, decodes the resulting `index.scip` protobuf, and writes
@@ -1084,6 +1088,80 @@ event for savings accounting.
 | `scip-typescript` | Real end-to-end pass |
 | `scip-java` | `drivers_live.rs` soft-skips unless `mvn` or `gradle` is on PATH (build-tool dependency). `detect()` + argv covered by `drivers_detect.rs`. |
 
+### 14.7 Phase 2.2 — cross-repo stitching
+
+Cross-repo is mostly free because `entities.id` *is* the SCIP moniker.
+When two repos both reference the same fully-qualified symbol (e.g.
+`rust-analyzer cargo lib_a 0.0.1 mod/lib_foo().`), they collapse onto
+the same row automatically. The work in 2.2 is the surrounding plumbing
+that makes this robust under realistic indexing patterns.
+
+**Loader change: drop the entity DELETE.** v2.1's loader did
+`DELETE FROM entities WHERE project = ?` on every re-index. That's safe
+in a single-repo setting but breaks cross-repo: lib_a re-indexing would
+delete lib_a's symbols, and any CALLS edge from app_b pointing to one
+of them would be deleted to satisfy the FK, silently destroying app_b's
+graph. v2.2 narrows the cleanup to *outgoing* relations only
+(`WHERE src_entity IN (… project = ?)`) and never deletes entities.
+Stale defs from removed source accumulate; a future GC pass can prune
+them. The UPSERT now also updates `project` on conflict so a real
+definition takes ownership from any earlier placeholder a referrer had
+planted.
+
+**Anchor heuristic — kind specificity.** With cross-crate references in
+play, multiple definitions often share the same `start_line` (typically
+the file's `crate/` module def sits at line 0 alongside the first
+function def). v2.1's "nearest preceding by line" picked arbitrarily on
+ties and would attribute calls to `crate/` instead of the actual
+enclosing function. v2.2 ranks anchor candidates by kind specificity
+(Function/Method = 100, Class/Struct/Enum = 50, Module/Namespace =
+10) and breaks line ties in favor of the more specific kind. This is
+what makes the workspace test pin `app_caller → lib_foo` instead of
+`crate/ → lib_foo`.
+
+**Suffix-fallback kind detection.** When the indexer is pointed at only
+the consumer crate, the producer's symbols arrive as occurrences with
+no matching `SymbolInformation` — `target_kind` is therefore unknown
+and the v2.1 loader dropped the edge. v2.2 falls back to parsing the
+SCIP descriptor suffix when kind is missing: `()` / `().` → CALLS,
+`#` → REFERENCES, anything else (locals, terms) → skip. Without this
+fallback every cross-repo call goes missing.
+
+**`engraph index --workspace <dir>`.** New subcommand. If `<dir>` itself
+carries a build manifest, indexes just `<dir>`. Otherwise, walks
+immediate children and indexes each whose `Driver::detect()` matches.
+Per-repo failures are reported but don't abort the run; the CLI prints
+per-repo results plus a workspace summary. Deeper recursion is
+intentionally out of scope until Phase 2.3.
+
+**Cross-repo subgraph annotation.** `format_markdown` now compares the
+queried entity's `project` with each related entity's. When they
+differ, the location is prefixed with `repo:<basename>` so the user
+sees `lib_foo (repo:lib_a :: src/lib.rs:1)` instead of a bare
+`src/lib.rs:1` that could be ambiguous across repos.
+
+**Moniker normalization.** `scip_loader::normalize_moniker` is wired in
+as the hook for per-indexer rewrite rules (the scip-go pre-0.7
+absolute-path strip the roadmap calls out, etc.) but is a pass-through
+today. Real-world stitching of canonically-published deps (Cargo, npm,
+PyPI, Go modules) works without any rewrites because their monikers
+are already machine-stable.
+
+**End-to-end test.** `tests/workspace_cross_repo.rs` builds a two-crate
+fixture (`lib_a` + `app_b` with a `path = "../lib_a"` dep), runs
+`index_workspace`, and asserts (1) both repos land in `entities` with
+their canonical projects, (2) a `CALLS` edge exists from `app_caller`
+to `lib_foo` with `src.project != dst.project`, and (3) the rendered
+markdown contains the `repo:lib_a` annotation. Soft-skips when
+rust-analyzer is absent.
+
+**What Phase 2.2 explicitly does NOT do.** The roadmap names two items
+this session leaves for later: per-driver moniker normalization rules
+(only the hook is in place; no rewrites land today) and a
+symbol-stability test suite (a snapshot of 50 known monikers across
+indexer versions). Both pay back only once there's drift in practice —
+add them when telemetry shows a real failure mode.
+
 ---
 
 ## 15. Forward pointers
@@ -1091,9 +1169,16 @@ event for savings accounting.
 The roadmap (`ROADMAP.md`) tracks features that aren't built. The two
 biggest pending items are:
 
-- **F2 Phases 2.2 + 2.3**: cross-repo moniker stitching (Phase 2.2)
-  and polyglot Bazel via `scip-bazel` + `bazel query` (Phase 2.3).
-  Phase 2.1 is shipped (§14).
+- **F2 Phase 2.3**: polyglot Bazel via `scip-bazel` + `bazel query`.
+  Phases 2.1 + 2.2 are shipped (§14); cross-repo stitching works
+  today for canonically-published deps under any indexer that
+  emits stable monikers.
+- **F2 polish items deferred from 2.2**: per-driver moniker
+  normalization rules (the rewrite hook in `scip_loader::
+  normalize_moniker` is a no-op today) and the 50-symbol stability
+  test suite (snapshot known monikers, regression on every loader
+  change). Both pay back only once indexer-version drift causes a
+  real failure in practice.
 - **MCP server** wrapping `engraph recall` / `engraph subgraph`:
   worthwhile once there are 5+ tools to expose. With F2 Phase 2.1
   shipped, that threshold is closer.

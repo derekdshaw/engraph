@@ -22,7 +22,7 @@ Six phases of the implementation plan are shipped:
 | SessionStart auto-context inject (F4) | `engraph-cli` | `engraph hook session-start` |
 | Compress-existing sweep | `engraph-ingest` | `engraph compress-existing` |
 | Local embeddings + hybrid retrieval | `engraph-core::embedding`, `engraph-retrieve::hybrid` | `engraph init-embeddings`, `engraph reindex-embeddings`, `engraph recall --hybrid` |
-| Structure-aware code retrieval (F2 Phase 2.1) | `engraph-codegraph` | `engraph index`, `engraph subgraph` |
+| Structure-aware code retrieval (F2 Phases 2.1 + 2.2) | `engraph-codegraph` | `engraph index`, `engraph index --workspace`, `engraph subgraph` |
 
 ### Supported wrapper commands (v2)
 
@@ -296,6 +296,27 @@ record for programmatic consumers. Ambiguous names yield a
 disambiguation block listing each match by location, not a best-guess
 pick.
 
+### Cross-repo stitching (Phase 2.2)
+
+`engraph index --workspace <dir>` indexes every sub-repo with a
+recognized build manifest under `<dir>` in one pass. Each repo's
+canonical path becomes its project key, and because
+`entities.id` is the SCIP moniker, cross-repo references collapse onto
+the same row automatically — index `lib_a` and `app_b` (where `app_b`
+depends on `lib_a`), and `engraph subgraph app_caller` surfaces calls
+into `lib_a` with a `repo:lib_a` annotation on the location:
+
+```text
+**Calls**: `lib_foo` (repo:lib_a :: src/lib.rs:1)
+```
+
+If `<dir>` itself carries a build manifest (a cargo workspace root, a
+single-crate root, etc.) only `<dir>` is indexed; otherwise each
+immediate child whose `Driver::detect()` matches gets indexed
+separately. Per-repo failures are reported but do not abort the run.
+Deeper recursion and Bazel polyglot detection are tracked as Phase 2.3
+in `ROADMAP.md`.
+
 ## Reading the events table
 
 ```bash
@@ -371,6 +392,7 @@ The plan's verification gates are wired as tests:
 - `engraph-codegraph/tests/subgraph_format.rs` — embedded unit tests for the markdown formatter: section shape, ambiguity disambiguation, byte-cap truncation
 - `engraph-codegraph/tests/drivers_detect.rs` — pure file-probe tests, one per build system (Cargo, pyproject, go.mod, package.json+tsconfig, pom.xml/build.gradle*/build.sbt/build.sc); also pins that a Bazel-only workspace does **not** pick scip-java (Phase 2.3 territory)
 - `engraph-codegraph/tests/drivers_live.rs` — per-language end-to-end runs against tiny fixtures; soft-skip when the upstream indexer (or, for scip-java, the JVM build tool) is absent
+- `engraph-codegraph/tests/workspace_cross_repo.rs` — Phase 2.2 cross-repo workspace fixture (two crates with a path dep). Asserts both repos land in `entities` with their canonical projects, a `CALLS` edge spans them, and the rendered markdown carries the `repo:<name>` annotation. Soft-skips when rust-analyzer is absent.
 
 ## License
 

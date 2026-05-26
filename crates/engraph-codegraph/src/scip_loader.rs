@@ -28,6 +28,18 @@ pub struct LoadStats {
     pub documents_seen: usize,
 }
 
+/// Cross-machine moniker normalization. SCIP monikers are stable
+/// cross-machine for canonically-published deps (Cargo, npm, PyPI, Go
+/// modules with proper module paths), but some indexers leak machine-local
+/// noise. Today this is a pass-through; Phase 2.2 work will plug in
+/// per-prefix rewrite rules here (e.g. strip absolute paths from pre-0.7
+/// scip-go monikers). Call this everywhere a moniker enters the DB so the
+/// hook covers all entry points.
+#[inline]
+pub fn normalize_moniker(s: &str) -> &str {
+    s
+}
+
 pub fn load(conn: &PooledConn, project: &str, scip_bytes: &[u8]) -> Result<LoadStats> {
     let index = Index::parse_from_bytes(scip_bytes).context("decoding SCIP protobuf")?;
 
@@ -56,15 +68,21 @@ pub fn load(conn: &PooledConn, project: &str, scip_bytes: &[u8]) -> Result<LoadS
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let mut guard = TxGuard { conn, done: false };
 
-    // Delete relations first because of the FK from relations.{src,dst}_entity
-    // to entities.id with foreign_keys=ON.
+    // Phase 2.2: scope the relations DELETE to outgoing edges only (src in
+    // this project). Deleting inbound edges from other projects would break
+    // cross-repo CALLS like app_b → lib_a::foo when lib_a re-indexes.
+    //
+    // We intentionally do NOT delete entities here. With cross-repo, another
+    // project's relation may point to a symbol we're about to recompute;
+    // dropping that entity would FK-fail the holding project's edge. The
+    // upsert path below refreshes file_path/line_range/signature in place.
+    // Stale entities from removed source code accumulate; a future GC pass
+    // (Phase 2.3 territory) can prune them.
     conn.execute(
         "DELETE FROM relations
-         WHERE src_entity IN (SELECT id FROM entities WHERE project = ?1)
-            OR dst_entity IN (SELECT id FROM entities WHERE project = ?1)",
+         WHERE src_entity IN (SELECT id FROM entities WHERE project = ?1)",
         [project],
     )?;
-    conn.execute("DELETE FROM entities WHERE project = ?1", [project])?;
 
     let mut stats = LoadStats::default();
     for doc in &index.documents {
@@ -104,10 +122,15 @@ fn load_document(
     }
 
     // Insert/upsert one entity row per SymbolInformation in this document.
+    // On conflict we claim ownership: a real definition takes the `project`
+    // away from any earlier placeholder. Phase 2.2 relies on this so that
+    // `entities.project` always names the *defining* repo, never the first
+    // referrer.
     let mut entity_insert = conn.prepare_cached(
         "INSERT INTO entities (id, kind, name, project, file_path, line_range, signature)
          VALUES (?1, 'symbol', ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(id) DO UPDATE SET
+            project = excluded.project,
             file_path = COALESCE(excluded.file_path, entities.file_path),
             line_range = COALESCE(excluded.line_range, entities.line_range),
             signature = COALESCE(excluded.signature, entities.signature)",
@@ -168,12 +191,25 @@ fn load_document(
     // class, etc.). Without this filter the heuristic latches onto local
     // variables and produces nonsensical "Called by `conn` in budget.rs"
     // lines.
-    let mut def_anchors: Vec<(i32, String)> = def_loc
+    // Anchors are tuples of (start_line, specificity, symbol). When several
+    // definitions start on the same line — common at the top of a file where
+    // the `crate/` module def shares line 0 with the first function def —
+    // ties are broken by specificity so a Function anchor wins over the
+    // enclosing Module. Without this tiebreak the `nearest_enclosing` search
+    // can attribute a call to `crate/` instead of `app_caller`.
+    let mut def_anchors: Vec<(i32, u8, String)> = def_loc
         .iter()
-        .filter(|(sym, _)| is_anchor_kind(sym_kind.get(*sym).copied()))
-        .map(|(sym, (start, _))| (*start, sym.clone()))
+        .filter_map(|(sym, (start, _))| {
+            let kind = sym_kind.get(sym).copied();
+            let spec = anchor_specificity(kind);
+            if spec == 0 {
+                None
+            } else {
+                Some((*start, spec, sym.clone()))
+            }
+        })
         .collect();
-    def_anchors.sort_by_key(|(line, _)| *line);
+    def_anchors.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
     for occ in &doc.occurrences {
         if occ.symbol.is_empty() {
@@ -207,11 +243,17 @@ fn load_document(
         } else if is_type_kind(target_kind) {
             RelationKind::References
         } else {
-            // Target kind is a local (Variable/Parameter/Field/...) or
-            // unknown. Recording these as REFERENCES floods the subgraph with
-            // un-navigable noise. Skip the edge entirely; the user can't
-            // jump to a local from elsewhere anyway.
-            continue;
+            // Target kind is missing from SymbolInformation (common for
+            // cross-crate refs when only one crate is indexed) or refers to
+            // a local. Fall back to the SCIP descriptor suffix:
+            //   `()` / `().` → function/method (CALLS)
+            //   `#`          → class/struct/interface/trait/enum (REFERENCES)
+            //   other        → skip (locals + low-signal term refs)
+            match suffix_kind(&occ.symbol) {
+                Some(RelationKind::Calls) => RelationKind::Calls,
+                Some(RelationKind::References) => RelationKind::References,
+                _ => continue,
+            }
         };
 
         if src_sym == occ.symbol {
@@ -227,14 +269,26 @@ fn load_document(
     Ok(())
 }
 
-fn nearest_enclosing(def_anchors: &[(i32, String)], occ_line: i32) -> Option<String> {
-    // Binary search for the last definition whose start_line <= occ_line.
-    let idx = match def_anchors.binary_search_by(|(line, _)| line.cmp(&occ_line)) {
-        Ok(i) => Some(i),
-        Err(0) => None,
-        Err(i) => Some(i - 1),
-    };
-    idx.map(|i| def_anchors[i].1.clone())
+fn nearest_enclosing(def_anchors: &[(i32, u8, String)], occ_line: i32) -> Option<String> {
+    // Find the anchor with maximum start_line ≤ occ_line, breaking line ties
+    // by higher specificity. `def_anchors` is sorted (line ASC, spec ASC), so
+    // a linear scan from the end picks the right one in O(n) — fine for
+    // per-document anchor sets.
+    let mut best: Option<(i32, u8, &str)> = None;
+    for (line, spec, sym) in def_anchors {
+        if *line > occ_line {
+            break;
+        }
+        match best {
+            None => best = Some((*line, *spec, sym.as_str())),
+            Some((bl, bs, _)) => {
+                if *line > bl || (*line == bl && *spec >= bs) {
+                    best = Some((*line, *spec, sym.as_str()));
+                }
+            }
+        }
+    }
+    best.map(|(_, _, s)| s.to_string())
 }
 
 fn insert_relation(
@@ -285,27 +339,27 @@ fn is_callable_kind(k: Option<SymKind>) -> bool {
     )
 }
 
-/// Symbols whose definition is a meaningful "enclosing" scope for the nearest-
-/// preceding-definition heuristic. Excludes locals (Variable, Parameter, Field),
-/// otherwise the heuristic anchors occurrences to noise.
-fn is_anchor_kind(k: Option<SymKind>) -> bool {
-    matches!(
-        k,
-        Some(SymKind::Function)
-            | Some(SymKind::Method)
-            | Some(SymKind::Constructor)
-            | Some(SymKind::StaticMethod)
-            | Some(SymKind::AbstractMethod)
-            | Some(SymKind::Macro)
-            | Some(SymKind::Class)
-            | Some(SymKind::Struct)
-            | Some(SymKind::Interface)
-            | Some(SymKind::Trait)
-            | Some(SymKind::Enum)
-            | Some(SymKind::Module)
-            | Some(SymKind::Namespace)
-            | Some(SymKind::Package)
-    )
+/// Specificity score for an anchor candidate. Higher = inner / more specific.
+/// 0 means "not an anchor" (locals, fields, unknown). The relative ordering
+/// matters more than the absolute numbers — Function beats Module so calls
+/// inside a function at line 0 anchor to the function, not to the enclosing
+/// crate module.
+fn anchor_specificity(k: Option<SymKind>) -> u8 {
+    match k {
+        Some(SymKind::Method)
+        | Some(SymKind::StaticMethod)
+        | Some(SymKind::Constructor)
+        | Some(SymKind::AbstractMethod)
+        | Some(SymKind::Function)
+        | Some(SymKind::Macro) => 100,
+        Some(SymKind::Class)
+        | Some(SymKind::Struct)
+        | Some(SymKind::Interface)
+        | Some(SymKind::Trait)
+        | Some(SymKind::Enum) => 50,
+        Some(SymKind::Module) | Some(SymKind::Namespace) | Some(SymKind::Package) => 10,
+        _ => 0,
+    }
 }
 
 fn is_type_kind(k: Option<SymKind>) -> bool {
@@ -320,6 +374,32 @@ fn is_type_kind(k: Option<SymKind>) -> bool {
             | Some(SymKind::Type)
             | Some(SymKind::Protocol)
     )
+}
+
+/// Last-resort kind guess from a SCIP symbol's descriptor suffix. SCIP
+/// descriptors encode kind in their trailing punctuation:
+///   - `()` or `().` → method / function
+///   - `#`           → class / struct / interface / trait / enum / typealias
+///   - everything else (`. `, `:`, `[…]`, `local …`) → unknown / low-signal
+///
+/// This is used when `SymbolInformation.kind` isn't available, which is
+/// common for cross-crate references when the indexer was pointed at only
+/// the consumer crate. Without this fallback the loader drops cross-crate
+/// CALLS edges entirely (the Phase 2.2 cross-repo regression we hit).
+fn suffix_kind(symbol: &str) -> Option<RelationKind> {
+    // Skip locals — they're per-document and never navigable cross-repo.
+    if symbol.starts_with("local ") {
+        return None;
+    }
+    // Trim a trailing `.` (definition disambiguator) so `foo().` matches.
+    let trimmed = symbol.trim_end_matches('.');
+    if trimmed.ends_with(')') {
+        Some(RelationKind::Calls)
+    } else if trimmed.ends_with('#') {
+        Some(RelationKind::References)
+    } else {
+        None
+    }
 }
 
 fn decode_range(range: &[i32]) -> (i32, i32) {
@@ -401,6 +481,26 @@ mod tests {
         assert!(role_set(bits, SymbolRole::Definition));
         assert!(role_set(bits, SymbolRole::Import));
         assert!(!role_set(bits, SymbolRole::Generated));
+    }
+
+    #[test]
+    fn suffix_kind_classifies_descriptors() {
+        assert_eq!(
+            suffix_kind("rust-analyzer cargo lib 0.1.0 mod/foo()."),
+            Some(RelationKind::Calls)
+        );
+        assert_eq!(
+            suffix_kind("rust-analyzer cargo lib 0.1.0 mod/foo()"),
+            Some(RelationKind::Calls)
+        );
+        assert_eq!(
+            suffix_kind("rust-analyzer cargo lib 0.1.0 mod/MyType#"),
+            Some(RelationKind::References)
+        );
+        // Term/constant (`.` suffix only) → unknown, drop.
+        assert_eq!(suffix_kind("rust-analyzer cargo lib 0.1.0 mod/MAX."), None);
+        // Local → never emit.
+        assert_eq!(suffix_kind("local 5"), None);
     }
 
     #[test]

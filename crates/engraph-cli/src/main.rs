@@ -112,6 +112,10 @@ enum Cmd {
         /// Project key for the indexed entities (default: canonical repo path)
         #[arg(long)]
         project: Option<String>,
+        /// Index every sub-repo under this directory (Phase 2.2 cross-repo).
+        /// Mutually exclusive with --scip and --lang.
+        #[arg(long, conflicts_with_all = ["scip", "lang"])]
+        workspace: Option<PathBuf>,
     },
     /// Show a 2-hop markdown neighborhood for a symbol from the codegraph
     Subgraph {
@@ -331,38 +335,85 @@ fn main() -> Result<()> {
             scip,
             lang,
             project,
+            workspace,
         } => {
-            let canonical = repo.canonicalize().unwrap_or_else(|_| repo.clone());
-            let project_key = project.unwrap_or_else(|| canonical.to_string_lossy().into_owned());
             let start = Instant::now();
-            let stats = engraph_codegraph::index_repo(
-                &conn,
-                &repo,
-                scip.as_deref(),
-                lang.as_deref(),
-                &project_key,
-            )?;
-            telemetry::record_event(
-                &conn,
-                EventInput {
-                    session_id: std::env::var("CLAUDE_SESSION_ID").ok().as_deref(),
-                    kind: EventKind::WrappedCmd,
-                    feature: "F2",
-                    filter_id: Some(stats.driver_name),
-                    input_tokens: stats.scip_bytes as i64,
-                    output_tokens: 0,
-                    latency_ms: start.elapsed().as_millis() as i64,
-                },
-            )?;
-            println!(
-                "indexed {} ({} entities, {} relations, {} SCIP bytes, {}ms, driver={})",
-                project_key,
-                stats.entities_inserted,
-                stats.relations_inserted,
-                stats.scip_bytes,
-                stats.elapsed_ms,
-                stats.driver_name
-            );
+            let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
+            if let Some(root) = workspace {
+                let stats = engraph_codegraph::index_workspace(&conn, &root)?;
+                let total_bytes: usize = stats
+                    .repos
+                    .iter()
+                    .filter_map(|r| r.outcome.as_ref().ok())
+                    .map(|s| s.scip_bytes)
+                    .sum();
+                for r in &stats.repos {
+                    match &r.outcome {
+                        Ok(s) => println!(
+                            "  ok  {} ({} entities, {} relations, driver={})",
+                            r.project, s.entities_inserted, s.relations_inserted, s.driver_name
+                        ),
+                        Err(e) => println!("  err {} :: {e:#}", r.project),
+                    }
+                }
+                println!(
+                    "workspace {}: {} repo(s) ok, {} failed; {} entities, {} relations total ({} SCIP bytes, {}ms)",
+                    root.display(),
+                    stats.ok_count(),
+                    stats.err_count(),
+                    stats.entities_total(),
+                    stats.relations_total(),
+                    total_bytes,
+                    start.elapsed().as_millis()
+                );
+                telemetry::record_event(
+                    &conn,
+                    EventInput {
+                        session_id: session_id.as_deref(),
+                        kind: EventKind::WrappedCmd,
+                        feature: "F2",
+                        filter_id: Some("workspace"),
+                        input_tokens: total_bytes as i64,
+                        output_tokens: 0,
+                        latency_ms: start.elapsed().as_millis() as i64,
+                    },
+                )?;
+                if stats.err_count() > 0 && stats.ok_count() == 0 {
+                    anyhow::bail!("every repo in the workspace failed to index");
+                }
+            } else {
+                let canonical = repo.canonicalize().unwrap_or_else(|_| repo.clone());
+                let project_key =
+                    project.unwrap_or_else(|| canonical.to_string_lossy().into_owned());
+                let stats = engraph_codegraph::index_repo(
+                    &conn,
+                    &repo,
+                    scip.as_deref(),
+                    lang.as_deref(),
+                    &project_key,
+                )?;
+                telemetry::record_event(
+                    &conn,
+                    EventInput {
+                        session_id: session_id.as_deref(),
+                        kind: EventKind::WrappedCmd,
+                        feature: "F2",
+                        filter_id: Some(stats.driver_name),
+                        input_tokens: stats.scip_bytes as i64,
+                        output_tokens: 0,
+                        latency_ms: start.elapsed().as_millis() as i64,
+                    },
+                )?;
+                println!(
+                    "indexed {} ({} entities, {} relations, {} SCIP bytes, {}ms, driver={})",
+                    project_key,
+                    stats.entities_inserted,
+                    stats.relations_inserted,
+                    stats.scip_bytes,
+                    stats.elapsed_ms,
+                    stats.driver_name
+                );
+            }
         }
         Cmd::Subgraph {
             symbol,
