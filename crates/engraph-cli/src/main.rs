@@ -13,7 +13,7 @@ use engraph_core::{
 };
 use engraph_retrieve::{Query, ScopeFilter, Target};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::Stdio;
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -184,9 +184,7 @@ fn main() -> Result<()> {
         }
         Cmd::Run { command, args } => {
             let start = Instant::now();
-            let output = Command::new(&command)
-                .args(&args)
-                .output()
+            let output = run_wrapped_command(&command, &args)
                 .map_err(|e| anyhow::anyhow!("exec {command} failed: {e}"))?;
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -765,6 +763,49 @@ fn run_pre_bash_hook(conn: &db::PooledConn) -> Result<()> {
         RewriteOutcome::Passthrough => {}
     }
     Ok(())
+}
+
+/// Spawn a wrapped command through `tokio::process` and return its combined
+/// output. Inherits stdin so interactive commands work (`git log -p` pager,
+/// `cargo test -- --interactive`, anything reading from a TTY). Reads stdout
+/// and stderr concurrently so neither can deadlock by filling its pipe buffer
+/// while we wait on the other. Terminal SIGINT/SIGTERM still reach the child
+/// directly via the shared process group; the parent ignores them so it stays
+/// alive long enough to drain the child's last output and record telemetry.
+fn run_wrapped_command(
+    command: &str,
+    args: &[String],
+) -> Result<std::process::Output> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        // Best-effort: install no-op handlers so the parent doesn't die on
+        // Ctrl-C before the child finishes draining. On platforms where signal
+        // registration fails (or isn't supported), proceed without it — terminal
+        // signals still reach the child either way.
+        #[cfg(unix)]
+        let _signal_swallower = {
+            use tokio::signal::unix::{signal, SignalKind};
+            (
+                signal(SignalKind::interrupt()).ok(),
+                signal(SignalKind::terminate()).ok(),
+            )
+        };
+
+        let child = tokio::process::Command::new(command)
+            .args(args)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        // wait_with_output drains stdout and stderr concurrently while it
+        // waits on the child — no pipe-buffer deadlock under large output.
+        let output = child.wait_with_output().await?;
+        Ok::<_, std::io::Error>(output)
+    })
+    .map_err(|e: std::io::Error| anyhow::anyhow!(e))
 }
 
 fn print_hits(hits: &[engraph_retrieve::Hit]) {

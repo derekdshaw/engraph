@@ -1,8 +1,11 @@
-//! Integration test for `engraph run` budget tracking. After a wrapped command
-//! runs inside a session, `session_budget.used_tokens` for that session must
-//! reflect the post-filter output size (what actually lands in Claude's context).
+//! Integration tests for `engraph run`:
+//! - Budget tracking: post-filter token count is charged to session_budget when
+//!   CLAUDE_SESSION_ID is set; no row exists when it isn't.
+//! - tokio::process migration: stdin is inherited (cat round-trips piped input),
+//!   and large concurrent stdout+stderr drains without deadlock.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
 fn bin() -> &'static str {
@@ -55,6 +58,71 @@ fn wrapped_run_charges_session_budget() {
         )
         .unwrap();
     assert_eq!(count, 1);
+}
+
+#[test]
+fn wrapped_run_inherits_stdin() {
+    // Positive: tokio::process should wire stdin through to the child. Pipe
+    // a known phrase into `cat` and assert it shows up in the wrapped output.
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("stdin.db");
+    let phrase = "tokio-stdin-inheritance-marker-7f3a";
+
+    let mut child = Command::new(bin())
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("ENGRAPH_DB_PATH", &db)
+        .args(["run", "cat"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn engraph run cat");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(phrase.as_bytes())
+        .unwrap();
+    // Close stdin so `cat` sees EOF and exits.
+    drop(child.stdin.take());
+    let out = child.wait_with_output().expect("wait");
+    assert!(out.status.success(), "engraph run cat failed: {out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(phrase),
+        "stdin marker missing from wrapped output: {text}"
+    );
+}
+
+#[test]
+fn wrapped_run_drains_large_concurrent_output_without_deadlock() {
+    // Negative regression: with std::process::Command::output() this pattern
+    // is safe (the runtime drains both pipes), but the migration to tokio
+    // needs to preserve concurrent draining. Use a shell command that writes
+    // a lot to BOTH stdout and stderr so a single-pipe drain would fill a
+    // pipe buffer (typically 64KB on Linux) and deadlock.
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("drain.db");
+
+    let out = Command::new(bin())
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("ENGRAPH_DB_PATH", &db)
+        .args([
+            "run",
+            "sh",
+            "-c",
+            // 200000 chars each on stdout and stderr (~200KB > 64KB pipe buffer).
+            "yes a | head -c 200000; yes b | head -c 200000 1>&2",
+        ])
+        .output()
+        .expect("spawn engraph run sh");
+    assert!(
+        out.status.success(),
+        "engraph run sh exited non-zero (likely deadlock or stream drop): {:?}",
+        out.status
+    );
 }
 
 #[test]

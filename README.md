@@ -270,7 +270,7 @@ The plan's verification gates are wired as tests:
 - `engraph-retrieve/tests/hybrid_path.rs` — RRF reordering vs FTS, recency tiebreak toward newer `ts`, unembedded-candidate fallback, idempotent upsert
 - `engraph-ingest/src/lib.rs` (unit) — incremental re-ingest, rotation/truncation replay, mid-write partial-line hold, sidechain event filtering, sweep idempotency and recoverability, FTS-retention through `compress_existing`
 - `engraph-cli/tests/session_start_hook.rs` — empty brief on unknown project, populated brief includes rules/bugs, size cap respected
-- `engraph-cli/tests/run_budget.rs` — `engraph run` charges `session_budget` when `CLAUDE_SESSION_ID` is set, no-ops cleanly when not
+- `engraph-cli/tests/run_budget.rs` — `engraph run` charges `session_budget` when `CLAUDE_SESSION_ID` is set, no-ops cleanly when not, inherits stdin (cat round-trip), and drains ~200KB of concurrent stdout+stderr without pipe-buffer deadlock (validates the `tokio::process` migration)
 
 ## License
 
