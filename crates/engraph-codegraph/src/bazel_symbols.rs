@@ -341,7 +341,8 @@ fn scip_output_dir(repo: &Path) -> Result<PathBuf> {
     let canonical = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
     let mut hasher = Sha256::new();
     hasher.update(canonical.to_string_lossy().as_bytes());
-    let hex = format!("{:x}", hasher.finalize());
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
     let base = dirs::cache_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".cache"))
         .join("engraph")
