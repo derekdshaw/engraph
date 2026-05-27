@@ -13,6 +13,7 @@ pub mod kubectl;
 pub mod lint;
 pub mod npm;
 pub mod python;
+pub mod read;
 pub mod search;
 pub mod tree;
 pub mod util;
@@ -107,6 +108,10 @@ pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
         ("tree", _) => (tree::tree, "tree"),
         ("fd", _) => (tree::fd, "fd"),
         ("ls", _) => (tree::ls, "ls"),
+
+        // File reads: whole-file (cat/bat/less) and user-windowed (head/tail).
+        ("cat" | "bat" | "less", _) => (read::cat, "read_cat"),
+        ("head" | "tail", _) => (read::head_tail, "read_head_tail"),
 
         _ => (generic::filter, "generic"),
     }

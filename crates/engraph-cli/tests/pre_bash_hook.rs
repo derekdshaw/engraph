@@ -230,6 +230,30 @@ fn git_lowercase_c_with_value_is_stripped() {
 }
 
 #[test]
+fn cat_is_rewritten_through_engraph_run() {
+    let (_t, db) = db_dir();
+    let out = run_hook(&db, "cat src/main.rs");
+    let v = parse(&out).expect("expected rewrite JSON");
+    let updated = v
+        .pointer("/hookSpecificOutput/updatedInput/command")
+        .and_then(|s| s.as_str())
+        .unwrap();
+    assert_eq!(updated, "engraph run cat src/main.rs");
+}
+
+#[test]
+fn head_with_flags_is_rewritten() {
+    let (_t, db) = db_dir();
+    let out = run_hook(&db, "head -n 100 foo.py");
+    let v = parse(&out).expect("expected rewrite JSON");
+    let updated = v
+        .pointer("/hookSpecificOutput/updatedInput/command")
+        .and_then(|s| s.as_str())
+        .unwrap();
+    assert_eq!(updated, "engraph run head -n 100 foo.py");
+}
+
+#[test]
 fn heredoc_command_is_passthrough() {
     let (_t, db) = db_dir();
     // `cat <<'EOF' ... EOF` would be corrupted by any rewrite — passthrough.
