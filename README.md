@@ -158,6 +158,9 @@ Add to `~/.claude/settings.json`:
       { "matcher": "Bash", "hooks": [{ "type": "command", "command": "engraph hook pre-bash" }] },
       { "matcher": "Grep", "hooks": [{ "type": "command", "command": "engraph hook pre-grep" }] }
     ],
+    "PostToolUse": [
+      { "matcher": "Read", "hooks": [{ "type": "command", "command": "engraph hook post-read" }] }
+    ],
     "SessionEnd": [
       { "matcher": "", "hooks": [{ "type": "command", "command": "engraph ingest --from-stdin" }] }
     ]
@@ -190,6 +193,10 @@ Compound commands (`cd /tmp && git log`, `git log | head`, env-prefixed forms) f
 After `engraph index .` populates the codegraph, the PreToolUse hook on Grep watches for bareword patterns (`^[A-Za-z_][A-Za-z0-9_]*$`, length ≥ 3) that resolve to **1–3 entities** by `name` or moniker. On a hit, it returns `permissionDecision: "deny"` with a message pointing Claude at `engraph subgraph <symbol>` — typically 100× smaller than the file-read-and-grep loop Claude would otherwise run.
 
 The same redirect fires for `rg <symbol>` and `grep <symbol>` invoked via the Bash tool — checked inside `pre-bash` before the compression rewrite, so subgraph wins over `engraph run rg <symbol>` when both apply.
+
+### How `post-read` enriches Read results
+
+PostToolUse(Read) appends a brief listing of indexed symbols in the file as `hookSpecificOutput.additionalContext` — name, line range, and signature for up to 30 entities, capped at `MAX_BRIEF_BYTES`. Often answers "what's in this file" without Claude needing a follow-up grep or subgraph call. Silent passthrough for files not in the graph. Telemetry feature `F3_post_read`.
 
 The gate is deliberately narrow:
 

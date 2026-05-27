@@ -138,6 +138,26 @@ fn query_edges(
     Ok(rows)
 }
 
+/// All entities defined in `file_path`, ordered by line. Used by the
+/// PostToolUse(Read) augment to enrich Claude's view of a just-read file
+/// with the indexed-symbol map.
+pub fn entities_in_file(
+    conn: &PooledConn,
+    file_path: &str,
+    limit: usize,
+) -> Result<Vec<EntityRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, project, file_path, line_range, signature FROM entities
+         WHERE file_path = ?1
+         ORDER BY line_range
+         LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![file_path, limit as i64], row_to_entity)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 fn query_siblings(
     conn: &PooledConn,
     file_path: &str,
@@ -249,8 +269,7 @@ pub fn format_markdown(n: &Neighborhood, byte_cap: usize) -> String {
         );
     }
     if !n.incoming.is_empty() {
-        let mut seen_in: std::collections::HashSet<&str> =
-            std::collections::HashSet::new();
+        let mut seen_in: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let inc: Vec<_> = n
             .incoming
             .iter()
@@ -411,7 +430,10 @@ mod tests {
         assert!(md.contains("## Symbol `foo`"), "{md}");
         assert!(md.contains("**Calls**: `bar`"), "{md}");
         assert!(md.contains("**Called by**: `baz`"), "{md}");
-        assert!(md.contains("**Sibling symbols** (same file): `bar`"), "{md}");
+        assert!(
+            md.contains("**Sibling symbols** (same file): `bar`"),
+            "{md}"
+        );
         assert!(md.contains("fn foo() -> i32"), "signature missing: {md}");
     }
 
@@ -460,7 +482,10 @@ mod tests {
         .unwrap();
         let n = subgraph_for(&conn, "caller", 30).unwrap();
         let md = format_markdown(&n, DEFAULT_BYTE_CAP);
-        assert!(md.contains("repo:lib_a"), "missing cross-repo annotation: {md}");
+        assert!(
+            md.contains("repo:lib_a"),
+            "missing cross-repo annotation: {md}"
+        );
         assert!(md.contains("`lib_foo`"), "{md}");
 
         // Same-project edge should NOT carry the annotation.

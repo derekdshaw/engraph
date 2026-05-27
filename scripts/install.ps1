@@ -2,8 +2,8 @@
 # Engraph installer for Windows.
 # Resolves the engraph.exe binary relative to this script's directory
 # (matches the release-archive layout), installs it under a per-user prefix,
-# and wires SessionStart + PreToolUse(Bash,Grep) hooks into Claude Code's
-# settings.json.
+# and wires SessionStart + PreToolUse(Bash,Grep) + PostToolUse(Read) hooks
+# into Claude Code's settings.json.
 
 $ErrorActionPreference = "Stop"
 
@@ -137,6 +137,12 @@ $hooksConfig = @{
         @{
             matcher = "Grep"
             hooks   = @(@{ type = "command"; command = "$EngraphPath hook pre-grep" })
+        }
+    )
+    "PostToolUse" = @(
+        @{
+            matcher = "Read"
+            hooks   = @(@{ type = "command"; command = "$EngraphPath hook post-read" })
         }
     )
 }

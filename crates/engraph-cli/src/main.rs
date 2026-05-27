@@ -159,6 +159,10 @@ enum HookCmd {
     /// to 1-3 entities in the codegraph, deny and point at
     /// `engraph subgraph <symbol>` for a 2-hop neighborhood instead.
     PreGrep,
+    /// PostToolUse(Read) augment: when Claude reads a file we've indexed,
+    /// append a listing of symbols in the file (name, line range, signature)
+    /// as additionalContext so a follow-up subgraph call is often unneeded.
+    PostRead,
     /// SessionStart hook: emit a terse brief of prior context for the current
     /// project as `hookSpecificOutput.additionalContext` (<= MAX_BRIEF_BYTES).
     SessionStart,
@@ -276,6 +280,11 @@ fn main() -> Result<()> {
             HookCmd::PreGrep => {
                 if let Err(e) = run_pre_grep_hook(&conn) {
                     tracing::warn!(?e, "pre-grep hook failed; allowing through");
+                }
+            }
+            HookCmd::PostRead => {
+                if let Err(e) = run_post_read_hook(&conn) {
+                    tracing::warn!(?e, "post-read hook failed; emitting empty");
                 }
             }
             HookCmd::SessionStart => {
@@ -1188,6 +1197,78 @@ fn run_pre_grep_hook(conn: &db::PooledConn) -> Result<()> {
         emit_subgraph_deny(conn, &reason, "F2_pre_grep");
     }
     Ok(())
+}
+
+/// PostToolUse(Read) hook: when Claude reads a file that engraph has indexed,
+/// append a listing of symbols defined in that file (name, line range,
+/// signature) as `additionalContext`. Often answers "what's in this file"
+/// without a follow-up subgraph or grep.
+fn run_post_read_hook(conn: &db::PooledConn) -> Result<()> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf)?;
+    if buf.trim().is_empty() {
+        return Ok(());
+    }
+    let v: serde_json::Value = match serde_json::from_str::<serde_json::Value>(&buf) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    let file_path = v
+        .pointer("/tool_input/file_path")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .trim();
+    if file_path.is_empty() {
+        return Ok(());
+    }
+    let entities = engraph_codegraph::subgraph::entities_in_file(conn, file_path, 30)?;
+    if entities.is_empty() {
+        return Ok(());
+    }
+    let context = truncate_to_bytes(&build_read_context(file_path, &entities), MAX_BRIEF_BYTES);
+    let decision = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": context
+        }
+    });
+    println!("{decision}");
+    let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
+    telemetry::record_event(
+        conn,
+        EventInput {
+            session_id: session_id.as_deref(),
+            kind: EventKind::Hook,
+            feature: "F3_post_read",
+            filter_id: Some("read-augment"),
+            input_tokens: 0,
+            output_tokens: tokens::count(&context) as i64,
+            latency_ms: 0,
+        },
+    )
+    .ok();
+    Ok(())
+}
+
+fn build_read_context(
+    file_path: &str,
+    entities: &[engraph_codegraph::subgraph::EntityRow],
+) -> String {
+    let mut out = format!("Indexed symbols in {file_path}:\n");
+    for e in entities {
+        let line = e.line_range.as_deref().unwrap_or("?");
+        match e.signature.as_deref() {
+            Some(sig) if !sig.is_empty() => {
+                out.push_str(&format!("- `{}` @ {line} — `{sig}`\n", e.name));
+            }
+            _ => {
+                out.push_str(&format!("- `{}` @ {line}\n", e.name));
+            }
+        }
+    }
+    out.push_str("\n(Use `engraph subgraph <name>` for calls/callers.)\n");
+    out
 }
 
 /// Spawn a wrapped command through `tokio::process` and return its combined

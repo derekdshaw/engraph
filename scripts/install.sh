@@ -4,8 +4,8 @@ set -euo pipefail
 # Engraph installer for macOS and Linux.
 # Resolves the `engraph` binary relative to this script's directory (matches
 # the layout of the release archive), installs it under a per-user prefix,
-# and wires SessionStart + PreToolUse(Bash,Grep) hooks into Claude Code's
-# settings.json.
+# and wires SessionStart + PreToolUse(Bash,Grep) + PostToolUse(Read) hooks
+# into Claude Code's settings.json.
 
 BINARY="engraph"
 CLAUDE_DIR="$HOME/.claude"
@@ -151,6 +151,12 @@ hooks_config = {
         {
             "matcher": "Grep",
             "hooks": [{"type": "command", "command": f"{engraph} hook pre-grep"}],
+        },
+    ],
+    "PostToolUse": [
+        {
+            "matcher": "Read",
+            "hooks": [{"type": "command", "command": f"{engraph} hook post-read"}],
         },
     ],
 }
