@@ -118,10 +118,15 @@ enum Cmd {
         workspace: Option<PathBuf>,
         /// Also drive scip-java / scip-go / scip-typescript via Bazel-resolved
         /// sources after the target-level pass (Phase 2.3 #2). Heavy: implies
-        /// toolchain downloads and full builds via Bazel. Off by default; the
-        /// target-level (`bazel query`) pass is the fast deterministic default.
-        #[arg(long)]
+        /// toolchain downloads and full builds via Bazel. Defaults: ON for
+        /// `--workspace` (one-time hit, full coverage), OFF for single-repo
+        /// runs. Use `--no-bazel-symbols` to override the workspace default.
+        #[arg(long, conflicts_with = "no_bazel_symbols")]
         bazel_symbols: bool,
+        /// Disable symbol-level Bazel indexing in `--workspace` mode where it
+        /// is on by default. No effect outside `--workspace`.
+        #[arg(long, conflicts_with = "bazel_symbols")]
+        no_bazel_symbols: bool,
     },
     /// Show a 2-hop markdown neighborhood for a symbol from the codegraph
     Subgraph {
@@ -360,11 +365,25 @@ fn main() -> Result<()> {
             project,
             workspace,
             bazel_symbols,
+            no_bazel_symbols,
         } => {
             let start = Instant::now();
             let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
+            // Effective bazel-symbols policy: explicit flags win; otherwise
+            // default ON in --workspace mode and OFF for single-repo runs.
+            // Workspace runs are infrequent and the symbol pass is the only
+            // way to get function-level data inside a Bazel monorepo, so
+            // paying the one-time cost matches the typical intent.
+            let effective_bazel_symbols = if bazel_symbols {
+                true
+            } else if no_bazel_symbols {
+                false
+            } else {
+                workspace.is_some()
+            };
             if let Some(root) = workspace {
-                let stats = engraph_codegraph::index_workspace(&conn, &root, bazel_symbols)?;
+                let stats =
+                    engraph_codegraph::index_workspace(&conn, &root, effective_bazel_symbols)?;
                 let total_bytes: usize = stats
                     .repos
                     .iter()
@@ -415,7 +434,7 @@ fn main() -> Result<()> {
                     scip.as_deref(),
                     lang.as_deref(),
                     &project_key,
-                    bazel_symbols,
+                    effective_bazel_symbols,
                 )?;
                 telemetry::record_event(
                     &conn,

@@ -94,32 +94,111 @@ pub fn index_repo(
         });
     }
 
-    let (scip_path, driver_name): (PathBuf, &'static str) = match scip_override {
-        Some(p) => (p.to_path_buf(), "prebuilt"),
-        None => {
-            let drv = select_driver(repo, lang_override)?;
-            let mut cmd = drv.command(repo);
-            tracing::info!(driver = drv.name(), ?cmd, "running SCIP indexer");
-            let status = cmd
-                .status()
-                .with_context(|| format!("spawning {}", drv.name()))?;
-            if !status.success() {
-                anyhow::bail!("{} exited with {}", drv.name(), status);
-            }
-            (drv.output_path(repo), driver_static_name(drv.name()))
-        }
-    };
+    // Prebuilt SCIP path: load the provided file as-is.
+    if let Some(p) = scip_override {
+        let bytes = std::fs::read(p)
+            .with_context(|| format!("reading SCIP at {}", p.display()))?;
+        let load_stats = scip_loader::load(conn, project, &bytes)?;
+        return Ok(IndexStats {
+            entities_inserted: load_stats.entities_inserted,
+            relations_inserted: load_stats.relations_inserted,
+            scip_bytes: bytes.len(),
+            elapsed_ms: start.elapsed().as_millis() as i64,
+            driver_name: "prebuilt",
+        });
+    }
 
-    let bytes = std::fs::read(&scip_path)
-        .with_context(|| format!("reading SCIP at {}", scip_path.display()))?;
-    let load_stats = scip_loader::load(conn, project, &bytes)?;
+    // Explicit --lang override: pin to one driver, single SCIP load.
+    if let Some(name) = lang_override {
+        let drv = driver::by_name(name)
+            .ok_or_else(|| anyhow::anyhow!("unknown driver: {name}"))?;
+        let bytes = run_driver_to_scip(repo, &*drv)?;
+        let load_stats = scip_loader::load(conn, project, &bytes)?;
+        return Ok(IndexStats {
+            entities_inserted: load_stats.entities_inserted,
+            relations_inserted: load_stats.relations_inserted,
+            scip_bytes: bytes.len(),
+            elapsed_ms: start.elapsed().as_millis() as i64,
+            driver_name: driver_static_name(drv.name()),
+        });
+    }
+
+    // Auto-detect: run EVERY matching driver and merge their SCIP outputs into
+    // a single Index protobuf before loading. Multi-language repos (e.g.
+    // Python + TypeScript, Java + Python) get full coverage instead of just
+    // the first detected language. Per-driver failures are warnings; we
+    // proceed with whatever succeeded. If nothing succeeds we bail.
+    let matching: Vec<Box<dyn driver::Driver>> = driver::registry()
+        .into_iter()
+        .filter(|d| d.detect(repo))
+        .collect();
+    if matching.is_empty() {
+        anyhow::bail!(
+            "no driver matched {} — pass --lang to force one or --scip <path> to skip detection",
+            repo.display()
+        );
+    }
+
+    let mut all_bytes: Vec<Vec<u8>> = Vec::with_capacity(matching.len());
+    let mut total_scip_bytes = 0usize;
+    let mut succeeded_names: Vec<&'static str> = Vec::with_capacity(matching.len());
+    for drv in &matching {
+        match run_driver_to_scip(repo, &**drv) {
+            Ok(bytes) => {
+                total_scip_bytes += bytes.len();
+                all_bytes.push(bytes);
+                succeeded_names.push(driver_static_name(drv.name()));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    driver = drv.name(),
+                    error = %e,
+                    "driver failed; continuing with remaining drivers for this repo",
+                );
+            }
+        }
+    }
+    if all_bytes.is_empty() {
+        anyhow::bail!(
+            "all {} driver(s) failed for {}",
+            matching.len(),
+            repo.display()
+        );
+    }
+
+    let merged = if all_bytes.len() == 1 {
+        all_bytes.into_iter().next().unwrap()
+    } else {
+        bazel_symbols::merge_scip_bytes(&all_bytes)?
+    };
+    let load_stats = scip_loader::load(conn, project, &merged)?;
+    let driver_name: &'static str = if succeeded_names.len() == 1 {
+        succeeded_names[0]
+    } else {
+        "multi"
+    };
     Ok(IndexStats {
         entities_inserted: load_stats.entities_inserted,
         relations_inserted: load_stats.relations_inserted,
-        scip_bytes: bytes.len(),
+        scip_bytes: total_scip_bytes,
         elapsed_ms: start.elapsed().as_millis() as i64,
         driver_name,
     })
+}
+
+fn run_driver_to_scip(repo: &Path, drv: &dyn driver::Driver) -> Result<Vec<u8>> {
+    let mut cmd = drv.command(repo);
+    tracing::info!(driver = drv.name(), ?cmd, "running SCIP indexer");
+    let status = cmd
+        .status()
+        .with_context(|| format!("spawning {}", drv.name()))?;
+    if !status.success() {
+        anyhow::bail!("{} exited with {}", drv.name(), status);
+    }
+    let scip_path = drv.output_path(repo);
+    let bytes = std::fs::read(&scip_path)
+        .with_context(|| format!("reading SCIP at {}", scip_path.display()))?;
+    Ok(bytes)
 }
 
 /// Discover candidate repo roots under `workspace_root` (Phase 2.2). Rules:
@@ -200,21 +279,6 @@ pub fn index_workspace(
         });
     }
     Ok(stats)
-}
-
-fn select_driver(repo: &Path, lang: Option<&str>) -> Result<Box<dyn driver::Driver>> {
-    if let Some(name) = lang {
-        return driver::by_name(name).ok_or_else(|| anyhow::anyhow!("unknown driver: {name}"));
-    }
-    for d in driver::registry() {
-        if d.detect(repo) {
-            return Ok(d);
-        }
-    }
-    anyhow::bail!(
-        "no driver matched {} — pass --lang to force one or --scip <path> to skip detection",
-        repo.display()
-    )
 }
 
 /// Driver names are static strings declared in driver.rs; promote the runtime
