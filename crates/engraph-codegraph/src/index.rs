@@ -133,7 +133,10 @@ pub fn index_repo(
 ///   Phase 2.3.
 pub fn discover_workspace_repos(workspace_root: &Path) -> Result<Vec<PathBuf>> {
     if !workspace_root.is_dir() {
-        anyhow::bail!("workspace root is not a directory: {}", workspace_root.display());
+        anyhow::bail!(
+            "workspace root is not a directory: {}",
+            workspace_root.display()
+        );
     }
     if is_indexable_root(workspace_root) {
         return Ok(vec![workspace_root.to_path_buf()]);

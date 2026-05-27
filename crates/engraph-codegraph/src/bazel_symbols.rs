@@ -237,7 +237,10 @@ fn build_indexer_command(spec: &LangSpec, repo: &Path, out_path: &Path) -> Comma
     match spec.language {
         "java" => {
             let mut c = Command::new(spec.binary);
-            c.arg("index").arg("--output").arg(out_path).current_dir(repo);
+            c.arg("index")
+                .arg("--output")
+                .arg(out_path)
+                .current_dir(repo);
             c
         }
         "go" => {
@@ -251,7 +254,10 @@ fn build_indexer_command(spec: &LangSpec, repo: &Path, out_path: &Path) -> Comma
         }
         "ts" => {
             let mut c = Command::new(spec.binary);
-            c.arg("index").arg("--output").arg(out_path).current_dir(repo);
+            c.arg("index")
+                .arg("--output")
+                .arg(out_path)
+                .current_dir(repo);
             c
         }
         _ => unreachable!(),

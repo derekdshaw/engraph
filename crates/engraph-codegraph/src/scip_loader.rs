@@ -16,7 +16,7 @@
 use crate::relation_kind::RelationKind;
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
-use protobuf::{Message, EnumOrUnknown};
+use protobuf::{EnumOrUnknown, Message};
 use scip::types::{symbol_information::Kind as SymKind, Document, Index, SymbolRole};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -178,10 +178,22 @@ fn load_document(
             }
             ensure_placeholder_entity(conn, &rel.symbol, project)?;
             if rel.is_implementation {
-                insert_relation(conn, &s.symbol, &rel.symbol, RelationKind::Implements, "extracted")?;
+                insert_relation(
+                    conn,
+                    &s.symbol,
+                    &rel.symbol,
+                    RelationKind::Implements,
+                    "extracted",
+                )?;
                 stats.relations_inserted += 1;
             } else if rel.is_reference {
-                insert_relation(conn, &s.symbol, &rel.symbol, RelationKind::Extends, "extracted")?;
+                insert_relation(
+                    conn,
+                    &s.symbol,
+                    &rel.symbol,
+                    RelationKind::Extends,
+                    "extracted",
+                )?;
                 stats.relations_inserted += 1;
             }
         }
@@ -512,7 +524,9 @@ mod tests {
 
     #[test]
     fn fallback_display_name_strips_descriptor_punct() {
-        let n = fallback_display_name("rust-analyzer cargo engraph-core 0.1.0 schema/run_migrations().");
+        let n = fallback_display_name(
+            "rust-analyzer cargo engraph-core 0.1.0 schema/run_migrations().",
+        );
         assert_eq!(n, "run_migrations");
     }
 }

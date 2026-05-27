@@ -37,11 +37,7 @@ path = "src/lib.rs"
 "#,
     )
     .unwrap();
-    std::fs::write(
-        lib_a.join("src/lib.rs"),
-        "pub fn lib_foo() -> i32 { 42 }\n",
-    )
-    .unwrap();
+    std::fs::write(lib_a.join("src/lib.rs"), "pub fn lib_foo() -> i32 { 42 }\n").unwrap();
 
     let app_b = root.join("app_b");
     std::fs::create_dir_all(app_b.join("src")).unwrap();
@@ -106,8 +102,14 @@ fn workspace_links_app_b_caller_to_lib_a_foo() {
 
     // Both repos should be indexed.
     let projects: Vec<String> = stats.repos.iter().map(|r| r.project.clone()).collect();
-    assert!(projects.iter().any(|p| p.ends_with("lib_a")), "{projects:?}");
-    assert!(projects.iter().any(|p| p.ends_with("app_b")), "{projects:?}");
+    assert!(
+        projects.iter().any(|p| p.ends_with("lib_a")),
+        "{projects:?}"
+    );
+    assert!(
+        projects.iter().any(|p| p.ends_with("app_b")),
+        "{projects:?}"
+    );
 
     // The DB should contain both symbols and a CALLS edge between them.
     let app_caller_count: i64 = conn
@@ -149,7 +151,10 @@ fn workspace_links_app_b_caller_to_lib_a_foo() {
 
     let n = subgraph_for(&conn, "app_caller", 30).unwrap();
     let md = format_markdown(&n, 8192);
-    assert!(md.contains("`lib_foo`"), "missing lib_foo in markdown: {md}");
+    assert!(
+        md.contains("`lib_foo`"),
+        "missing lib_foo in markdown: {md}"
+    );
     assert!(
         md.contains("repo:lib_a"),
         "missing repo:lib_a annotation in markdown: {md}"
@@ -180,11 +185,7 @@ fn discover_returns_root_when_it_has_a_manifest() {
     let dir = tempdir().unwrap();
     let root = dir.path().join("cargo_ws");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(
-        root.join("Cargo.toml"),
-        "[workspace]\nmembers = []\n",
-    )
-    .unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
 
     let repos = engraph_codegraph::discover_workspace_repos(&root).unwrap();
     assert_eq!(repos.len(), 1);

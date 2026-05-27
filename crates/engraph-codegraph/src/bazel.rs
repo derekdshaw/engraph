@@ -197,11 +197,7 @@ fn load_targets(
             None => (None, None),
         };
         entity_insert.execute(rusqlite::params![
-            &t.label,
-            &name,
-            project,
-            file_path,
-            line_range,
+            &t.label, &name, project, file_path, line_range,
         ])?;
         by_label.insert(t.label.clone(), ());
     }
@@ -238,11 +234,7 @@ fn target_display_name(label: &str) -> String {
     if let Some(idx) = label.rfind(':') {
         return label[idx + 1..].to_string();
     }
-    label
-        .rsplit('/')
-        .next()
-        .unwrap_or(label)
-        .to_string()
+    label.rsplit('/').next().unwrap_or(label).to_string()
 }
 
 fn relative_to_repo(abs_file: &str, repo_root: &Path) -> String {
@@ -366,7 +358,10 @@ mod tests {
         assert_eq!(targets.len(), 2);
         assert_eq!(targets[0].label, "//bar:bar");
         assert_eq!(targets[0].rule_class, "genrule");
-        assert_eq!(targets[0].deps, vec!["//foo:foo", "@bazel_tools//tools/genrule:genrule-setup.sh"]);
+        assert_eq!(
+            targets[0].deps,
+            vec!["//foo:foo", "@bazel_tools//tools/genrule:genrule-setup.sh"]
+        );
         assert_eq!(targets[1].label, "//foo:foo");
     }
 }

@@ -134,7 +134,10 @@ fn bareword_with_three_matches_is_denied() {
 fn bareword_with_no_matches_passes_through() {
     let (_t, db) = db_dir();
     let out = run_hook(&db, "unindexed_symbol");
-    assert!(out.trim().is_empty(), "expected silent passthrough, got: {out}");
+    assert!(
+        out.trim().is_empty(),
+        "expected silent passthrough, got: {out}"
+    );
 }
 
 #[test]
@@ -142,7 +145,10 @@ fn ambiguous_bareword_passes_through() {
     let (_t, db) = db_dir();
     insert_entities(&db, "foo_bar", 5);
     let out = run_hook(&db, "foo_bar");
-    assert!(out.trim().is_empty(), "ambiguous should passthrough, got: {out}");
+    assert!(
+        out.trim().is_empty(),
+        "ambiguous should passthrough, got: {out}"
+    );
 }
 
 #[test]
@@ -151,7 +157,10 @@ fn regex_pattern_passes_through() {
     insert_entities(&db, "process", 1);
     // Has a regex metachar — not a single-symbol lookup. Don't deny.
     let out = run_hook(&db, "process.*");
-    assert!(out.trim().is_empty(), "regex should passthrough, got: {out}");
+    assert!(
+        out.trim().is_empty(),
+        "regex should passthrough, got: {out}"
+    );
 }
 
 #[test]
@@ -159,7 +168,10 @@ fn short_pattern_passes_through() {
     let (_t, db) = db_dir();
     insert_entities(&db, "id", 1);
     let out = run_hook(&db, "id");
-    assert!(out.trim().is_empty(), "short pattern should passthrough, got: {out}");
+    assert!(
+        out.trim().is_empty(),
+        "short pattern should passthrough, got: {out}"
+    );
 }
 
 #[test]
@@ -167,19 +179,28 @@ fn multiword_pattern_passes_through() {
     let (_t, db) = db_dir();
     insert_entities(&db, "foo", 1);
     let out = run_hook(&db, "foo bar");
-    assert!(out.trim().is_empty(), "multi-word should passthrough, got: {out}");
+    assert!(
+        out.trim().is_empty(),
+        "multi-word should passthrough, got: {out}"
+    );
 }
 
 #[test]
 fn malformed_json_passes_through() {
     let (_t, db) = db_dir();
     let out = run_hook_raw(&db, "{not valid json");
-    assert!(out.trim().is_empty(), "malformed should passthrough, got: {out}");
+    assert!(
+        out.trim().is_empty(),
+        "malformed should passthrough, got: {out}"
+    );
 }
 
 #[test]
 fn empty_stdin_passes_through() {
     let (_t, db) = db_dir();
     let out = run_hook_raw(&db, "");
-    assert!(out.trim().is_empty(), "empty should passthrough, got: {out}");
+    assert!(
+        out.trim().is_empty(),
+        "empty should passthrough, got: {out}"
+    );
 }

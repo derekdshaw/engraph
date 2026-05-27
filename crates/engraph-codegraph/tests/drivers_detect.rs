@@ -36,7 +36,11 @@ fn pyproject_picks_scip_python() {
 #[test]
 fn setup_py_also_picks_scip_python() {
     let dir = tempdir().unwrap();
-    fs::write(dir.path().join("setup.py"), "from setuptools import setup\n").unwrap();
+    fs::write(
+        dir.path().join("setup.py"),
+        "from setuptools import setup\n",
+    )
+    .unwrap();
     assert_eq!(detecting(dir.path()), vec!["scip-python"]);
 }
 

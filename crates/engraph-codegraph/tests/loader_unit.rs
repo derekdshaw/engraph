@@ -3,12 +3,11 @@
 //! expected entities and relations are present. In-memory generation avoids
 //! the bytes-rot problem of checking in a binary fixture.
 
-use engraph_core::db::open_pool;
 use engraph_codegraph::scip_loader::load;
+use engraph_core::db::open_pool;
 use protobuf::{EnumOrUnknown, Message, MessageField};
 use scip::types::{
-    symbol_information::Kind as SymKind, Document, Index, Occurrence, SymbolInformation,
-    SymbolRole,
+    symbol_information::Kind as SymKind, Document, Index, Occurrence, SymbolInformation, SymbolRole,
 };
 use tempfile::tempdir;
 
@@ -34,8 +33,16 @@ fn build_fixture() -> Vec<u8> {
     let mut lib = Document::new();
     lib.relative_path = "src/lib.rs".to_string();
     lib.symbols = vec![
-        sym("scip-test cargo demo 0.0.0 `foo()`.", "foo", SymKind::Function),
-        sym("scip-test cargo demo 0.0.0 `bar()`.", "bar", SymKind::Function),
+        sym(
+            "scip-test cargo demo 0.0.0 `foo()`.",
+            "foo",
+            SymKind::Function,
+        ),
+        sym(
+            "scip-test cargo demo 0.0.0 `bar()`.",
+            "bar",
+            SymKind::Function,
+        ),
     ];
     lib.occurrences = vec![
         occ(
@@ -65,7 +72,11 @@ fn loader_emits_entities_and_a_calls_edge() {
     let bytes = build_fixture();
     let stats = load(&conn, "/proj/demo", &bytes).unwrap();
     assert_eq!(stats.documents_seen, 1);
-    assert!(stats.entities_inserted >= 2, "got {}", stats.entities_inserted);
+    assert!(
+        stats.entities_inserted >= 2,
+        "got {}",
+        stats.entities_inserted
+    );
 
     let n_entities: i64 = conn
         .query_row(
@@ -196,5 +207,8 @@ fn loader_preserves_bazel_depends_on_edges() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(surviving, 1, "BAZEL_DEPENDS_ON edge must survive a same-project SCIP load");
+    assert_eq!(
+        surviving, 1,
+        "BAZEL_DEPENDS_ON edge must survive a same-project SCIP load"
+    );
 }

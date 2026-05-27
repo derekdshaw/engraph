@@ -100,8 +100,16 @@ fn target_level_index_creates_targets_and_deps() {
         stats.driver_name, "bazel-query",
         "Bazel workspace should take the bazel-query path"
     );
-    assert!(stats.entities_inserted >= 2, "got {}", stats.entities_inserted);
-    assert!(stats.relations_inserted >= 1, "got {}", stats.relations_inserted);
+    assert!(
+        stats.entities_inserted >= 2,
+        "got {}",
+        stats.entities_inserted
+    );
+    assert!(
+        stats.relations_inserted >= 1,
+        "got {}",
+        stats.relations_inserted
+    );
 
     let foo: i64 = conn
         .query_row(
@@ -159,10 +167,7 @@ fn reindex_is_idempotent() {
     let root = dir.path().join("ws");
     std::fs::create_dir_all(&root).unwrap();
     write_fixture(&root);
-    std::env::set_var(
-        "ENGRAPH_BAZEL_OUTPUT_BASE",
-        dir.path().join("bazel-out"),
-    );
+    std::env::set_var("ENGRAPH_BAZEL_OUTPUT_BASE", dir.path().join("bazel-out"));
 
     let pool = open_pool(&dir.path().join("eg.db")).unwrap();
     let conn = pool.get().unwrap();
@@ -185,5 +190,8 @@ fn reindex_is_idempotent() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(n1, n2, "re-indexing must not duplicate BAZEL_DEPENDS_ON edges");
+    assert_eq!(
+        n1, n2,
+        "re-indexing must not duplicate BAZEL_DEPENDS_ON edges"
+    );
 }
