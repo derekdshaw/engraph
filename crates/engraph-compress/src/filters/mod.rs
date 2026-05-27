@@ -1,7 +1,6 @@
 //! Per-command output filters. Each filter knows the format of a specific
 //! command's output and produces a structured summary.
 
-pub mod build_system;
 pub mod cargo;
 pub mod docker;
 pub mod generic;
@@ -9,8 +8,10 @@ pub mod gh;
 pub mod git;
 pub mod go;
 pub mod js;
+pub mod jvm;
 pub mod kubectl;
 pub mod lint;
+pub mod make;
 pub mod npm;
 pub mod python;
 pub mod read;
@@ -97,9 +98,9 @@ pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
         ("gh", "pr" | "issue" | "repo") if matches!(second, "view") => (gh::view, "gh_view"),
 
         // Build systems
-        ("make", _) => (build_system::make, "make"),
-        ("mvn", _) => (build_system::mvn, "mvn"),
-        ("gradle", _) | ("./gradlew", _) => (build_system::gradle, "gradle"),
+        ("make", _) => (make::make, "make"),
+        ("mvn", _) => (jvm::mvn, "mvn"),
+        ("gradle", _) | ("./gradlew", _) => (jvm::gradle, "gradle"),
 
         // Search
         ("rg" | "grep", _) => (search::rg, "rg"),

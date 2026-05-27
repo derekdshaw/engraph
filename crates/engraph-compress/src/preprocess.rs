@@ -1,3 +1,4 @@
+use crate::filters::util;
 use crate::CompressKind;
 use regex::Regex;
 use std::sync::OnceLock;
@@ -12,9 +13,9 @@ pub(crate) fn apply(text: &str, kind: CompressKind) -> String {
 }
 
 fn tool_output(text: &str) -> String {
-    let stripped = strip_ansi(text);
+    let stripped = util::strip_ansi(text);
     let no_progress = drop_progress_lines(&stripped);
-    dedupe_consecutive(&no_progress)
+    util::dedup_consecutive(&no_progress)
 }
 
 fn session_message(text: &str) -> String {
@@ -25,12 +26,6 @@ fn session_message(text: &str) -> String {
 fn project_notes(text: &str) -> String {
     let no_html_comments = strip_html_comments(text);
     collapse_blank_lines(&no_html_comments)
-}
-
-fn ansi_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    // ESC [ ... letter — typical SGR / cursor codes
-    RE.get_or_init(|| Regex::new(r"\x1b\[[0-9;?]*[a-zA-Z]").unwrap())
 }
 
 fn progress_re() -> &'static Regex {
@@ -51,10 +46,6 @@ fn html_comment_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?s)<!--.*?-->").unwrap())
 }
 
-fn strip_ansi(s: &str) -> String {
-    ansi_re().replace_all(s, "").to_string()
-}
-
 fn drop_progress_lines(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for line in s.lines() {
@@ -73,34 +64,6 @@ fn drop_progress_lines(s: &str) -> String {
         out.push_str(line);
         out.push('\n');
     }
-    out
-}
-
-fn dedupe_consecutive(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut prev: Option<String> = None;
-    let mut count = 0u32;
-    let flush = |buf: &mut String, prev: &Option<String>, count: u32| {
-        if let Some(p) = prev {
-            buf.push_str(p);
-            // Don't annotate repeated empty lines — collapse them silently.
-            if count > 1 && !p.is_empty() {
-                buf.push_str(&format!(" (x{count})"));
-            }
-            buf.push('\n');
-        }
-    };
-    for line in s.lines() {
-        match &prev {
-            Some(p) if p == line => count += 1,
-            _ => {
-                flush(&mut out, &prev, count);
-                prev = Some(line.to_string());
-                count = 1;
-            }
-        }
-    }
-    flush(&mut out, &prev, count);
     out
 }
 
@@ -156,17 +119,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strip_ansi_removes_color() {
-        let s = "\x1b[31mred\x1b[0m text";
-        assert_eq!(strip_ansi(s), "red text");
+    fn tool_output_dedups_runs() {
+        let out = tool_output("a\na\na\nb\n");
+        assert!(out.contains("[engraph: + 2 more identical lines]"));
+        assert!(out.contains("b\n"));
     }
 
     #[test]
-    fn dedupe_counts_repeats() {
-        let s = "a\na\na\nb\n";
-        let out = dedupe_consecutive(s);
-        assert!(out.contains("a (x3)"));
-        assert!(out.contains("b\n"));
+    fn tool_output_strips_ansi() {
+        let out = tool_output("\x1b[31mred\x1b[0m text\n");
+        assert!(!out.contains('\x1b'));
+        assert!(out.contains("red text"));
     }
 
     #[test]

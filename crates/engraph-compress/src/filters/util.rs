@@ -3,11 +3,11 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
-/// Strip ANSI CSI escape sequences (color codes, cursor moves). Conservative:
-/// matches `ESC[<digits/semicolons><letter>` and drops it.
+/// Strip ANSI CSI escape sequences (SGR colors, cursor moves, DEC private modes
+/// like `\x1b[?25l`). Matches `ESC[<digits/semicolons/?><letter>`.
 pub fn strip_ansi(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap());
+    let re = RE.get_or_init(|| Regex::new(r"\x1b\[[0-9;?]*[a-zA-Z]").unwrap());
     re.replace_all(s, "").into_owned()
 }
 

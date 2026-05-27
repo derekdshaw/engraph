@@ -1,99 +1,74 @@
-//! Lint-family filters with a shared shape: drop boilerplate, keep diagnostics
-//! and the final summary. Used by ruff, mypy, eslint, tsc.
+//! Lint-family filters with a shared shape: drop boilerplate, count diagnostics,
+//! append a summary trailer. Used by ruff, mypy, eslint, tsc.
 
 use super::util::{combine, drop_matching};
 use super::{FilterCtx, FilterOutput};
 use regex::Regex;
 use std::sync::OnceLock;
 
-pub fn ruff(ctx: &FilterCtx<'_>) -> FilterOutput {
+/// Common pipeline: combine stdout+stderr → optionally drop noise lines → count
+/// error/warning patterns → append `[engraph: <name>[ N errors[, M warnings]], exit C]`.
+fn lint_common(
+    ctx: &FilterCtx<'_>,
+    filter_id: &'static str,
+    drop_re: Option<&Regex>,
+    error_pat: Option<&str>,
+    warn_pat: Option<&str>,
+) -> FilterOutput {
     let text = combine(ctx.stdout, ctx.stderr);
+    let filtered = match drop_re {
+        Some(re) => drop_matching(&text, re).0,
+        None => text,
+    };
+    let errors = error_pat.map(|p| filtered.lines().filter(|l| l.contains(p)).count());
+    let warnings = warn_pat.map(|p| filtered.lines().filter(|l| l.contains(p)).count());
+
+    let mut out = filtered;
+    out.push_str("[engraph: ");
+    out.push_str(filter_id);
+    let mut sep = " ";
+    if let Some(e) = errors {
+        out.push_str(&format!("{sep}{e} errors"));
+        sep = ", ";
+    }
+    if let Some(w) = warnings {
+        out.push_str(&format!("{sep}{w} warnings"));
+        sep = ", ";
+    }
+    out.push_str(&format!("{sep}exit {}]\n", ctx.exit_code));
+    FilterOutput {
+        text: out,
+        filter_id,
+    }
+}
+
+pub fn ruff(ctx: &FilterCtx<'_>) -> FilterOutput {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
         Regex::new(r"^(All checks passed!|Found \d+ errors? \(\d+ fixed\))").unwrap()
     });
-    let (filtered, _dropped) = drop_matching(&text, re);
-    let mut out = filtered;
-    out.push_str(&format!("[engraph: ruff exit {}]\n", ctx.exit_code));
-    FilterOutput {
-        text: out,
-        filter_id: "ruff",
-    }
+    lint_common(ctx, "ruff", Some(re), None, None)
 }
 
 pub fn mypy(ctx: &FilterCtx<'_>) -> FilterOutput {
-    let text = combine(ctx.stdout, ctx.stderr);
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"^Success: no issues found").unwrap());
-    let (filtered, _dropped) = drop_matching(&text, re);
-    let mut errors = 0_u32;
-    for line in filtered.lines() {
-        if line.contains(": error:") {
-            errors += 1;
-        }
-    }
-    let mut out = filtered;
-    out.push_str(&format!(
-        "[engraph: mypy {errors} errors, exit {}]\n",
-        ctx.exit_code
-    ));
-    FilterOutput {
-        text: out,
-        filter_id: "mypy",
-    }
+    lint_common(ctx, "mypy", Some(re), Some(": error:"), None)
 }
 
 pub fn eslint(ctx: &FilterCtx<'_>) -> FilterOutput {
-    let text = combine(ctx.stdout, ctx.stderr);
-    // Drop files with no issues (just absolute file paths followed by clean).
-    let mut out = String::with_capacity(text.len() / 2);
-    let mut errors = 0_u32;
-    let mut warnings = 0_u32;
-    for line in text.lines() {
-        if line.contains(" error") {
-            errors += 1;
-        }
-        if line.contains(" warning") {
-            warnings += 1;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push_str(&format!(
-        "[engraph: eslint {errors} errors, {warnings} warnings, exit {}]\n",
-        ctx.exit_code
-    ));
-    FilterOutput {
-        text: out,
-        filter_id: "eslint",
-    }
+    lint_common(ctx, "eslint", None, Some(" error"), Some(" warning"))
 }
 
 pub fn tsc(ctx: &FilterCtx<'_>) -> FilterOutput {
-    let text = combine(ctx.stdout, ctx.stderr);
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
         // Drop watch-mode chatter; keep error lines.
         Regex::new(r"^(File change detected\.|Watching for file changes\.|Starting compilation)")
             .unwrap()
     });
-    let (filtered, _dropped) = drop_matching(&text, re);
-    let mut errors = 0_u32;
-    for line in filtered.lines() {
-        // tsc errors look like "path:line:col - error TSxxxx: message"
-        if line.contains(" error TS") {
-            errors += 1;
-        }
-    }
-    let mut out = filtered;
-    out.push_str(&format!(
-        "[engraph: tsc {errors} errors, exit {}]\n",
-        ctx.exit_code
-    ));
-    FilterOutput {
-        text: out,
-        filter_id: "tsc",
-    }
+    // tsc errors look like "path:line:col - error TSxxxx: message"
+    lint_common(ctx, "tsc", Some(re), Some(" error TS"), None)
 }
 
 #[cfg(test)]
@@ -128,5 +103,23 @@ src/bar.ts:1:1 - error TS2345: Argument type mismatch
 ";
         let out = tsc(&ctx(stdout, "", 1));
         assert!(out.text.contains("tsc 2 errors"));
+    }
+
+    #[test]
+    fn ruff_summary_has_no_count() {
+        let out = ruff(&ctx("All checks passed!\n", "", 0));
+        // ruff produces no count, just `[engraph: ruff exit 0]`.
+        assert!(out.text.contains("[engraph: ruff exit 0]"));
+    }
+
+    #[test]
+    fn eslint_counts_errors_and_warnings() {
+        let stdout = "\
+file.js:1:1  error  Bad
+file.js:2:1  warning  Meh
+file.js:3:1  error  Worse
+";
+        let out = eslint(&ctx(stdout, "", 1));
+        assert!(out.text.contains("eslint 2 errors, 1 warnings"));
     }
 }
