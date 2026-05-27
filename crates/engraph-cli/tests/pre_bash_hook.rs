@@ -157,11 +157,84 @@ fn already_wrapped_is_passthrough() {
 }
 
 #[test]
-fn env_prefix_is_passthrough() {
+fn env_prefix_is_preserved_in_rewrite() {
     let (_t, db) = db_dir();
-    // `FOO=bar git log` would lose the env if we wrapped, so we don't.
+    // `FOO=bar git log` peels the env prefix for classification and re-emits
+    // it ahead of `engraph run` so the assignment lands in the child's env.
     let out = run_hook(&db, "GIT_PAGER=cat git log -n 5");
-    assert_eq!(out.trim(), "", "env-prefix should pass through: {out}");
+    let v = parse(&out).expect("expected rewrite JSON");
+    assert_eq!(
+        v.pointer("/hookSpecificOutput/permissionDecision")
+            .and_then(|s| s.as_str()),
+        Some("allow")
+    );
+    let updated = v
+        .pointer("/hookSpecificOutput/updatedInput/command")
+        .and_then(|s| s.as_str())
+        .expect("missing updatedInput.command");
+    assert_eq!(updated, "GIT_PAGER=cat engraph run git log -n 5");
+}
+
+#[test]
+fn sudo_prefix_is_passthrough() {
+    let (_t, db) = db_dir();
+    // sudo would run engraph as root with a different $HOME — passthrough.
+    let out = run_hook(&db, "sudo git log -n 5");
+    assert_eq!(out.trim(), "", "sudo should pass through: {out}");
+}
+
+#[test]
+fn env_command_prefix_is_passthrough() {
+    let (_t, db) = db_dir();
+    // `env FOO=bar cmd` — non-trivial flag parsing; passthrough.
+    let out = run_hook(&db, "env FOO=bar git log");
+    assert_eq!(out.trim(), "", "env should pass through: {out}");
+}
+
+#[test]
+fn absolute_path_argv0_is_normalized() {
+    let (_t, db) = db_dir();
+    // `/usr/bin/git log` should classify the same as `git log`.
+    let out = run_hook(&db, "/usr/bin/git log -n 5");
+    let v = parse(&out).expect("expected rewrite JSON");
+    let updated = v
+        .pointer("/hookSpecificOutput/updatedInput/command")
+        .and_then(|s| s.as_str())
+        .unwrap();
+    assert_eq!(updated, "engraph run git log -n 5");
+}
+
+#[test]
+fn git_dash_capital_c_is_stripped() {
+    let (_t, db) = db_dir();
+    // `git -C /tmp status` is the same classification as `git status`.
+    let out = run_hook(&db, "git -C /tmp/x status");
+    let v = parse(&out).expect("expected rewrite JSON");
+    let updated = v
+        .pointer("/hookSpecificOutput/updatedInput/command")
+        .and_then(|s| s.as_str())
+        .unwrap();
+    assert_eq!(updated, "engraph run git status");
+}
+
+#[test]
+fn git_lowercase_c_with_value_is_stripped() {
+    let (_t, db) = db_dir();
+    let out = run_hook(&db, "git -c color.ui=always log");
+    let v = parse(&out).expect("expected rewrite JSON");
+    let updated = v
+        .pointer("/hookSpecificOutput/updatedInput/command")
+        .and_then(|s| s.as_str())
+        .unwrap();
+    assert_eq!(updated, "engraph run git log");
+}
+
+#[test]
+fn heredoc_command_is_passthrough() {
+    let (_t, db) = db_dir();
+    // `cat <<'EOF' ... EOF` would be corrupted by any rewrite — passthrough.
+    let out = run_hook(&db, "cat <<'EOF'\nhello\nEOF");
+    assert_eq!(out.trim(), "", "heredoc should pass through: {out}");
 }
 
 // --- Subgraph redirect for rg/grep ----------------------------------------
@@ -233,6 +306,25 @@ fn rg_on_unindexed_pattern_still_rewrites_for_compression() {
         .and_then(|s| s.as_str())
         .unwrap();
     assert_eq!(updated, "engraph run rg unindexed_helper");
+}
+
+#[test]
+fn absolute_path_rg_on_indexed_symbol_redirects() {
+    let (_t, db) = db_dir();
+    insert_entity(&db, "validate_token");
+    // /usr/bin/rg should normalize to rg and trigger the subgraph redirect.
+    let out = run_hook(&db, "/usr/bin/rg validate_token");
+    let v = parse(&out).expect("expected deny JSON");
+    assert_eq!(
+        v.pointer("/hookSpecificOutput/permissionDecision")
+            .and_then(|s| s.as_str()),
+        Some("deny")
+    );
+    let reason = v
+        .pointer("/hookSpecificOutput/permissionDecisionReason")
+        .and_then(|s| s.as_str())
+        .unwrap();
+    assert!(reason.contains("engraph subgraph validate_token"));
 }
 
 #[test]

@@ -743,15 +743,31 @@ fn try_auto_rewrite(command: &str) -> RewriteOutcome {
     if command.starts_with("engraph ") || command.contains(" engraph run ") {
         return RewriteOutcome::Passthrough;
     }
+    // Heredocs (`<<EOF`/`<<-EOF`/`<<'EOF'`): rewriting would corrupt the body.
+    // Passthrough so the original command runs untouched.
+    if has_heredoc(command) {
+        return RewriteOutcome::Passthrough;
+    }
 
-    let argv = match shell_words::split(command) {
+    let mut argv = match shell_words::split(command) {
         Ok(v) if !v.is_empty() => v,
         _ => return RewriteOutcome::Passthrough,
     };
 
-    // Env-var prefix (FOO=bar cmd ...): the first token is "KEY=value". Don't
-    // wrap; we'd swallow the env if we re-shelled through `engraph run`.
-    if is_env_assignment(&argv[0]) {
+    // Peel sudo/env/`FOO=bar` prefix. `None` means the prefix shape is one we
+    // can't safely re-emit (sudo would run engraph as root with a different
+    // $HOME; `env` arg-parsing is non-trivial; whitespace-containing values
+    // would need fragile re-quoting).
+    let prefix = match strip_command_prefix(&mut argv) {
+        Some(p) => p,
+        None => return RewriteOutcome::Passthrough,
+    };
+    if argv.is_empty() {
+        return RewriteOutcome::Passthrough;
+    }
+    normalize_argv0(&mut argv);
+    strip_git_global_opts(&mut argv);
+    if argv.is_empty() {
         return RewriteOutcome::Passthrough;
     }
 
@@ -784,19 +800,129 @@ fn try_auto_rewrite(command: &str) -> RewriteOutcome {
     }
 
     // Build the wrapped command. shell_words::quote preserves any whitespace
-    // or special-char arg the user supplied.
-    let mut wrapped: Vec<String> = Vec::with_capacity(argv.len() + 2);
-    wrapped.push("engraph".to_string());
-    wrapped.push("run".to_string());
-    wrapped.extend(argv);
-    let new_command = wrapped
-        .iter()
-        .map(|w| shell_words::quote(w).into_owned())
-        .collect::<Vec<_>>()
-        .join(" ");
+    // or special-char arg in argv. Env prefix is re-emitted verbatim — quoting
+    // `KEY=value` would turn it into a literal command name. strip_command_prefix
+    // already validated the prefix tokens are shape-safe (identifier=novalue-ws).
+    let mut parts: Vec<String> = Vec::with_capacity(prefix.len() + argv.len() + 2);
+    parts.extend(prefix);
+    parts.push("engraph".to_string());
+    parts.push("run".to_string());
+    for a in &argv {
+        parts.push(shell_words::quote(a).into_owned());
+    }
+    let new_command = parts.join(" ");
     RewriteOutcome::Rewrite {
         new_command,
         filter_id,
+    }
+}
+
+/// Detects `<<TAG`/`<<-TAG` (heredoc) outside of single/double quotes.
+/// Matches the same quote-tracking logic as `has_unquoted_shell_meta`.
+fn has_heredoc(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i + 1 < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && !in_single {
+            i += 2;
+            continue;
+        }
+        if b == b'\'' && !in_double {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+        if b == b'"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+        if !in_single && !in_double && b == b'<' && bytes[i + 1] == b'<' {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Peels `sudo`/`env`/`FOO=bar` prefix tokens off argv. Returns the peeled
+/// tokens (to be re-emitted ahead of `engraph run`), or `None` if the
+/// command shape can't be safely rewritten (sudo, `env`, or an env value
+/// containing whitespace that would need fragile re-quoting).
+fn strip_command_prefix(argv: &mut Vec<String>) -> Option<Vec<String>> {
+    if argv.is_empty() {
+        return Some(Vec::new());
+    }
+    // sudo / env would run engraph in a different environment ($HOME, $USER)
+    // and we'd lose the SQLite path. Bail and let the original run.
+    if argv[0] == "sudo" || argv[0] == "env" {
+        return None;
+    }
+    let mut prefix = Vec::new();
+    while !argv.is_empty() && is_env_assignment(&argv[0]) {
+        let tok = &argv[0];
+        let eq = tok.find('=').expect("is_env_assignment guarantees '='");
+        let value = &tok[eq + 1..];
+        // Whitespace in the value means shell_words::split has already merged
+        // tokens (`MSG='hello world'` becomes one element `MSG=hello world`).
+        // Re-quoting that for the rewritten command is fragile; passthrough.
+        if value.chars().any(char::is_whitespace) {
+            return None;
+        }
+        prefix.push(argv.remove(0));
+    }
+    Some(prefix)
+}
+
+/// `/usr/bin/grep` → `grep`. Pure normalization so absolute-path invocations
+/// reach the same filter as the bare name.
+fn normalize_argv0(argv: &mut [String]) {
+    let Some(first) = argv.first_mut() else {
+        return;
+    };
+    if !(first.starts_with('/') || first.starts_with("./")) {
+        return;
+    }
+    if let Some(base) = std::path::Path::new(first.as_str())
+        .file_name()
+        .and_then(|s| s.to_str())
+    {
+        *first = base.to_string();
+    }
+}
+
+/// Drop git's global options (`-C path`, `-c k=v`, `--git-dir=...`,
+/// `--work-tree=...`) so `git -C /tmp status` classifies as `git status`.
+/// Stops at the first non-flag token (the subcommand).
+fn strip_git_global_opts(argv: &mut Vec<String>) {
+    if argv.first().map(String::as_str) != Some("git") {
+        return;
+    }
+    // i never increments: each branch either breaks or drains/removes the
+    // element at i (so i now points at what used to be i+1).
+    let i = 1;
+    while i < argv.len() {
+        let tok = argv[i].as_str();
+        if tok == "-C" || tok == "-c" {
+            // Flag + value pair. Drop both (or just the flag if it's trailing).
+            let end = (i + 1).min(argv.len() - 1);
+            argv.drain(i..=end);
+            continue;
+        }
+        if tok.starts_with("--git-dir=") || tok.starts_with("--work-tree=") {
+            argv.remove(i);
+            continue;
+        }
+        // First positional → subcommand. Stop.
+        if !tok.starts_with('-') {
+            break;
+        }
+        // Other flags (e.g. `--no-pager`): leave them, stop peeling. They
+        // don't change classification.
+        break;
     }
 }
 
@@ -993,16 +1119,19 @@ fn try_subgraph_redirect(pattern: &str, conn: &db::PooledConn) -> Option<String>
 }
 
 /// `rg`/`grep <bareword>` on an indexed symbol takes precedence over the
-/// compression rewrite. Skips compounds — the existing deny+suggest covers
-/// those, and if Claude retries with the flat form this path catches it.
+/// compression rewrite. Reuses the same parser as `try_auto_rewrite` so
+/// `/usr/bin/rg foo` and `FOO=bar rg foo` get caught too. Skips compounds
+/// and heredocs — the existing rewrite path handles those.
 fn try_subgraph_redirect_for_bash(command: &str, conn: &db::PooledConn) -> Option<String> {
-    if has_unquoted_shell_meta(command) {
+    if has_heredoc(command) || has_unquoted_shell_meta(command) {
         return None;
     }
-    let argv = shell_words::split(command).ok()?;
-    if argv.is_empty() || is_env_assignment(&argv[0]) {
+    let mut argv = shell_words::split(command).ok()?;
+    let _prefix = strip_command_prefix(&mut argv)?;
+    if argv.is_empty() {
         return None;
     }
+    normalize_argv0(&mut argv);
     if argv[0] != "rg" && argv[0] != "grep" {
         return None;
     }
