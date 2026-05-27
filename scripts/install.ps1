@@ -2,8 +2,8 @@
 # Engraph installer for Windows.
 # Resolves the engraph.exe binary relative to this script's directory
 # (matches the release-archive layout), installs it under a per-user prefix,
-# and wires SessionStart + PreToolUse(Bash,Grep) + PostToolUse(Read) hooks
-# into Claude Code's settings.json.
+# and wires SessionStart + PreToolUse(Bash,Grep) + PostToolUse(Read) +
+# SessionEnd hooks into Claude Code's settings.json.
 
 $ErrorActionPreference = "Stop"
 
@@ -145,6 +145,12 @@ $hooksConfig = @{
             hooks   = @(@{ type = "command"; command = "$EngraphPath hook post-read" })
         }
     )
+    "SessionEnd" = @(
+        @{
+            matcher = ""
+            hooks   = @(@{ type = "command"; command = "$EngraphPath hook session-end" })
+        }
+    )
 }
 
 if (-not $settings.ContainsKey("hooks")) {
@@ -192,3 +198,8 @@ Write-Host "a wrapper (git log, cargo test, etc.) will be silently rewritten to"
 Write-Host "route through 'engraph run'. After 'engraph index .', Grep on a"
 Write-Host "bareword symbol indexed in the codegraph is redirected to"
 Write-Host "'engraph subgraph <symbol>'."
+Write-Host ""
+Write-Host "Codegraph features (engraph index / subgraph) need external SCIP"
+Write-Host "indexers — one per language. If you want them, the SCIP indexer"
+Write-Host "installer is the companion script in this directory:"
+Write-Host "  $ScriptDir\install-scip-indexers.sh   (run under WSL or Git Bash)"

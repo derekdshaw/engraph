@@ -167,7 +167,7 @@ Add to `~/.claude/settings.json`:
       { "matcher": "Read", "hooks": [{ "type": "command", "command": "engraph hook post-read" }] }
     ],
     "SessionEnd": [
-      { "matcher": "", "hooks": [{ "type": "command", "command": "engraph ingest --from-stdin" }] }
+      { "matcher": "", "hooks": [{ "type": "command", "command": "engraph hook session-end" }] }
     ]
   }
 }

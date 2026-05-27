@@ -14,9 +14,15 @@ set -euo pipefail
 # Pass --force to reinstall even when the binary is already on PATH.
 #
 # Not installed by this script:
-#   - bazel + scip-bazel:  only needed for F2 Phase 2.3 (polyglot Bazel
-#     monorepos), which the current engraph-codegraph crate does not drive.
-#     Skip until Phase 2.3 ships.
+#   - bazel / bazelisk:  needed if you point `engraph index` at a Bazel
+#     monorepo. Engraph drives the target-level pass (`bazel query`) and the
+#     optional `--bazel-symbols` pass (scip-java / scip-go / scip-typescript
+#     against a Bazel workspace, default-on in `engraph index --workspace`).
+#     We don't auto-install Bazel because most users already have it pinned
+#     per-repo via `.bazelversion`; install bazelisk yourself
+#     (`go install github.com/bazelbuild/bazelisk/cmd/bazelisk@latest`,
+#     or `brew install bazelisk`, or your distro's package manager) if your
+#     workflow needs Bazel-aware indexing.
 #
 # WSL note: if your `npm` is the Windows install (e.g. NVM-for-Windows
 # accessed at /mnt/c/...), `npm install -g` lands the bins under a Windows

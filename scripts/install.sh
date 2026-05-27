@@ -4,8 +4,8 @@ set -euo pipefail
 # Engraph installer for macOS and Linux.
 # Resolves the `engraph` binary relative to this script's directory (matches
 # the layout of the release archive), installs it under a per-user prefix,
-# and wires SessionStart + PreToolUse(Bash,Grep) + PostToolUse(Read) hooks
-# into Claude Code's settings.json.
+# and wires SessionStart + PreToolUse(Bash,Grep) + PostToolUse(Read) +
+# SessionEnd hooks into Claude Code's settings.json.
 
 BINARY="engraph"
 CLAUDE_DIR="$HOME/.claude"
@@ -159,6 +159,10 @@ hooks_config = {
             "hooks": [{"type": "command", "command": f"{engraph} hook post-read"}],
         },
     ],
+    "SessionEnd": [{
+        "matcher": "",
+        "hooks": [{"type": "command", "command": f"{engraph} hook session-end"}],
+    }],
 }
 
 existing_hooks = settings.get("hooks", {})
@@ -200,3 +204,8 @@ echo "a wrapper (git log, cargo test, etc.) will be silently rewritten to"
 echo "route through 'engraph run'. After 'engraph index .', Grep on a"
 echo "bareword symbol indexed in the codegraph is redirected to"
 echo "'engraph subgraph <symbol>'."
+echo ""
+echo "Codegraph features (engraph index / subgraph) need external SCIP"
+echo "indexers — one per language. If you want them, run the companion"
+echo "installer next:"
+echo "  $SCRIPT_DIR/install-scip-indexers.sh"

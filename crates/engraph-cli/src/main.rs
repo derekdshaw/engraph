@@ -171,6 +171,11 @@ enum HookCmd {
     /// SessionStart hook: emit a terse brief of prior context for the current
     /// project as `hookSpecificOutput.additionalContext` (<= MAX_BRIEF_BYTES).
     SessionStart,
+    /// SessionEnd hook: ingest the JSONL transcript that Claude Code emits
+    /// at session shutdown. Reads the hook payload from stdin, extracts
+    /// `transcript_path`, calls `ingest_file`. Errors are logged and swallowed
+    /// so a broken ingest never blocks Claude from exiting cleanly.
+    SessionEnd,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -294,6 +299,11 @@ fn main() -> Result<()> {
             HookCmd::SessionStart => {
                 if let Err(e) = run_session_start_hook(&conn) {
                     tracing::warn!(?e, "session-start hook failed; emitting empty");
+                }
+            }
+            HookCmd::SessionEnd => {
+                if let Err(e) = run_session_end_hook(&conn) {
+                    tracing::warn!(?e, "session-end hook failed; skipping ingest");
                 }
             }
         },
@@ -1263,6 +1273,46 @@ fn run_post_read_hook(conn: &db::PooledConn) -> Result<()> {
             input_tokens: 0,
             output_tokens: tokens::count(&context) as i64,
             latency_ms: 0,
+        },
+    )
+    .ok();
+    Ok(())
+}
+
+/// SessionEnd hook: Claude Code emits a JSON envelope on stdin that carries
+/// `transcript_path` — the path to the JSONL transcript file for the session
+/// that just ended. Ingest it into the codegraph store so subsequent sessions'
+/// `engraph recall` queries can surface this session's messages. Empty stdin
+/// or a missing `transcript_path` is treated as a no-op (not every SessionEnd
+/// reason carries a transcript).
+fn run_session_end_hook(conn: &db::PooledConn) -> Result<()> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf)?;
+    if buf.trim().is_empty() {
+        return Ok(());
+    }
+    let v: serde_json::Value = match serde_json::from_str::<serde_json::Value>(&buf) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    let transcript_path = match v.pointer("/transcript_path").and_then(|s| s.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return Ok(()),
+    };
+    let start = std::time::Instant::now();
+    let stats = engraph_ingest::ingest_file(conn, std::path::Path::new(transcript_path))?;
+    let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
+    telemetry::record_event(
+        conn,
+        EventInput {
+            session_id: session_id.as_deref(),
+            kind: EventKind::Hook,
+            feature: "F5_session_end",
+            filter_id: Some("ingest"),
+            input_tokens: stats.bytes_read as i64,
+            output_tokens: stats.messages_inserted as i64,
+            latency_ms: start.elapsed().as_millis() as i64,
         },
     )
     .ok();
