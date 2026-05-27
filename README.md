@@ -52,7 +52,7 @@ The pre-bash parser handles common command shapes that would otherwise misroute.
 
 ### Structure-aware code indexing
 
-`engraph index <repo>` runs a per-language SCIP indexer, decodes the resulting `index.scip`, and populates the `entities` and `relations` tables with symbols, calls, references, imports, and inheritance edges.
+`engraph index <repo>` runs a per-language SCIP indexer, decodes the resulting `index.scip`, and populates the `entities` and `relations` tables with symbols, calls, references, imports, and inheritance edges. When a repo's root advertises multiple build manifests (e.g. `pyproject.toml` + `tsconfig.json` for a Python+TypeScript project, or `pyproject.toml` + `pom.xml` for a Python+Java mono-service), every matching driver runs and their SCIP outputs are merged into one index. Per-driver failures are surfaced as warnings; the load proceeds with whatever succeeded. `--lang <name>` or `--scip <path>` pin to a single source as before.
 
 `engraph subgraph <symbol>` returns a 2-hop markdown neighborhood — typically orders of magnitude smaller than the file-read-and-grep loop Claude would otherwise run to answer "what calls `processOrder`."
 
@@ -76,7 +76,7 @@ The pre-bash parser handles common command shapes that would otherwise misroute.
 
 **Bazel monorepos:** `engraph index` on a directory containing `WORKSPACE`, `WORKSPACE.bazel`, or `MODULE.bazel` runs `bazel query --output=streamed_jsonproto 'kind(rule, //...)'` and writes one `bazel_target` entity per rule target plus `BAZEL_DEPENDS_ON` edges. No build runs. Fast and deterministic.
 
-`engraph index --bazel-symbols` adds symbol-level indexing on top by driving `scip-java` / `scip-go` / `scip-typescript` against the same Bazel workspace. Off by default — toolchain downloads and full Bazel builds make it heavy.
+`engraph index --bazel-symbols` adds symbol-level indexing on top by driving `scip-java` / `scip-go` / `scip-typescript` against the same Bazel workspace. **Defaults: on for `--workspace` runs** (a workspace index is already a one-time commitment, and the symbol pass is the only path to function-level data inside Bazel), **off for single-repo `engraph index <repo>`** (the target-level Bazel pass is fast and deterministic by itself). Use `--no-bazel-symbols` to disable inside a workspace run.
 
 ### Hybrid retrieval
 

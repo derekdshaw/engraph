@@ -119,6 +119,11 @@ One database, opened by `db::open_pool` (`engraph-core/src/db.rs`).
 - **WAL mode** set once per DB; multiple readers + one writer without
   blocking. `synchronous = NORMAL` is the WAL-appropriate durability /
   speed tradeoff.
+- **Per-connection pragmas** in `db::Pragmas::on_acquire`:
+  `synchronous = NORMAL`, `foreign_keys = ON`, `mmap_size = 268_435_456`
+  (256 MB memory-mapped region — helps FTS5 scans and codegraph subgraph
+  queries that page-fault on cold cache), `cache_size = -64000` (64 MB
+  page cache; the negative form is "size in KiB" per the SQLite docs).
 - **r2d2 connection pool** (`max_size = 4`). Per-call `busy_timeout = 5s`
   absorbs incidental contention.
 - **Schema migrations** are a `&[&str]` array; each entry is one SQL batch
@@ -302,8 +307,11 @@ fallback is `(generic::filter, "generic")`.
 
 Each `FilterFn` has signature
 `fn(&FilterCtx) -> FilterOutput` where `FilterCtx` carries the four
-fields the filter needs (`cmd`, `args`, `stdout`, `stderr`, `exit_code`).
-This keeps filters trivially testable: no DB, no IO, no global state.
+fields the filter needs (`args`, `stdout`, `stderr`, `exit_code`).
+`cmd` is omitted intentionally — `pick()` has already routed on it
+before handing off a `FilterFn`, so the callee already knows which
+command it was chosen for. This keeps filters trivially testable: no DB,
+no IO, no global state.
 
 The filter ID returned by the picker and the `filter_id` stamped on the
 `FilterOutput` must agree — a regression test pins every cargo and git
@@ -747,7 +755,8 @@ sources via RRF (`engraph-retrieve/src/hybrid.rs:53`):
               │ (one call)      │
               └────┬────────────┘
                    │
-                   ▼ for each candidate, fetch stored vector
+                   ▼ batch-fetch stored vectors for all candidates
+                   │  in one `(target_kind, target_id) IN (VALUES …)` query
               ┌─────────────────┐
               │ rank by cosine  │── ranks by semantic similarity
               └────┬────────────┘
@@ -1116,13 +1125,16 @@ grep loop Claude would otherwise run.
 | `driver.rs` | `trait Driver { name, detect, command, output_path }` + five impls (`RustAnalyzer`, `ScipPython`, `ScipGo`, `ScipTypescript`, `ScipJava`) + `registry()` |
 | `relation_kind.rs` | `enum RelationKind { Defines, References, Calls, Implements, Extends, Imports }` — the in-Rust validator that replaces a DB-level CHECK on `relations.kind` |
 | `scip_loader.rs` | SCIP protobuf bytes → entity/relation rows, two-pass (§14.3) |
-| `index.rs` | `index_repo()` orchestrator: pick driver → spawn → load |
+| `index.rs` | `index_repo()` orchestrator: run every matching driver, merge SCIP, load (see §14.2 for the multi-driver pipeline) |
 | `subgraph.rs` | `subgraph_for()` + `format_markdown()` (§14.4) |
 
-The crate depends on `scip = "0.5"` and `protobuf = "3.7"` (rust-protobuf;
-scip 0.5 ships pre-generated message code so no `protoc` is needed at
-build time). Bumping to scip 0.7 would require raising the workspace
-MSRV from 1.75 to 1.81.
+The crate depends on `scip = "0.7"` and `protobuf = "3.7"` (rust-protobuf;
+scip ships pre-generated message code so no `protoc` is needed at build
+time). The bump from scip 0.5 → 0.7 raised the workspace MSRV from 1.75
+to 1.95. The 4.x line of `protobuf` on crates.io is prerelease-only
+(`4.x.y-release` suffix; cargo's plain-version constraints exclude
+prereleases by default) and the upstream API is a partial rewrite — we
+stay on the 3.x stable line.
 
 ### 14.2 Driver registry
 
@@ -1149,6 +1161,26 @@ dispatch.
 `scripts/install-scip-indexers.sh` is the companion installer: idempotent,
 per-toolchain prerequisite checks, surfaces WSL-specific failure modes
 (Windows npm prefix on `/mnt/c` is invisible to Linux PATH, etc.).
+
+**Multi-driver per repo.** When `index_repo` is invoked without `--scip`
+or `--lang`, it runs **every** driver whose `detect()` matches the repo
+root and merges their SCIP outputs via `bazel_symbols::merge_scip_bytes`
+(repurposed from §14.9) before a single `scip_loader::load`. This
+matters for polyrepos where the same root advertises multiple manifests:
+`pyproject.toml` + `tsconfig.json` (Jupyter extensions, Streamlit-style
+apps), `pyproject.toml` + `pom.xml` (Python services with Java workers),
+`go.mod` + `package.json` + `tsconfig.json` (a Go binary that vendors a
+small TS dashboard). Without multi-driver each repo only contributed the
+first-matched language's symbols; subsequent driver-detected manifests
+went silent. The merge is per-language SCIP byte concatenation — the
+Index protobuf's `documents` and `external_symbols` are both `Vec<...>`
+so `Vec::extend` is the whole merge — and one `scip_loader::load` writes
+the combined entity/relation set under a single project key. Per-driver
+failures are warnings (the indexer binary might be missing, or the
+language's project structure might be malformed) and the load proceeds
+with whatever did succeed; if **every** driver fails we bail. `--lang
+<name>` still pins to one driver as before, and `--scip <path>` skips
+driver dispatch entirely.
 
 ### 14.3 SCIP loader — two-pass
 
@@ -1360,8 +1392,9 @@ every rule target with its direct deps, and the loader writes them as
 `bazel_target` entities plus `BAZEL_DEPENDS_ON` edges. No build runs;
 no per-language SCIP indexer is involved. This is intentionally the
 language-agnostic, deterministic, fast cut, and it fires automatically
-on any Bazel workspace. The symbol-level layer (§14.9) opt-in via
-`--bazel-symbols` adds per-language SCIP on top.
+on any Bazel workspace. The symbol-level layer (§14.9) adds per-language
+SCIP on top — defaulted ON for `--workspace` runs, OFF for single-repo
+runs, with `--no-bazel-symbols` as the opt-out for workspace mode.
 
 **Detection precedence.** `detect_bazel(repo)` checks for `WORKSPACE`,
 `WORKSPACE.bazel`, or `MODULE.bazel` at the root. Phase 2.3 routes
@@ -1436,9 +1469,8 @@ A separate test pins idempotency under re-index. Soft-skips when no
 
 ### 14.9 Phase 2.3 #2 — symbol-level Bazel via per-language SCIP indexers
 
-`bazel_symbols.rs` adds the symbol-level layer on top of §14.8. With
-`engraph index --bazel-symbols` set (off by default), after the
-target-level pass writes `bazel_target` entities and
+`bazel_symbols.rs` adds the symbol-level layer on top of §14.8. After
+the target-level pass writes `bazel_target` entities and
 `BAZEL_DEPENDS_ON` edges, this module drives `scip-java` / `scip-go` /
 `scip-typescript` against the same Bazel workspace, merges their SCIP
 outputs in memory, and loads the result under the same project key.
@@ -1446,11 +1478,17 @@ The end result: `engraph subgraph <name>` carries both a **Calls /
 References** symbol section (from SCIP) and a **Bazel deps** section
 (from `bazel query`) in one neighborhood rendering.
 
-**Why opt-in.** Toolchain downloads and full Bazel builds make
-`--bazel-symbols` heavy (5s warm to minutes cold per language). The
-target-level pass remains the fast deterministic default that fires
-automatically on any Bazel workspace; symbol-level is the opt-in
-follow-up for when you want navigability.
+**Default policy.** `--bazel-symbols` is ON by default in `--workspace`
+mode and OFF for single-repo `engraph index <repo>` runs. `--no-bazel-
+symbols` is the opt-out for workspace runs; the two flags are mutually
+exclusive at the clap layer. Rationale: a workspace pass is already a
+one-time commitment to a long run, and the symbol layer is the only
+path to function-level data inside Bazel — paying the cost once matches
+the typical intent. Single-repo runs are the fast iteration path; the
+deterministic target-level pass on its own is the right default there.
+Toolchain downloads and full Bazel builds make `--bazel-symbols` heavy
+(5s warm to minutes cold per language); the explicit `--bazel-symbols`
+flag is still available to opt in on a single-repo run.
 
 **Per-language pipeline.** Three steps per language, in order:
 
@@ -1493,11 +1531,13 @@ the symbol-level pass. The `LangStatus` enum has four variants —
 `BazelSymbolStats` return value carries per-language results plus
 aggregate `entities_inserted` / `relations_inserted` / `scip_bytes_total`.
 
-**CLI surface.** `--bazel-symbols` on `Cmd::Index` (composes with
-`--workspace`). Threaded as `bazel_symbols: bool` through
-`index_repo` and `index_workspace`. On a Bazel-detected repo with
-the flag set and no `--scip` override, the symbol-level pass chains
-after the target-level pass; `driver_name` reports
+**CLI surface.** `--bazel-symbols` / `--no-bazel-symbols` on `Cmd::Index`
+(mutually exclusive at the clap layer via `conflicts_with`). The CLI
+computes an effective bool — explicit flags win, otherwise `workspace
+.is_some()` decides — and threads it as `bazel_symbols: bool` through
+`index_repo` and `index_workspace`. On a Bazel-detected repo with the
+flag effectively set and no `--scip` override, the symbol-level pass
+chains after the target-level pass; `driver_name` reports
 `"bazel-query+symbols"` (vs the default `"bazel-query"`).
 
 **End-to-end test.** `tests/bazel_symbols_live.rs` is triple-gated:
