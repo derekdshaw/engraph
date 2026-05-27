@@ -1,0 +1,1 @@
+crates/engraph-compress/tests/fixtures/*.txt text eol=lf
