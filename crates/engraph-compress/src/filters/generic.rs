@@ -1,14 +1,18 @@
-use super::{util, FilterCtx, FilterOutput};
+use super::{FilterCtx, FilterOutput};
 use crate::{compress, CompressInput, CompressKind};
 
 pub fn filter(ctx: &FilterCtx<'_>) -> FilterOutput {
-    // Cheap, deterministic passes first: strip ANSI escapes and collapse
-    // runs of identical lines (typical sources: progress bars, repeated
-    // stack frames, retried-request logs). Run before the extractive
-    // compress step so the ranker doesn't waste budget on noise.
-    let combined = util::combine(ctx.stdout, ctx.stderr);
-    let combined = util::strip_ansi(&combined);
-    let combined = util::dedup_consecutive(&combined);
+    let mut combined = String::with_capacity(ctx.stdout.len() + ctx.stderr.len() + 32);
+    if !ctx.stdout.is_empty() {
+        combined.push_str(ctx.stdout);
+    }
+    if !ctx.stderr.is_empty() {
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str("--- stderr ---\n");
+        combined.push_str(ctx.stderr);
+    }
     // ToolOutput is exactly the case the brevity flag exists to serve —
     // noisy, non-prose, grammar not preserved by extractive ranking anyway.
     let r = compress(CompressInput {
