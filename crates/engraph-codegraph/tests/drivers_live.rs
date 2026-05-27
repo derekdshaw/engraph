@@ -60,7 +60,7 @@ fn rust_analyzer_indexes_tiny_crate() {
 
     let pool = db_for_test(dir.path());
     let conn = pool.get().unwrap();
-    let res = index_repo(&conn, &repo, None, None, "/proj/tiny");
+    let res = index_repo(&conn, &repo, None, None, "/proj/tiny", false);
     // rust-analyzer can fail on a cold tempdir if it can't resolve cargo; treat
     // as a soft-skip with diagnostic.
     let stats = match res {
@@ -96,7 +96,7 @@ fn scip_python_indexes_tiny_package() {
     .unwrap();
     let pool = db_for_test(dir.path());
     let conn = pool.get().unwrap();
-    match index_repo(&conn, &repo, None, None, "/proj/tiny-py") {
+    match index_repo(&conn, &repo, None, None, "/proj/tiny-py", false) {
         Ok(stats) => {
             assert!(stats.entities_inserted > 0);
             assert_has_symbol(&conn, "alpha");
@@ -122,7 +122,7 @@ fn scip_go_indexes_tiny_module() {
     .unwrap();
     let pool = db_for_test(dir.path());
     let conn = pool.get().unwrap();
-    match index_repo(&conn, &repo, None, None, "/proj/tiny-go") {
+    match index_repo(&conn, &repo, None, None, "/proj/tiny-go", false) {
         Ok(stats) => {
             assert!(stats.entities_inserted > 0);
             assert_has_symbol(&conn, "Alpha");
@@ -157,7 +157,7 @@ fn scip_typescript_indexes_tiny_package() {
     .unwrap();
     let pool = db_for_test(dir.path());
     let conn = pool.get().unwrap();
-    match index_repo(&conn, &repo, None, None, "/proj/tiny-ts") {
+    match index_repo(&conn, &repo, None, None, "/proj/tiny-ts", false) {
         Ok(stats) => {
             assert!(stats.entities_inserted > 0);
             assert_has_symbol(&conn, "alpha");
@@ -233,7 +233,7 @@ fn scip_java_indexes_tiny_module() {
 
     let pool = db_for_test(dir.path());
     let conn = pool.get().unwrap();
-    match index_repo(&conn, &repo, None, None, "/proj/tiny-java") {
+    match index_repo(&conn, &repo, None, None, "/proj/tiny-java", false) {
         Ok(stats) => {
             assert!(stats.entities_inserted > 0);
             assert_has_symbol(&conn, "alpha");

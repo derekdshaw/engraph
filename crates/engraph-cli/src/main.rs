@@ -116,6 +116,12 @@ enum Cmd {
         /// Mutually exclusive with --scip and --lang.
         #[arg(long, conflicts_with_all = ["scip", "lang"])]
         workspace: Option<PathBuf>,
+        /// Also drive scip-java / scip-go / scip-typescript via Bazel-resolved
+        /// sources after the target-level pass (Phase 2.3 #2). Heavy: implies
+        /// toolchain downloads and full builds via Bazel. Off by default; the
+        /// target-level (`bazel query`) pass is the fast deterministic default.
+        #[arg(long)]
+        bazel_symbols: bool,
     },
     /// Show a 2-hop markdown neighborhood for a symbol from the codegraph
     Subgraph {
@@ -336,11 +342,12 @@ fn main() -> Result<()> {
             lang,
             project,
             workspace,
+            bazel_symbols,
         } => {
             let start = Instant::now();
             let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
             if let Some(root) = workspace {
-                let stats = engraph_codegraph::index_workspace(&conn, &root)?;
+                let stats = engraph_codegraph::index_workspace(&conn, &root, bazel_symbols)?;
                 let total_bytes: usize = stats
                     .repos
                     .iter()
@@ -391,6 +398,7 @@ fn main() -> Result<()> {
                     scip.as_deref(),
                     lang.as_deref(),
                     &project_key,
+                    bazel_symbols,
                 )?;
                 telemetry::record_event(
                     &conn,

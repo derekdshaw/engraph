@@ -72,6 +72,12 @@ pub fn load(conn: &PooledConn, project: &str, scip_bytes: &[u8]) -> Result<LoadS
     // this project). Deleting inbound edges from other projects would break
     // cross-repo CALLS like app_b → lib_a::foo when lib_a re-indexes.
     //
+    // Phase 2.3 #2: exclude BAZEL_DEPENDS_ON. The target-level Bazel pass
+    // writes those edges under the same project; a SCIP load running after
+    // it (symbol-level pass) must not wipe them. `!= 'BAZEL_DEPENDS_ON'` is
+    // chosen over an explicit kind-IN-list so a future symbol-level kind
+    // (e.g. OVERRIDES) auto-cycles correctly on re-index.
+    //
     // We intentionally do NOT delete entities here. With cross-repo, another
     // project's relation may point to a symbol we're about to recompute;
     // dropping that entity would FK-fail the holding project's edge. The
@@ -80,7 +86,8 @@ pub fn load(conn: &PooledConn, project: &str, scip_bytes: &[u8]) -> Result<LoadS
     // (Phase 2.3 territory) can prune them.
     conn.execute(
         "DELETE FROM relations
-         WHERE src_entity IN (SELECT id FROM entities WHERE project = ?1)",
+         WHERE src_entity IN (SELECT id FROM entities WHERE project = ?1)
+           AND kind != 'BAZEL_DEPENDS_ON'",
         [project],
     )?;
 

@@ -1,4 +1,4 @@
-use crate::{bazel, driver, scip_loader};
+use crate::{bazel, bazel_symbols, driver, scip_loader};
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
 use std::path::{Path, PathBuf};
@@ -61,24 +61,36 @@ pub fn index_repo(
     scip_override: Option<&Path>,
     lang_override: Option<&str>,
     project: &str,
+    bazel_symbols: bool,
 ) -> Result<IndexStats> {
     let start = Instant::now();
 
     // Phase 2.3: a Bazel workspace takes the bazel-query path unless the
     // caller explicitly passed --scip <path> (which says "load this SCIP
     // file no matter what") or --lang <name> (which forces a specific SCIP
-    // driver). Symbol-level Bazel indexing for Java/Go/TS via Bazel-resolved
-    // classpaths is deferred to a follow-up; today the Bazel path is
-    // target-level only.
+    // driver). Target-level always runs; symbol-level (Phase 2.3 #2) layers
+    // on top when --bazel-symbols is set.
     if scip_override.is_none() && lang_override.is_none() && bazel::detect_bazel(repo) {
         tracing::info!("Bazel workspace detected; running target-level index");
-        let bazel_stats = bazel::index_bazel_workspace(conn, repo, project)?;
+        let target_stats = bazel::index_bazel_workspace(conn, repo, project)?;
+        let mut entities = target_stats.targets_inserted;
+        let mut relations = target_stats.deps_inserted;
+        let mut scip_bytes_total = 0usize;
+        let mut driver_name: &'static str = "bazel-query";
+        if bazel_symbols {
+            tracing::info!("--bazel-symbols set; running symbol-level pass");
+            let sym = bazel_symbols::index_bazel_symbols(conn, repo, project)?;
+            entities += sym.entities_inserted;
+            relations += sym.relations_inserted;
+            scip_bytes_total += sym.scip_bytes_total;
+            driver_name = "bazel-query+symbols";
+        }
         return Ok(IndexStats {
-            entities_inserted: bazel_stats.targets_inserted,
-            relations_inserted: bazel_stats.deps_inserted,
-            scip_bytes: 0,
+            entities_inserted: entities,
+            relations_inserted: relations,
+            scip_bytes: scip_bytes_total,
             elapsed_ms: start.elapsed().as_millis() as i64,
-            driver_name: "bazel-query",
+            driver_name,
         });
     }
 
@@ -160,7 +172,11 @@ fn is_indexable_root(path: &Path) -> bool {
 /// per-project DELETE doesn't trample others. Failures are captured
 /// per-repo rather than fatal — a broken indexer for one language
 /// shouldn't block the rest of the workspace.
-pub fn index_workspace(conn: &PooledConn, workspace_root: &Path) -> Result<WorkspaceStats> {
+pub fn index_workspace(
+    conn: &PooledConn,
+    workspace_root: &Path,
+    bazel_symbols: bool,
+) -> Result<WorkspaceStats> {
     let repos = discover_workspace_repos(workspace_root)?;
     if repos.is_empty() {
         anyhow::bail!(
@@ -173,7 +189,7 @@ pub fn index_workspace(conn: &PooledConn, workspace_root: &Path) -> Result<Works
     for repo in repos {
         let canonical = repo.canonicalize().unwrap_or_else(|_| repo.clone());
         let project = canonical.to_string_lossy().into_owned();
-        let outcome = index_repo(conn, &repo, None, None, &project);
+        let outcome = index_repo(conn, &repo, None, None, &project, bazel_symbols);
         stats.repos.push(WorkspaceRepoResult {
             repo,
             project,

@@ -159,3 +159,42 @@ fn loader_scopes_deletes_to_project() {
         .unwrap();
     assert_eq!(other, 1, "load() must scope its DELETE to its project");
 }
+
+#[test]
+fn loader_preserves_bazel_depends_on_edges() {
+    // Phase 2.3 #2 regression: a SCIP load running under the same project
+    // as a prior target-level Bazel pass must not wipe BAZEL_DEPENDS_ON
+    // edges (only SCIP-derived edges should be replaced).
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+
+    conn.execute(
+        "INSERT INTO entities (id, kind, name, project) VALUES ('//a:a', 'bazel_target', 'a', '/proj/demo')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO entities (id, kind, name, project) VALUES ('//b:b', 'bazel_target', 'b', '/proj/demo')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO relations (id, src_entity, dst_entity, kind, provenance, confidence)
+         VALUES ('r1', '//a:a', '//b:b', 'BAZEL_DEPENDS_ON', 'extracted', 1.0)",
+        [],
+    )
+    .unwrap();
+
+    let bytes = build_fixture();
+    let _ = load(&conn, "/proj/demo", &bytes).unwrap();
+
+    let surviving: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM relations WHERE kind = 'BAZEL_DEPENDS_ON'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(surviving, 1, "BAZEL_DEPENDS_ON edge must survive a same-project SCIP load");
+}

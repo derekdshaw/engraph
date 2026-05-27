@@ -340,9 +340,18 @@ under `~/.cache/engraph/bazel-out/<sha-of-workspace-path>` (override
 with `ENGRAPH_BAZEL_OUTPUT_BASE`) to keep it isolated from the user's
 own `~/.cache/bazel`.
 
-**Symbol-level Bazel indexing** (driving `scip-java`/`scip-go`/
-`scip-typescript` from Bazel-resolved classpaths) is the remaining
-half of Phase 2.3 and tracked in `ROADMAP.md`.
+**Symbol-level Bazel indexing** (Phase 2.3 #2) layers on top via
+`engraph index --bazel-symbols`. After the target-level pass, this drives
+`scip-java` / `scip-go` / `scip-typescript` from the Bazel workspace —
+scip-java's bundled aspect orchestrates Bazel internally; Go and TS run
+at the workspace root. Each language probes for matching rule kinds
+(`java_library`, `go_library`, `ts_project`, …) via `bazel query` and
+the corresponding indexer's presence on `PATH`; missing toolchains
+soft-skip per-language rather than aborting. Off by default —
+toolchain downloads and full Bazel builds make it heavy; the
+target-level pass remains the fast deterministic default. Known
+limitations and follow-ups (multi-`go.mod`, `rules_ts` node_modules,
+large Java monorepos) are documented in `ROADMAP.md`.
 
 ## Reading the events table
 
@@ -415,12 +424,13 @@ The plan's verification gates are wired as tests:
 - `engraph-ingest/src/lib.rs` (unit) — incremental re-ingest, rotation/truncation replay, mid-write partial-line hold, sidechain event filtering, sweep idempotency and recoverability, FTS-retention through `compress_existing`
 - `engraph-cli/tests/session_start_hook.rs` — empty brief on unknown project, populated brief includes rules/bugs, size cap respected
 - `engraph-cli/tests/run_budget.rs` — `engraph run` charges `session_budget` when `CLAUDE_SESSION_ID` is set, no-ops cleanly when not, inherits stdin (cat round-trip), and drains ~200KB of concurrent stdout+stderr without pipe-buffer deadlock (validates the `tokio::process` migration)
-- `engraph-codegraph/tests/loader_unit.rs` — SCIP loader two-pass emits a known `CALLS` edge from a synthesized in-memory `Index`, is idempotent on re-load, and scopes its DELETE to the requested `project`
+- `engraph-codegraph/tests/loader_unit.rs` — SCIP loader two-pass emits a known `CALLS` edge from a synthesized in-memory `Index`, is idempotent on re-load, scopes its DELETE to the requested `project`, and preserves co-resident `BAZEL_DEPENDS_ON` edges (Phase 2.3 #2 regression)
 - `engraph-codegraph/tests/subgraph_format.rs` — embedded unit tests for the markdown formatter: section shape, ambiguity disambiguation, byte-cap truncation
 - `engraph-codegraph/tests/drivers_detect.rs` — pure file-probe tests, one per build system (Cargo, pyproject, go.mod, package.json+tsconfig, pom.xml/build.gradle*/build.sbt/build.sc); also pins that a Bazel-only workspace does **not** pick scip-java (Phase 2.3 territory)
 - `engraph-codegraph/tests/drivers_live.rs` — per-language end-to-end runs against tiny fixtures; soft-skip when the upstream indexer (or, for scip-java, the JVM build tool) is absent
 - `engraph-codegraph/tests/workspace_cross_repo.rs` — Phase 2.2 cross-repo workspace fixture (two crates with a path dep). Asserts both repos land in `entities` with their canonical projects, a `CALLS` edge spans them, and the rendered markdown carries the `repo:<name>` annotation. Soft-skips when rust-analyzer is absent.
 - `engraph-codegraph/tests/bazel_live.rs` — Phase 2.3 target-level Bazel: two-genrule fixture (no external rules), asserts both targets land as `bazel_target` entities with the right `BAZEL_DEPENDS_ON` edge and repo-relative `file_path`. Separate test pins re-index idempotency. Soft-skips when neither `bazel` nor `bazelisk` is on PATH.
+- `engraph-codegraph/tests/bazel_symbols_live.rs` — Phase 2.3 #2 symbol-level Bazel: minimal `java_library` fixture, drives `scip-java` (which orchestrates Bazel via its bundled aspect), asserts symbol entities land alongside the target-level `bazel_target` row, and the surviving target row pins the loader's BAZEL_DEPENDS_ON preservation. Triple-gated (bazel + scip-java + `ENGRAPH_LIVE_BAZEL_SYMBOLS=1`) so default `cargo test` doesn't pay the 2-5 min cold cost.
 
 ## License
 

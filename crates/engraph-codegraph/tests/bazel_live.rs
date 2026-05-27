@@ -89,7 +89,7 @@ fn target_level_index_creates_targets_and_deps() {
     let pool = open_pool(&dir.path().join("eg.db")).unwrap();
     let conn = pool.get().unwrap();
 
-    let stats = match index_repo(&conn, &root, None, None, "/proj/ws") {
+    let stats = match index_repo(&conn, &root, None, None, "/proj/ws", false) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("skip: bazel query failed (first-run env issue?): {e:#}");
@@ -166,7 +166,7 @@ fn reindex_is_idempotent() {
 
     let pool = open_pool(&dir.path().join("eg.db")).unwrap();
     let conn = pool.get().unwrap();
-    if index_repo(&conn, &root, None, None, "/proj/ws").is_err() {
+    if index_repo(&conn, &root, None, None, "/proj/ws", false).is_err() {
         eprintln!("skip: bazel first-run failed");
         return;
     }
@@ -177,7 +177,7 @@ fn reindex_is_idempotent() {
             |r| r.get(0),
         )
         .unwrap();
-    index_repo(&conn, &root, None, None, "/proj/ws").unwrap();
+    index_repo(&conn, &root, None, None, "/proj/ws", false).unwrap();
     let n2: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM relations WHERE kind='BAZEL_DEPENDS_ON'",

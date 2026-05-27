@@ -253,7 +253,7 @@ fn relative_to_repo(abs_file: &str, repo_root: &Path) -> String {
     }
 }
 
-fn bazel_binary() -> Result<PathBuf> {
+pub(crate) fn bazel_binary() -> Result<PathBuf> {
     // Prefer `bazel` (so users with bazelisk symlinked benefit from
     // .bazelversion); fall back to `bazelisk` if only that's on PATH.
     for candidate in &["bazel", "bazelisk"] {
@@ -266,7 +266,7 @@ fn bazel_binary() -> Result<PathBuf> {
     )
 }
 
-fn output_base_for(repo: &Path) -> PathBuf {
+pub(crate) fn output_base_for(repo: &Path) -> PathBuf {
     if let Ok(env) = std::env::var("ENGRAPH_BAZEL_OUTPUT_BASE") {
         return PathBuf::from(env);
     }
@@ -281,7 +281,7 @@ fn output_base_for(repo: &Path) -> PathBuf {
     base.join(&hex[..16])
 }
 
-fn tail_lines(s: &str, n: usize) -> String {
+pub(crate) fn tail_lines(s: &str, n: usize) -> String {
     let lines: Vec<&str> = s.lines().collect();
     let start = lines.len().saturating_sub(n);
     lines[start..].join("\n")
