@@ -1,14 +1,17 @@
 //! Shared helpers used by multiple filter modules.
 
 use regex::Regex;
+use std::fmt::Write;
 use std::sync::OnceLock;
 
 /// Strip ANSI CSI escape sequences (SGR colors, cursor moves, DEC private modes
-/// like `\x1b[?25l`). Matches `ESC[<digits/semicolons/?><letter>`.
-pub fn strip_ansi(s: &str) -> String {
+/// like `\x1b[?25l`). Matches `ESC[<digits/semicolons/?><letter>`. Returns
+/// `Cow::Borrowed(s)` when no escapes match, avoiding a clone for the common
+/// case of plain-text input.
+pub fn strip_ansi(s: &str) -> std::borrow::Cow<'_, str> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"\x1b\[[0-9;?]*[a-zA-Z]").unwrap());
-    re.replace_all(s, "").into_owned()
+    re.replace_all(s, "")
 }
 
 /// Collapse runs of consecutive identical lines into the line + a marker
@@ -27,10 +30,7 @@ pub fn dedup_consecutive(s: &str) -> String {
         out.push_str(line);
         out.push('\n');
         if count > 1 {
-            out.push_str(&format!(
-                "[engraph: + {} more identical lines]\n",
-                count - 1
-            ));
+            let _ = writeln!(out, "[engraph: + {} more identical lines]", count - 1);
         }
     }
     out

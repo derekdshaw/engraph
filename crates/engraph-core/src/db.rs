@@ -13,6 +13,13 @@ impl r2d2::CustomizeConnection<Connection, rusqlite::Error> for Pragmas {
     fn on_acquire(&self, conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // 256 MB memory-mapped region for read-mostly access patterns
+        // (FTS5 scans, codegraph subgraph queries). SQLite falls back to
+        // pread on platforms without mmap; the pragma is a hint.
+        conn.pragma_update(None, "mmap_size", 268_435_456_i64)?;
+        // 64 MB page cache (negative = KiB). Bumps default 2 MB; pays for
+        // itself on the first FTS scan that would otherwise page-fault.
+        conn.pragma_update(None, "cache_size", -64_000_i64)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(())
     }

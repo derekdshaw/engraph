@@ -43,7 +43,6 @@ use engraph_core::{
     embedding::{cosine, EmbeddingProvider},
     Result,
 };
-use rusqlite::OptionalExtension;
 
 /// RRF smoothing constant; standard value from the original RRF paper.
 pub const K_RRF: f64 = 60.0;
@@ -81,78 +80,106 @@ pub fn search_hybrid(
         return Ok(vec![]);
     }
 
-    // FTS rank lookup keyed by (kind, id). 1-based, in the order search returned.
-    let lex_rank: std::collections::HashMap<(String, String), usize> = candidates
-        .iter()
-        .enumerate()
-        .map(|(i, h)| ((h.target_kind.clone(), h.target_id.clone()), i + 1))
-        .collect();
+    // Lex rank is identity-by-index: FTS returns candidates in BM25 order, so
+    // candidates[i] has lex rank i + 1. No lookup table needed.
 
     // Step 2: embed the query once.
     let q_vec = provider.embed(q.text)?;
     let model_id = provider.model_id();
 
-    // Step 3: pull stored vectors for the candidate set, compute cosine, rank by it.
-    let mut sem_scored: Vec<((String, String), f64)> = Vec::with_capacity(candidates.len());
-    for h in &candidates {
-        let stored: Option<Vec<u8>> = conn
-            .query_row(
-                "SELECT vector FROM embeddings WHERE target_kind = ?1 AND target_id = ?2 AND model_id = ?3",
-                rusqlite::params![target_kind_key(&h.target_kind), h.target_id, model_id],
-                |r| r.get::<_, Vec<u8>>(0),
-            )
-            .optional()?;
-        let cos = match stored {
-            Some(b) => cosine(&q_vec, &decode_f32_vec(&b)) as f64,
-            None => f64::NEG_INFINITY, // unembedded candidates rank last in the semantic list
-        };
-        sem_scored.push(((h.target_kind.clone(), h.target_id.clone()), cos));
-    }
+    // Step 3a: batch-fetch all candidate embeddings in one SQL round-trip
+    // instead of one SELECT per candidate. SQLite 3.15+ supports
+    // `(col1, col2) IN (VALUES (?,?), ...)` which lets us tuple-match
+    // (target_kind, target_id) without juggling separate per-kind queries.
+    let vectors: std::collections::HashMap<(String, String), Vec<u8>> = {
+        let pairs: Vec<(&str, &str)> = candidates
+            .iter()
+            .map(|h| (target_kind_key(&h.target_kind), h.target_id.as_str()))
+            .collect();
+        let placeholders = std::iter::repeat("(?,?)")
+            .take(pairs.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT target_kind, target_id, vector FROM embeddings
+             WHERE model_id = ?1 AND (target_kind, target_id) IN (VALUES {placeholders})"
+        );
+        let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(1 + pairs.len() * 2);
+        params.push(rusqlite::types::Value::Text(model_id.to_string()));
+        for (kind, id) in &pairs {
+            params.push(rusqlite::types::Value::Text((*kind).to_string()));
+            params.push(rusqlite::types::Value::Text((*id).to_string()));
+        }
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+            Ok((
+                (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
+                r.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?
+    };
+
+    // Step 3b: cosine score per candidate by index; unembedded candidates rank
+    // last via NEG_INFINITY.
+    let mut sem_scored: Vec<(usize, f64)> = candidates
+        .iter()
+        .enumerate()
+        .map(|(idx, h)| {
+            let key = (
+                target_kind_key(&h.target_kind).to_string(),
+                h.target_id.clone(),
+            );
+            let cos = vectors
+                .get(&key)
+                .map(|b| cosine(&q_vec, &decode_f32_vec(b)) as f64)
+                .unwrap_or(f64::NEG_INFINITY);
+            (idx, cos)
+        })
+        .collect();
     sem_scored.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0 .1.cmp(&b.0 .1))
+            .then_with(|| candidates[a.0].target_id.cmp(&candidates[b.0].target_id))
     });
     // Only assign a rank to candidates that actually had an embedding; rest are "absent".
-    let sem_rank: std::collections::HashMap<(String, String), usize> = sem_scored
+    let sem_rank: std::collections::HashMap<usize, usize> = sem_scored
         .iter()
         .enumerate()
         .filter(|(_, (_, score))| score.is_finite())
-        .map(|(i, (key, _))| (key.clone(), i + 1))
+        .map(|(rank, (idx, _))| (*idx, rank + 1))
         .collect();
 
-    // Step 3b: recency rank. Newest `ts` first; RFC3339 strings sort
+    // Step 3c: recency rank. Newest `ts` first; RFC3339 strings sort
     // chronologically, so a lexicographic descending sort is correct.
     // Candidates without a `ts` are absent from the recency list (rank = ∞).
-    let mut rec_scored: Vec<((String, String), &str)> = candidates
+    let mut rec_scored: Vec<(usize, &str)> = candidates
         .iter()
-        .filter_map(|h| {
-            h.ts.as_deref()
-                .map(|ts| ((h.target_kind.clone(), h.target_id.clone()), ts))
-        })
+        .enumerate()
+        .filter_map(|(i, h)| h.ts.as_deref().map(|ts| (i, ts)))
         .collect();
-    rec_scored.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0 .1.cmp(&b.0 .1)));
-    let rec_rank: std::collections::HashMap<(String, String), usize> = rec_scored
+    rec_scored.sort_by(|a, b| {
+        b.1.cmp(a.1)
+            .then_with(|| candidates[a.0].target_id.cmp(&candidates[b.0].target_id))
+    });
+    let rec_rank: std::collections::HashMap<usize, usize> = rec_scored
         .into_iter()
         .enumerate()
-        .map(|(i, (key, _))| (key, i + 1))
+        .map(|(rank, (idx, _))| (idx, rank + 1))
         .collect();
 
     // Step 4: RRF score per candidate. Missing source → 0 contribution.
     let mut hits: Vec<Hit> = candidates
         .into_iter()
-        .map(|mut h| {
-            let key = (h.target_kind.clone(), h.target_id.clone());
-            let l = lex_rank
-                .get(&key)
-                .map(|r| W_LEXICAL / (K_RRF + *r as f64))
-                .unwrap_or(0.0);
+        .enumerate()
+        .map(|(idx, mut h)| {
+            let l = W_LEXICAL / (K_RRF + (idx + 1) as f64);
             let s = sem_rank
-                .get(&key)
+                .get(&idx)
                 .map(|r| W_SEMANTIC / (K_RRF + *r as f64))
                 .unwrap_or(0.0);
             let r = rec_rank
-                .get(&key)
+                .get(&idx)
                 .map(|r| W_RECENCY / (K_RRF + *r as f64))
                 .unwrap_or(0.0);
             h.score = l + s + r;
