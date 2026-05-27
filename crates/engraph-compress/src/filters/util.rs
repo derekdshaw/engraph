@@ -1,6 +1,40 @@
 //! Shared helpers used by multiple filter modules.
 
 use regex::Regex;
+use std::sync::OnceLock;
+
+/// Strip ANSI CSI escape sequences (color codes, cursor moves). Conservative:
+/// matches `ESC[<digits/semicolons><letter>` and drops it.
+pub fn strip_ansi(s: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap());
+    re.replace_all(s, "").into_owned()
+}
+
+/// Collapse runs of consecutive identical lines into the line + a marker
+/// describing how many were dropped. O(n), no regex. Lines are compared
+/// byte-for-byte (no trim) — useful for noisy stack traces where leading
+/// whitespace differs and we want it to.
+pub fn dedup_consecutive(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut iter = s.lines().peekable();
+    while let Some(line) = iter.next() {
+        let mut count = 1usize;
+        while iter.peek() == Some(&line) {
+            iter.next();
+            count += 1;
+        }
+        out.push_str(line);
+        out.push('\n');
+        if count > 1 {
+            out.push_str(&format!(
+                "[engraph: + {} more identical lines]\n",
+                count - 1
+            ));
+        }
+    }
+    out
+}
 
 /// Cap the output at `max_lines`; if anything was dropped, append a marker
 /// describing what was hidden. `unit` is a short noun for the line item
@@ -89,6 +123,54 @@ mod tests {
         assert!(out.contains("line 7"));
         assert!(!out.contains("line 5"));
         assert!(out.contains("hid 7 earlier lines"));
+    }
+
+    #[test]
+    fn strip_ansi_removes_color_codes() {
+        let s = "\x1b[31mred\x1b[0m text \x1b[1;32mgreen\x1b[0m";
+        assert_eq!(strip_ansi(s), "red text green");
+    }
+
+    #[test]
+    fn strip_ansi_preserves_plain_text() {
+        assert_eq!(strip_ansi("no escapes here"), "no escapes here");
+    }
+
+    #[test]
+    fn dedup_consecutive_collapses_runs() {
+        let s = "foo\nfoo\nfoo\nbar\nbaz\nbaz\n";
+        let out = dedup_consecutive(s);
+        assert!(
+            out.contains("foo\n[engraph: + 2 more identical lines]\n"),
+            "missing foo marker: {out}"
+        );
+        assert!(out.contains("bar\n"));
+        assert!(
+            out.contains("baz\n[engraph: + 1 more identical lines]\n"),
+            "missing baz marker: {out}"
+        );
+    }
+
+    #[test]
+    fn dedup_consecutive_leaves_unique_lines_alone() {
+        let s = "a\nb\nc\n";
+        assert_eq!(dedup_consecutive(s), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn dedup_consecutive_does_not_cross_non_identical_lines() {
+        // a/a/b/a/a — two separate runs, not one collapsed run of 4.
+        let s = "a\na\nb\na\na\n";
+        let out = dedup_consecutive(s);
+        assert_eq!(
+            out,
+            "a\n[engraph: + 1 more identical lines]\nb\na\n[engraph: + 1 more identical lines]\n"
+        );
+    }
+
+    #[test]
+    fn dedup_consecutive_handles_empty() {
+        assert_eq!(dedup_consecutive(""), "");
     }
 
     #[test]
