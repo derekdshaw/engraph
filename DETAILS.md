@@ -339,6 +339,8 @@ Specific noise patterns by family:
 | docker / kubectl | annotations / spec blobs | events, container/pod summaries | row caps |
 | npm / pnpm / yarn | per-package "added N" progress | totals, vulnerability count | summary |
 | pytest / pip / go test | pass-progress lines | failed test output, summary | counts |
+| cat / bat / less (whole-file read) | line comments by extension; runs of blank lines | first 400 lines + last 100 lines if file > 500 lines | `[engraph: omitted N middle lines]` |
+| head / tail (user-windowed read) | line comments by extension; runs of blank lines | every line the user asked for | none — no re-windowing on top of the user's `-n` |
 
 ### 4.3 Why per-command not generic
 
@@ -363,20 +365,69 @@ filter shows up as a diff in the golden assertion, not as a subtle
 behavior change. A negative test ensures missing fixtures panic rather
 than silently passing.
 
+### 4.5 The read bucket — file-content filters
+
+`crates/engraph-compress/src/filters/read.rs` covers `cat`, `bat`, and
+`less` (whole-file reads) and `head` / `tail` (user-windowed reads).
+The two functions share three building blocks:
+
+- **Language-aware comment strip.** `comment_markers_for(ext)` maps
+  the file extension (extracted from the last non-flag, non-numeric
+  arg) to a slice of line-comment prefixes — `#` for Python, `//` for
+  Rust / Go / JS / TS / JSX / TSX. Lines whose `trim_start()` starts
+  with a marker are dropped. Block comments (`/* */`, multi-line
+  docstrings) are intentionally NOT handled — a regex-only stripper
+  can't safely cross newlines, and the savings on file-scoped reads
+  don't justify a full lexer per language. Conservative wins.
+- **Blank-line collapse.** Within a single pass over the surviving
+  lines, runs of blank lines fold to one.
+- **Head + elided + tail windowing (cat/bat/less only).** If the
+  filtered text exceeds `CAT_HEAD_LINES + CAT_TAIL_LINES` (400 + 100
+  by default), keep the first 400 and last 100, emit
+  `[engraph: omitted N middle lines]` in between. `head` and `tail`
+  skip this step: the user already chose a window via `-n`, and
+  re-windowing on top of that is more confusing than helpful.
+
+**Empty-filter fallback.** If language stripping accidentally empties
+a non-empty input (all-comments file, comment-only header, etc.),
+`fallback_if_emptied` returns the raw text prefixed by
+`[engraph: filter emptied input; raw follows]`. Claude never sees a
+blank file by mistake — a class of failure rtk reported and engraph
+adopts as a hard guarantee from day one.
+
+**Unknown extensions** pass through unstripped. That keeps `.csv`,
+`.json`, `.md`, and anything with `#` or `//` as legitimate data
+characters from getting silently corrupted.
+
 ---
 
-## 5. PreToolUse(Bash) auto-rewrite hook
+## 5. Tool-use hooks: PreToolUse and PostToolUse
 
-`run_pre_bash_hook` (`engraph-cli/src/main.rs:698`). Reads Claude's
-tool-input JSON from stdin, decides one of three outcomes, emits the
-appropriate JSON on stdout, exits 0.
+Three Claude Code lifecycle events get engraph handlers:
+`PreToolUse(Bash)` (`run_pre_bash_hook` at
+`engraph-cli/src/main.rs:998`) rewrites or denies bash commands;
+`PreToolUse(Grep)` (`run_pre_grep_hook` at `:1179`) redirects symbol
+lookups to the codegraph; `PostToolUse(Read)` (`run_post_read_hook` at
+`:1206`) appends an indexed-symbol map to file reads. All three read
+their tool-input JSON from stdin, decide an outcome, emit the
+appropriate JSON on stdout, and exit 0.
 
-### 5.1 Decision tree
+### 5.1 PreToolUse(Bash) decision tree
 
 ```
 command empty? → Passthrough
 command starts with "engraph " or contains " engraph run "? → Passthrough (recursion guard)
-command's first token is "KEY=value"? → Passthrough (env-prefix; wrapping would swallow the env)
+has_heredoc(command)? → Passthrough (rewriting would corrupt the body)
+shell_words::split → argv
+strip_command_prefix(argv):
+    argv[0] in {sudo, env}? → Passthrough (different privilege / non-trivial flag parsing)
+    peel leading `FOO=bar` tokens into `prefix`
+    (whitespace inside a value → Passthrough; re-quoting would be fragile)
+normalize_argv0(argv): /usr/bin/grep → grep
+strip_git_global_opts(argv): drop -C/-c/--git-dir=/--work-tree= when argv[0] == "git"
+try_subgraph_redirect_for_bash(argv, conn):
+    argv[0] in {rg, grep} AND first non-flag arg resolves to 1-3 indexed entities
+        → DenySuggest pointing at `engraph subgraph <pattern>`
 command has unquoted shell meta (|, ;, &, <, >, `, $())?
     → scan argv for any wrappable token
     → first match → DenySuggest with engraph run hint
@@ -384,11 +435,14 @@ command has unquoted shell meta (|, ;, &, <, >, `, $())?
 otherwise:
     pick(argv[0], argv[1..])
     filter_id == "generic"? → Passthrough
-    else → Rewrite: `engraph run <argv...>` with shell-words-quoted args
+    else → Rewrite: `<prefix...> engraph run <argv...>` with shell-words-quoted
+            args (prefix tokens are emitted verbatim — they were validated
+            shape-safe during peeling, and shell_words::quote would
+            mis-quote `KEY=value` as a literal command name)
 ```
 
 Three outcomes, returned as a `RewriteOutcome` enum
-(`engraph-cli/src/main.rs:560`), each mapping to a Claude Code hook response:
+(`engraph-cli/src/main.rs:734`), each mapping to a Claude Code hook response:
 
 - **Rewrite**: `permissionDecision: "allow"` + `updatedInput.command =
   "engraph run …"`. Claude Code substitutes the new command before
@@ -396,37 +450,129 @@ Three outcomes, returned as a `RewriteOutcome` enum
   sees the wrapped command run, with the compressed output, in the
   transcript.
 - **DenySuggest**: `permissionDecision: "deny"` +
-  `permissionDecisionReason` containing the wrappable subcommand. Used
-  when the command is too complex to rewrite safely (compound pipelines,
-  etc.) but engraph still has something useful to say.
+  `permissionDecisionReason` containing the wrappable subcommand or
+  the subgraph hint. Used when the command is too complex to rewrite
+  safely (compound pipelines) or when engraph has a much smaller
+  structured answer available (subgraph redirect).
 - **Passthrough**: no JSON, exit 0. Claude Code treats this as "no
   decision," runs the original command unchanged.
 
-### 5.2 Why PreToolUse, not PostToolUse
+### 5.2 Why PreToolUse to rewrite, PostToolUse only to augment
 
 Claude Code's PostToolUse hooks **cannot replace** the tool's output —
-they can only append. To get the compressed output into Claude's
-transcript, the command itself must be rewritten before execution. The
-PreToolUse `updatedInput.command` is the only path; the rest of the
-hook machinery is built around using it.
+they can only append to it (via `hookSpecificOutput.additionalContext`).
+To get the compressed output into Claude's transcript, the command
+itself must be rewritten before execution. The PreToolUse
+`updatedInput.command` is the only path for that. The same property
+in reverse is why PostToolUse is the right surface for the
+codegraph **augment** in §5.6 — appending an indexed-symbol map after
+a Read doesn't need to (and couldn't) displace the Read's actual
+content.
 
 ### 5.3 Quote-aware shell-meta detection
 
-`has_unquoted_shell_meta` (`engraph-cli/src/main.rs:665`) tracks single quotes, double
+`has_unquoted_shell_meta` (`engraph-cli/src/main.rs:965`) tracks single quotes, double
 quotes, backslash escapes, and `$(...)` substitutions while scanning for
 meta characters. False positives are tolerated (the fallback is the safe
 DenySuggest); false negatives would be catastrophic (rewriting a
 compound pipeline that the wrapper doesn't actually handle), so the
 detection errs conservative.
 
-`is_env_assignment` (`engraph-cli/src/main.rs:638`) is a tight identifier-equals-anything
-check matching POSIX variable-name rules. We never wrap `FOO=bar git
-log` because the `FOO` would be lost when we re-shelled through `engraph
-run` instead of inheriting it.
+`has_heredoc` (`:831`) reuses the same quote-tracking loop to spot
+`<<TAG` outside quotes. Heredoc detection short-circuits the rest of
+the decision tree to Passthrough: any rewrite that re-shelled the
+command would terminate the heredoc body at the wrong place or pull
+the body lines into argv.
 
-Tests in `crates/engraph-cli/tests/pre_bash_hook.rs` pin each branch
-(rewrite, deny, passthrough) plus tricky cases like `git log
---grep='foo && bar'` (meta inside single quotes — must not deny).
+`is_env_assignment` (`:938`) is a tight identifier-equals-anything
+check matching POSIX variable-name rules. It's used both by the
+prefix-peeling logic and (legacy) directly in the compound scan.
+
+### 5.4 Parser-shape normalizers
+
+The rewrite pass would misroute several common command shapes without
+explicit normalization. Each is a single helper called from the head
+of `try_auto_rewrite` (`:746`):
+
+- `strip_command_prefix` (`:864`) peels `sudo` / `env` (by bailing
+  out — different privilege boundary or non-trivial flag parsing)
+  and leading `FOO=bar` env assignments (peeled and re-emitted ahead
+  of `engraph run` so the child inherits them). Values containing
+  whitespace bail to Passthrough — re-quoting `MSG='hello world'` for
+  the rewrite is fragile, and Passthrough at least runs the original
+  command correctly.
+- `normalize_argv0` (`:891`) maps absolute and `./`-prefixed argv[0]
+  values through `Path::file_name` so `/usr/bin/grep` and
+  `./bin/git` classify the same as the bare names. Pure
+  normalization — does nothing to non-path argv[0].
+- `strip_git_global_opts` (`:909`) walks argv when argv[0] == "git"
+  and drops the global options `-C path`, `-c key=value`,
+  `--git-dir=…`, `--work-tree=…`. Without this, `git -C /tmp status`
+  classifies as `generic` (because `pick("git", ["-C", ...])` falls
+  through), losing all of the git-specific filter savings.
+
+### 5.5 Subgraph redirect on `rg` / `grep`
+
+`try_subgraph_redirect_for_bash` (`:1134`) runs after the parser
+normalizers but before the compound-shell and filter-pick branches.
+It uses the same normalized argv: argv[0] must be `rg` or `grep`
+(so `/usr/bin/rg` is in scope thanks to `normalize_argv0`), and the
+first non-flag arg is the candidate pattern.
+
+Shared with the native `PreToolUse(Grep)` path:
+
+- `is_symbol_lookup` (`:1087`) requires bareword shape
+  `^[A-Za-z_][A-Za-z0-9_]*$` and length ≥ 3. Regex metachars and
+  short tokens (`if`, `id`) skip the redirect.
+- `try_subgraph_redirect` (`:1107`) does a
+  `SELECT COUNT(*) FROM (SELECT 1 FROM entities WHERE name = ?1
+  OR id = ?1 LIMIT 4)`. Only counts 1–3 trigger DenySuggest; 0 is a
+  non-indexed name, 4+ would resolve as Ambiguous in
+  `subgraph_for` (subgraph.rs:80) and force a retry anyway.
+
+The gate matters: a permissive heuristic would deny on common
+identifiers like `new` / `run` / `parse` (any of which has dozens of
+entities in any real codebase) and Claude would burn turns hitting
+deny → subgraph → ambiguous → retry. The 1–3 cap correlates the
+redirect with cases where subgraph actually has a useful neighborhood
+to show.
+
+### 5.6 PostToolUse(Read) codegraph augment
+
+`run_post_read_hook` (`:1206`) is the answer to "what about file
+reads?" PreToolUse on Read could only rewrite `tool_input.file_path`
+(the path, not the content), and PostToolUse can't replace the tool
+result — so neither hook can *compress* Claude Code's native Read
+output. PostToolUse **can** append, and that's enough leverage.
+
+Flow:
+
+1. Parse `tool_input.file_path` from the stdin JSON. Empty path →
+   Passthrough.
+2. `engraph_codegraph::subgraph::entities_in_file(conn, path, 30)` —
+   sibling of `query_siblings` (subgraph.rs:141), same predicate
+   `WHERE file_path = ?1 ORDER BY line_range LIMIT ?2` but without
+   the self-id exclusion. Empty result → Passthrough (file isn't
+   indexed).
+3. `build_read_context` (`:1254`) renders each entity as
+   `` - `name` @ line_range — `signature` `` (signatureless entities
+   skip the em-dash + backticks block to avoid `— \`\``).
+4. `truncate_to_bytes(out, MAX_BRIEF_BYTES)` caps the addition at
+   the same 2KB ceiling the SessionStart brief uses, so a single
+   read of a large file can't blow the per-tool-result budget.
+5. Emit `hookSpecificOutput.additionalContext` with
+   `hookEventName: "PostToolUse"`. Claude Code appends it to the
+   Read's tool-result block.
+
+Telemetry charges the augment its output token count so
+`engraph gain` shows the cost, not just the savings.
+
+Tests in `crates/engraph-cli/tests/pre_bash_hook.rs`,
+`pre_grep_hook.rs`, and `post_read_hook.rs` pin each hook's branches
+(rewrite, deny, passthrough, augment) plus tricky cases like
+`git log --grep='foo && bar'` (meta inside single quotes — must not
+deny), heredoc shapes, env-prefix re-emission, absolute-path argv[0]
+classification, and entities without signatures rendering cleanly.
 
 ---
 
@@ -901,9 +1047,13 @@ Where each behavior is pinned. Use this as the navigation index.
 | Brevity drops articles | `brevity::tests::drops_articles_and_fillers` |
 | Per-filter ratio gates | `engraph-compress/tests/filter_ratios.rs` (one test per filter) |
 | Picker / FilterOutput id agreement | `picker_and_filter_output_agree_on_filter_id` |
+| Shared util: strip_ansi, dedup_consecutive, truncate_lines, tail_lines, drop_matching | `engraph-compress/src/filters/util.rs::tests` |
 | Golden snapshot fixtures | `engraph-compress/tests/golden_fixtures.rs` |
 | cargo-nextest format | `filters::cargo::tests::nextest_failures_counted_and_pass_lines_dropped` |
-| Pre-bash auto-rewrite branches | `engraph-cli/tests/pre_bash_hook.rs` |
+| Pre-bash auto-rewrite branches + parser shapes (sudo/env/abs-path/git -C/heredoc) | `engraph-cli/tests/pre_bash_hook.rs` |
+| Pre-grep subgraph redirect gate (1–3 match, regex, short, ambiguous) | `engraph-cli/tests/pre_grep_hook.rs` |
+| Post-read augment shape (additionalContext, signatureless entity, unindexed file passthrough) | `engraph-cli/tests/post_read_hook.rs` |
+| Read-bucket filter: per-language comment strip, head/tail no-rewindow, empty-filter fallback | `engraph-compress/tests/read_filter.rs` |
 | Session-start brief content | `engraph-cli/tests/session_start_hook.rs` |
 | `engraph run` budget tracking | `engraph-cli/tests/run_budget.rs::wrapped_run_charges_session_budget` |
 | `engraph run` stdin inheritance | `wrapped_run_inherits_stdin` |

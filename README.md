@@ -30,10 +30,15 @@ Recognized commands:
 | Build systems | `make`, `mvn`, `gradle` (and `./gradlew`) |
 | Search | `rg`, `grep` |
 | Listings | `tree`, `fd`, `ls` |
+| File reads | `cat`, `bat`, `less` (whole-file: head + elided middle + tail window when large); `head`, `tail` (user-windowed: dedup + comment-strip only) |
 
-Unrecognized commands route through a generic fallback that strips ANSI, dedupes consecutive lines, and applies extractive ranking. Adding a new filter is a single function in `crates/engraph-compress/src/filters/` plus an arm in `filters::pick`.
+Unrecognized commands route through a generic fallback that strips ANSI escapes, collapses runs of identical lines, and applies extractive ranking. Adding a new filter is a single function in `crates/engraph-compress/src/filters/` plus an arm in `filters::pick`.
+
+File-read filters strip line comments by extension (Python `#`; Rust / Go / JS / TS / JSX / TSX `//`) and collapse runs of blank lines. Whole-file reads over ~500 lines get a head + elided-middle + tail window. If language stripping accidentally empties a non-empty input, the raw text is returned with a marker so Claude never sees a blank file by mistake.
 
 The cargo test wrapper recognizes both libtest (`test foo ... ok` / `---- foo stdout ----`) and cargo-nextest (`PASS [   0.005s] pkg test`) output formats.
+
+The pre-bash parser handles common command shapes that would otherwise misroute. Env prefixes like `FOO=bar cmd args` are peeled for classification and re-emitted ahead of `engraph run` so the assignment lands in the child's environment. Absolute paths (`/usr/bin/git`) normalize to the bare command name. Git's global options (`-C`, `-c`, `--git-dir=…`, `--work-tree=…`) are stripped before subcommand classification so `git -C /tmp status` routes to the `git status` filter. Heredocs (`cat <<'EOF' … EOF`), `sudo`, and `env <vars> cmd` pass through unmodified — rewriting them would corrupt the body or drop privileges.
 
 ### Session memory
 
@@ -125,7 +130,7 @@ cd engraph-<version>-x86_64-pc-windows-msvc
 .\install.ps1
 ```
 
-The install script places the binary under a per-user prefix and merges the SessionStart and PreToolUse(Bash) hooks into `~/.claude/settings.json`. Re-running replaces existing entries in-place rather than duplicating them.
+The install script places the binary under a per-user prefix and merges the `SessionStart`, `PreToolUse(Bash, Grep)`, and `PostToolUse(Read)` hooks into `~/.claude/settings.json`. Re-running replaces existing entries in-place rather than duplicating them.
 
 ### From source
 
@@ -190,13 +195,7 @@ Compound commands (`cd /tmp && git log`, `git log | head`, env-prefixed forms) f
 
 ### How `pre-grep` redirects symbol lookups
 
-After `engraph index .` populates the codegraph, the PreToolUse hook on Grep watches for bareword patterns (`^[A-Za-z_][A-Za-z0-9_]*$`, length ≥ 3) that resolve to **1–3 entities** by `name` or moniker. On a hit, it returns `permissionDecision: "deny"` with a message pointing Claude at `engraph subgraph <symbol>` — typically 100× smaller than the file-read-and-grep loop Claude would otherwise run.
-
-The same redirect fires for `rg <symbol>` and `grep <symbol>` invoked via the Bash tool — checked inside `pre-bash` before the compression rewrite, so subgraph wins over `engraph run rg <symbol>` when both apply.
-
-### How `post-read` enriches Read results
-
-PostToolUse(Read) appends a brief listing of indexed symbols in the file as `hookSpecificOutput.additionalContext` — name, line range, and signature for up to 30 entities, capped at `MAX_BRIEF_BYTES`. Often answers "what's in this file" without Claude needing a follow-up grep or subgraph call. Silent passthrough for files not in the graph. Telemetry feature `F3_post_read`.
+After `engraph index .` populates the codegraph, the PreToolUse hook on Grep watches for bareword patterns (`^[A-Za-z_][A-Za-z0-9_]*$`, length ≥ 3) that resolve to **1–3 entities** by `name` or moniker. On a hit, it returns `permissionDecision: "deny"` with a message pointing Claude at `engraph subgraph <symbol>` — typically orders of magnitude smaller than the file-read-and-grep loop Claude would otherwise run.
 
 The gate is deliberately narrow:
 
@@ -208,7 +207,13 @@ The gate is deliberately narrow:
 | `process.*` | — | passthrough (regex metachar) |
 | `id` | — | passthrough (too short) |
 
+The same redirect fires for `rg <symbol>` and `grep <symbol>` invoked via the Bash tool — checked inside `pre-bash` before the compression rewrite, so subgraph wins over `engraph run rg <symbol>` when both apply.
+
 When Claude wants the raw grep anyway (e.g. to search for a literal occurrence in comments), adding a regex metachar like `\b` bypasses the redirect.
+
+### How `post-read` enriches Read results
+
+PostToolUse(Read) appends a brief listing of indexed symbols in the just-read file as `hookSpecificOutput.additionalContext` — name, line range, and signature for up to 30 entities. Often answers "what's in this file" without a follow-up grep or subgraph call. Silent passthrough for files that aren't in the graph; the augment never displaces or rewrites the actual Read output.
 
 ---
 
@@ -301,7 +306,10 @@ Key test locations:
 | Per-filter compression ratios | `engraph-compress/tests/filter_ratios.rs` |
 | Golden snapshot output (git log, cargo check, cargo test) | `engraph-compress/tests/golden_fixtures.rs` |
 | Compress idempotency (fixed-point property) | `engraph-compress/src/lib.rs` |
-| Pre-bash hook branches (rewrite, deny, passthrough) | `engraph-cli/tests/pre_bash_hook.rs` |
+| Pre-bash hook branches (rewrite, deny, passthrough, parser shapes) | `engraph-cli/tests/pre_bash_hook.rs` |
+| Pre-grep subgraph redirect gate | `engraph-cli/tests/pre_grep_hook.rs` |
+| Post-read augment shape and passthrough on unindexed files | `engraph-cli/tests/post_read_hook.rs` |
+| Read-bucket filter (cat/head/tail) per-language strip + windowing | `engraph-compress/tests/read_filter.rs` |
 | SessionStart brief content and size cap | `engraph-cli/tests/session_start_hook.rs` |
 | `engraph run` budget tracking and stdin inheritance | `engraph-cli/tests/run_budget.rs` |
 | Ingest: rotation/truncation replay, partial-line handling, sidechain skip | `engraph-ingest/src/lib.rs` |
