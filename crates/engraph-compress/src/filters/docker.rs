@@ -39,7 +39,6 @@ mod tests {
     fn ps_truncates_at_cap() {
         let stdout: String = (0..150).map(|i| format!("container{i}\n")).collect();
         let out = ps(&FilterCtx {
-            cmd: "docker",
             args: &["ps".to_string()],
             stdout: &stdout,
             stderr: "",

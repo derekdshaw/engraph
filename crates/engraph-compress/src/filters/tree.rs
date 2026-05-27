@@ -106,7 +106,6 @@ mod tests {
 └── README.md
 ";
         let o = tree(&FilterCtx {
-            cmd: "tree",
             args: &[],
             stdout,
             stderr: "",

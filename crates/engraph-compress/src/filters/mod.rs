@@ -19,9 +19,11 @@ pub mod search;
 pub mod tree;
 pub mod util;
 
+/// Input to a filter. `cmd` is omitted intentionally — the dispatcher
+/// (`pick`) routes on `cmd`, so filters that receive a `FilterCtx` already
+/// know which command they were chosen for.
 #[derive(Debug, Clone)]
 pub struct FilterCtx<'a> {
-    pub cmd: &'a str,
     pub args: &'a [String],
     pub stdout: &'a str,
     pub stderr: &'a str,

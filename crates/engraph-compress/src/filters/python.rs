@@ -76,7 +76,6 @@ mod tests {
 
     fn ctx<'a>(stdout: &'a str, stderr: &'a str, exit: i32) -> FilterCtx<'a> {
         FilterCtx {
-            cmd: "x",
             args: &[],
             stdout,
             stderr,

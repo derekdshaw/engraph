@@ -66,7 +66,6 @@ fn golden_fixtures_byte_exact() {
         };
         let (filter_fn, _) = filters::pick(case.cmd, &args);
         let out = filter_fn(&FilterCtx {
-            cmd: case.cmd,
             args: &args,
             stdout,
             stderr,

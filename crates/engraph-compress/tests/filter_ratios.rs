@@ -11,9 +11,8 @@ fn ratio(input: &str, output: &str) -> f32 {
     o as f32 / i as f32
 }
 
-fn ctx<'a>(cmd: &'a str, args: &'a [String], stdout: &'a str) -> FilterCtx<'a> {
+fn ctx<'a>(args: &'a [String], stdout: &'a str) -> FilterCtx<'a> {
     FilterCtx {
-        cmd,
         args,
         stdout,
         stderr: "",
@@ -33,7 +32,7 @@ fn git_log_under_quarter() {
     }
     let args = vec!["log".to_string()];
     let (filter, _) = filters::pick("git", &args);
-    let out = filter(&ctx("git", &args, &input));
+    let out = filter(&ctx(&args, &input));
     let r = ratio(&input, &out.text);
     assert!(r < 0.3, "git_log ratio {r:.3} >= 0.3");
     assert!(out.text.contains("[engraph: 50 commits]"));
@@ -50,7 +49,7 @@ fn cargo_test_drops_passes() {
     stdout.push_str("\ntest result: ok. 100 passed; 0 failed; 0 ignored\n");
     let args = vec!["test".to_string()];
     let (filter, _) = filters::pick("cargo", &args);
-    let out = filter(&ctx("cargo", &args, &stdout));
+    let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.2, "cargo_test ratio {r:.3} >= 0.2");
     assert!(out.text.contains("tests 100 (passed 100"));
@@ -67,7 +66,6 @@ fn cargo_build_drops_compiling_lines() {
     let args = vec!["build".to_string()];
     let (filter, _) = filters::pick("cargo", &args);
     let out = filter(&FilterCtx {
-        cmd: "cargo",
         args: &args,
         stdout: "",
         stderr: &stderr,
@@ -85,7 +83,7 @@ fn npm_install_keeps_summary() {
 added 1 package\nadded 1 package\nadded 1 package\nadded 1 package\nadded 1 package\nadded 1 package\nadded 1 package\nadded 1 package\nadded 1 package\nadded 1 package\nadded 12 packages in 4s\n\nfound 0 vulnerabilities\n";
     let args = vec!["install".to_string()];
     let (filter, _) = filters::pick("npm", &args);
-    let out = filter(&ctx("npm", &args, stdout));
+    let out = filter(&ctx(&args, stdout));
     assert!(out.text.contains("added 12 packages in 4s"));
     assert!(out.text.contains("0 vulnerabilities"));
 }
@@ -107,7 +105,7 @@ fn git_log_graph_handles_decoration() {
 ";
     let args = vec!["log".to_string(), "--graph".to_string()];
     let (filter, _) = filters::pick("git", &args);
-    let out = filter(&ctx("git", &args, input));
+    let out = filter(&ctx(&args, input));
     assert!(
         out.text.contains("aaaaaaa Fix something"),
         "missing first commit subject in {out:?}",
@@ -125,7 +123,7 @@ fn git_diff_stat_passes_through() {
 ";
     let args = vec!["diff".to_string(), "--stat".to_string()];
     let (filter, _) = filters::pick("git", &args);
-    let out = filter(&ctx("git", &args, input));
+    let out = filter(&ctx(&args, input));
     assert!(out.text.contains("foo.rs"));
     assert!(out.text.contains("2 files changed"));
 }
@@ -151,7 +149,7 @@ test result: FAILED. 3 passed; 2 failed; 0 ignored
 ";
     let args = vec!["test".to_string()];
     let (filter, _) = filters::pick("cargo", &args);
-    let out = filter(&ctx("cargo", &args, stdout));
+    let out = filter(&ctx(&args, stdout));
     assert!(
         out.text.contains("failed 2,"),
         "expected exactly 2 failures, got: {}",
@@ -176,7 +174,7 @@ fn tree_ratio_below_half() {
     }
     let args = vec![];
     let (filter, _) = filters::pick("tree", &args);
-    let out = filter(&ctx("tree", &args, &input));
+    let out = filter(&ctx(&args, &input));
     let r = ratio(&input, &out.text);
     assert!(r < 0.5, "tree ratio {r:.3} >= 0.5");
 }
@@ -186,7 +184,7 @@ fn fd_truncates_long_lists() {
     let input: String = (0..400).map(|i| format!("src/path/file{i}.rs\n")).collect();
     let args = vec![];
     let (filter, _) = filters::pick("fd", &args);
-    let out = filter(&ctx("fd", &args, &input));
+    let out = filter(&ctx(&args, &input));
     let r = ratio(&input, &out.text);
     assert!(r < 0.6, "fd ratio {r:.3} >= 0.6");
     assert!(out.text.contains("truncated"));
@@ -202,7 +200,7 @@ fn npm_install_ratio_under_half() {
     input.push_str("found 0 vulnerabilities\n");
     let args = vec!["install".to_string()];
     let (filter, _) = filters::pick("npm", &args);
-    let out = filter(&ctx("npm", &args, &input));
+    let out = filter(&ctx(&args, &input));
     let r = ratio(&input, &out.text);
     assert!(r < 0.2, "npm_install ratio {r:.3} >= 0.2");
     assert!(out.text.contains("added 200 packages in 12s"));
@@ -220,7 +218,7 @@ fn pytest_drops_pass_progress() {
     stdout.push_str("=================== 200 passed in 1.23s =====================\n");
     let args = vec!["-q".to_string()];
     let (filter, _) = filters::pick("pytest", &args);
-    let out = filter(&ctx("pytest", &args, &stdout));
+    let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.3, "pytest ratio {r:.3} >= 0.3");
     assert!(out.text.contains("200 passed"));
@@ -239,7 +237,7 @@ fn pip_install_drops_collecting_lines() {
     stdout.push_str("Successfully installed package-0-1.0.0 package-1-1.0.0\n");
     let args = vec!["install".to_string()];
     let (filter, _) = filters::pick("pip", &args);
-    let out = filter(&ctx("pip", &args, &stdout));
+    let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.2, "pip_install ratio {r:.3} >= 0.2");
     assert!(out.text.contains("Successfully installed"));
@@ -254,7 +252,7 @@ fn go_test_caps_summary() {
     stdout.push_str("PASS\nok  \texample.com/m\t0.05s\n");
     let args = vec!["test".to_string()];
     let (filter, _) = filters::pick("go", &args);
-    let out = filter(&ctx("go", &args, &stdout));
+    let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.3, "go_test ratio {r:.3} >= 0.3");
     assert!(out.text.contains("1 ok, 0 failed pkgs"));
@@ -271,7 +269,7 @@ fn yarn_install_drops_resolution_spam() {
     stdout.push_str("Done in 4.2s\n");
     let args = vec!["install".to_string()];
     let (filter, _) = filters::pick("yarn", &args);
-    let out = filter(&ctx("yarn", &args, &stdout));
+    let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.2, "yarn_install ratio {r:.3} >= 0.2");
     assert!(out.text.contains("Done in 4.2s"));
@@ -284,7 +282,7 @@ fn docker_ps_truncates_long_table() {
         .collect();
     let args = vec!["ps".to_string()];
     let (filter, _) = filters::pick("docker", &args);
-    let out = filter(&ctx("docker", &args, &input));
+    let out = filter(&ctx(&args, &input));
     let r = ratio(&input, &out.text);
     assert!(r < 0.8, "docker_ps ratio {r:.3} >= 0.8");
     assert!(out.text.contains("truncated 50 more rows"));
@@ -303,7 +301,7 @@ fn kubectl_describe_drops_spec_annotations() {
     stdout.push_str("Events:\n  Normal Pulled\n");
     let args = vec!["describe".to_string()];
     let (filter, _) = filters::pick("kubectl", &args);
-    let out = filter(&ctx("kubectl", &args, &stdout));
+    let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.4, "kubectl_describe ratio {r:.3} >= 0.4");
     assert!(out.text.contains("Events:"));
@@ -321,7 +319,7 @@ fn make_drops_dir_echoes() {
     stdout.push_str("file42.c:10: error: 'x' undeclared\n");
     let args = vec![];
     let (filter, _) = filters::pick("make", &args);
-    let out = filter(&ctx("make", &args, &stdout));
+    let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.1, "make ratio {r:.3} >= 0.1");
     assert!(out.text.contains("'x' undeclared"));
@@ -334,7 +332,7 @@ fn rg_truncates_long_match_lists() {
         .collect();
     let args = vec!["pattern".to_string()];
     let (filter, _) = filters::pick("rg", &args);
-    let out = filter(&ctx("rg", &args, &input));
+    let out = filter(&ctx(&args, &input));
     let r = ratio(&input, &out.text);
     assert!(r < 0.6, "rg ratio {r:.3} >= 0.6");
     assert!(out.text.contains("truncated 200 more matches"));
@@ -373,7 +371,7 @@ fn picker_and_filter_output_agree_on_filter_id() {
             picker_id, *expected,
             "picker id mismatch for {cmd} {args:?}"
         );
-        let out = filter_fn(&ctx(cmd, &args_owned, ""));
+        let out = filter_fn(&ctx(&args_owned, ""));
         assert_eq!(
             out.filter_id, picker_id,
             "FilterOutput.filter_id ({}) != picker id ({}) for {cmd} {args:?}",

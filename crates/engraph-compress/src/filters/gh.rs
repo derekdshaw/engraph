@@ -43,7 +43,6 @@ mod tests {
     fn list_truncates_long_pr_lists() {
         let stdout: String = (0..100).map(|i| format!("#{i} title\n")).collect();
         let out = list(&FilterCtx {
-            cmd: "gh",
             args: &["pr".to_string(), "list".to_string()],
             stdout: &stdout,
             stderr: "",

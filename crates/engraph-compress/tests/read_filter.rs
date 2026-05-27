@@ -4,9 +4,8 @@
 
 use engraph_compress::filters::{self, FilterCtx};
 
-fn ctx<'a>(cmd: &'a str, args: &'a [String], stdout: &'a str) -> FilterCtx<'a> {
+fn ctx<'a>(args: &'a [String], stdout: &'a str) -> FilterCtx<'a> {
     FilterCtx {
-        cmd,
         args,
         stdout,
         stderr: "",
@@ -16,7 +15,7 @@ fn ctx<'a>(cmd: &'a str, args: &'a [String], stdout: &'a str) -> FilterCtx<'a> {
 
 fn run(cmd: &str, args: &[String], stdout: &str) -> (String, &'static str) {
     let (filter, id) = filters::pick(cmd, args);
-    let out = filter(&ctx(cmd, args, stdout));
+    let out = filter(&ctx(args, stdout));
     assert_eq!(out.filter_id, id, "filter_id round-trip");
     (out.text, id)
 }

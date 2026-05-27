@@ -237,7 +237,6 @@ fn main() -> Result<()> {
 
             let (filter_fn, filter_id) = filters::pick(&command, &args);
             let result = filter_fn(&FilterCtx {
-                cmd: &command,
                 args: &args,
                 stdout: &stdout,
                 stderr: &stderr,

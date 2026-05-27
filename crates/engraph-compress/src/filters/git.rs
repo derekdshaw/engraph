@@ -207,9 +207,8 @@ fn truncate(s: &str, n: usize) -> String {
 mod tests {
     use super::*;
 
-    fn ctx<'a>(cmd: &'a str, args: &'a [String], stdout: &'a str) -> FilterCtx<'a> {
+    fn ctx<'a>(args: &'a [String], stdout: &'a str) -> FilterCtx<'a> {
         FilterCtx {
-            cmd,
             args,
             stdout,
             stderr: "",
@@ -234,7 +233,7 @@ Date: Mon Jan 1 12:00:00 2026 -0700
     extra body line that should be dropped
 ";
         let args = vec!["log".to_string()];
-        let o = log(&ctx("git", &args, input));
+        let o = log(&ctx(&args, input));
         assert!(o.text.contains("aaaaaaa Fix the parser"));
         assert!(o.text.contains("bbbbbbb Add tests"));
         assert!(!o.text.contains("extra body line"));
@@ -245,7 +244,7 @@ Date: Mon Jan 1 12:00:00 2026 -0700
     fn log_oneline_passes_through() {
         let input = "aaaaaa Fix\nbbbbbb Add\n";
         let args = vec!["log".to_string(), "--oneline".to_string()];
-        let o = log(&ctx("git", &args, input));
+        let o = log(&ctx(&args, input));
         assert_eq!(o.text, input);
     }
 
@@ -261,7 +260,7 @@ diff --git a/foo.rs b/foo.rs
  unchanged
 ";
         let args = vec!["diff".to_string()];
-        let o = diff(&ctx("git", &args, input));
+        let o = diff(&ctx(&args, input));
         assert!(o.text.contains("diff --git a/foo.rs"));
         assert!(o.text.contains("+1 -1"));
         assert!(o.text.contains(":: -old line one") || o.text.contains(":: +new line one"));

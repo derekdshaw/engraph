@@ -64,7 +64,6 @@ mod tests {
 
     fn ctx<'a>(stdout: &'a str, stderr: &'a str) -> FilterCtx<'a> {
         FilterCtx {
-            cmd: "npm",
             args: &[],
             stdout,
             stderr,

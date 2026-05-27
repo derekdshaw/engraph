@@ -18,7 +18,6 @@ mod tests {
             .map(|i| format!("src/file{i}.rs:10:match\n"))
             .collect();
         let out = rg(&FilterCtx {
-            cmd: "rg",
             args: &["pattern".to_string()],
             stdout: &stdout,
             stderr: "",

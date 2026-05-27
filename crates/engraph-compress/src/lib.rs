@@ -1,6 +1,21 @@
 //! Deterministic, idempotent compression for persistent context and stored content.
 //!
-//! Algorithm (in order):
+//! # Two entry points
+//!
+//! This crate exposes two distinct compression paths. They do not chain.
+//!
+//! - [`compress`] — the general pipeline below. Used by `engraph` for stored
+//!   prose: session messages, project notes, and unknown tool output reaching
+//!   the `generic` filter. Goes through whitespace normalization, per-kind
+//!   preprocessing, extractive ranking, optional brevity, and sentinel stamp.
+//! - [`filters::pick`] — per-command output shapers (git, cargo, npm, lint,
+//!   etc.). Each filter parses a specific command's output into a structured
+//!   summary and returns raw text. **Specific filters do NOT flow through
+//!   [`compress`]**; only the `generic` fallback does. If you add a filter
+//!   that needs ANSI stripping or progress-line dropping, call into
+//!   [`filters::util`] explicitly — do not assume the pipeline runs after.
+//!
+//! # Pipeline algorithm (in order, used by [`compress`])
 //!   1. Sentinel check — `<<engraph:v1:compressed>>` prefix → return as-is.
 //!   2. Whitespace normalization.
 //!   3. Per-kind preprocessing (ToolOutput, SessionMessage, ProjectNotes, Generic).

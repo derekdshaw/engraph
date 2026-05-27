@@ -96,7 +96,6 @@ Events:
   Normal Pulled 5s kubelet Container image already present
 ";
         let out = describe(&FilterCtx {
-            cmd: "kubectl",
             args: &["describe".to_string()],
             stdout,
             stderr: "",
