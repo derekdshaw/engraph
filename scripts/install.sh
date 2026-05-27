@@ -4,7 +4,7 @@ set -euo pipefail
 # Engraph installer for macOS and Linux.
 # Resolves the `engraph` binary relative to this script's directory (matches
 # the layout of the release archive), installs it under a per-user prefix,
-# and wires SessionStart + PreToolUse(Bash) hooks into Claude Code's
+# and wires SessionStart + PreToolUse(Bash,Grep) hooks into Claude Code's
 # settings.json.
 
 BINARY="engraph"
@@ -137,16 +137,22 @@ if os.path.exists(settings_path):
     except json.JSONDecodeError:
         settings = {}
 
-# The two hooks engraph actually implements today.
+# The hooks engraph implements today.
 hooks_config = {
     "SessionStart": [{
         "matcher": "",
         "hooks": [{"type": "command", "command": f"{engraph} hook session-start"}],
     }],
-    "PreToolUse": [{
-        "matcher": "Bash",
-        "hooks": [{"type": "command", "command": f"{engraph} hook pre-bash"}],
-    }],
+    "PreToolUse": [
+        {
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": f"{engraph} hook pre-bash"}],
+        },
+        {
+            "matcher": "Grep",
+            "hooks": [{"type": "command", "command": f"{engraph} hook pre-grep"}],
+        },
+    ],
 }
 
 existing_hooks = settings.get("hooks", {})
@@ -185,4 +191,6 @@ echo ""
 echo "Next: open Claude Code in any project. SessionStart will auto-inject"
 echo "a brief if there's prior context for that cwd; Bash commands matching"
 echo "a wrapper (git log, cargo test, etc.) will be silently rewritten to"
-echo "route through 'engraph run'."
+echo "route through 'engraph run'. After 'engraph index .', Grep on a"
+echo "bareword symbol indexed in the codegraph is redirected to"
+echo "'engraph subgraph <symbol>'."

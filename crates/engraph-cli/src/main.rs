@@ -155,6 +155,10 @@ enum HookCmd {
     /// PreToolUse(Bash) backstop: deny commands with available wrappers,
     /// suggesting `engraph run` as the replacement.
     PreBash,
+    /// PreToolUse(Grep) redirect: when Claude greps a bareword that resolves
+    /// to 1-3 entities in the codegraph, deny and point at
+    /// `engraph subgraph <symbol>` for a 2-hop neighborhood instead.
+    PreGrep,
     /// SessionStart hook: emit a terse brief of prior context for the current
     /// project as `hookSpecificOutput.additionalContext` (<= MAX_BRIEF_BYTES).
     SessionStart,
@@ -267,6 +271,11 @@ fn main() -> Result<()> {
             HookCmd::PreBash => {
                 if let Err(e) = run_pre_bash_hook(&conn) {
                     tracing::warn!(?e, "pre-bash hook failed; allowing through");
+                }
+            }
+            HookCmd::PreGrep => {
+                if let Err(e) = run_pre_grep_hook(&conn) {
+                    tracing::warn!(?e, "pre-grep hook failed; allowing through");
                 }
             }
             HookCmd::SessionStart => {
@@ -872,6 +881,15 @@ fn run_pre_bash_hook(conn: &db::PooledConn) -> Result<()> {
         return Ok(());
     }
 
+    // Subgraph redirect wins over the compression rewrite: `rg <symbol>` or
+    // `grep <symbol>` on an indexed bareword (1-3 matches) gets a deny+suggest
+    // pointing at `engraph subgraph <symbol>`. That's an order of magnitude
+    // smaller than even the compressed grep output, and gives structured edges.
+    if let Some(reason) = try_subgraph_redirect_for_bash(&command, conn) {
+        emit_subgraph_deny(conn, &reason, "F2_pre_bash_grep");
+        return Ok(());
+    }
+
     let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
     match try_auto_rewrite(&command) {
         RewriteOutcome::Rewrite {
@@ -924,6 +942,121 @@ fn run_pre_bash_hook(conn: &db::PooledConn) -> Result<()> {
             .ok();
         }
         RewriteOutcome::Passthrough => {}
+    }
+    Ok(())
+}
+
+/// "Looks like a single-symbol lookup": bareword identifier of length >= 3,
+/// no regex metachars. Common short tokens (`id`, `if`) and any regex
+/// (`.+*?()[]{}|\^$`) pass through silently.
+fn is_symbol_lookup(pattern: &str) -> bool {
+    if pattern.len() < 3 {
+        return false;
+    }
+    let mut chars = pattern.chars();
+    let first = match chars.next() {
+        Some(c) => c,
+        None => return false,
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Shared subgraph-redirect message generator. Returns Some(reason) when the
+/// pattern is a bareword resolving to 1-3 entities in the codegraph; None
+/// otherwise (not a symbol shape, 0 matches, or 4+ matches — ambiguous).
+/// The LIMIT 4 inner scan caps work and aligns with the 8-cap in
+/// `resolve_matches` (subgraph.rs:84).
+fn try_subgraph_redirect(pattern: &str, conn: &db::PooledConn) -> Option<String> {
+    if !is_symbol_lookup(pattern) {
+        return None;
+    }
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM entities WHERE name = ?1 OR id = ?1 LIMIT 4)",
+            rusqlite::params![pattern],
+            |r| r.get(0),
+        )
+        .ok()?;
+    if !(1..=3).contains(&count) {
+        return None;
+    }
+    let plural = if count == 1 { "" } else { "es" };
+    Some(format!(
+        "`{pattern}` is indexed in the engraph code graph ({count} match{plural}). \
+         Run `engraph subgraph {pattern}` for a 2-hop neighborhood (calls, callers, \
+         siblings) instead of grepping. If you still need a raw search, add a regex \
+         metachar (e.g. `{pattern}\\b`) to bypass this redirect."
+    ))
+}
+
+/// `rg`/`grep <bareword>` on an indexed symbol takes precedence over the
+/// compression rewrite. Skips compounds — the existing deny+suggest covers
+/// those, and if Claude retries with the flat form this path catches it.
+fn try_subgraph_redirect_for_bash(command: &str, conn: &db::PooledConn) -> Option<String> {
+    if has_unquoted_shell_meta(command) {
+        return None;
+    }
+    let argv = shell_words::split(command).ok()?;
+    if argv.is_empty() || is_env_assignment(&argv[0]) {
+        return None;
+    }
+    if argv[0] != "rg" && argv[0] != "grep" {
+        return None;
+    }
+    // First non-flag token is the pattern. Handles `rg -i foo`, `grep -r foo .`.
+    let pattern = argv.iter().skip(1).find(|a| !a.starts_with('-'))?;
+    try_subgraph_redirect(pattern, conn)
+}
+
+fn emit_subgraph_deny(conn: &db::PooledConn, reason: &str, feature: &'static str) {
+    let decision = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason
+        }
+    });
+    println!("{decision}");
+    let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
+    telemetry::record_event(
+        conn,
+        EventInput {
+            session_id: session_id.as_deref(),
+            kind: EventKind::Hook,
+            feature,
+            filter_id: Some("subgraph-redirect"),
+            input_tokens: 0,
+            output_tokens: 0,
+            latency_ms: 0,
+        },
+    )
+    .ok();
+}
+
+/// PreToolUse(Grep) hook: redirect bareword Grep on an indexed symbol to
+/// `engraph subgraph`. See `try_subgraph_redirect` for the gate.
+fn run_pre_grep_hook(conn: &db::PooledConn) -> Result<()> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf)?;
+    if buf.trim().is_empty() {
+        return Ok(());
+    }
+    let v: serde_json::Value = match serde_json::from_str::<serde_json::Value>(&buf) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    let pattern = v
+        .pointer("/tool_input/pattern")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if let Some(reason) = try_subgraph_redirect(&pattern, conn) {
+        emit_subgraph_deny(conn, &reason, "F2_pre_grep");
     }
     Ok(())
 }

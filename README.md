@@ -155,7 +155,8 @@ Add to `~/.claude/settings.json`:
       { "matcher": "", "hooks": [{ "type": "command", "command": "engraph hook session-start" }] }
     ],
     "PreToolUse": [
-      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "engraph hook pre-bash" }] }
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "engraph hook pre-bash" }] },
+      { "matcher": "Grep", "hooks": [{ "type": "command", "command": "engraph hook pre-grep" }] }
     ],
     "SessionEnd": [
       { "matcher": "", "hooks": [{ "type": "command", "command": "engraph ingest --from-stdin" }] }
@@ -183,6 +184,24 @@ The PreToolUse hook uses Claude Code's `hookSpecificOutput.updatedInput` to sile
 Claude Code substitutes the rewritten command before running it. The rewrite is invisible to Claude's reasoning loop — Claude sees the wrapped command in the transcript with compressed output. PostToolUse hooks cannot replace tool results (only append), so this PreToolUse-rewrite pattern is the only path to transparent compression inside Claude Code.
 
 Compound commands (`cd /tmp && git log`, `git log | head`, env-prefixed forms) fall back to a deny+suggest response pointing Claude at the wrappable subcommand. Quoted args with spaces or shell metacharacters are preserved correctly through `shell-words` quoting.
+
+### How `pre-grep` redirects symbol lookups
+
+After `engraph index .` populates the codegraph, the PreToolUse hook on Grep watches for bareword patterns (`^[A-Za-z_][A-Za-z0-9_]*$`, length ≥ 3) that resolve to **1–3 entities** by `name` or moniker. On a hit, it returns `permissionDecision: "deny"` with a message pointing Claude at `engraph subgraph <symbol>` — typically 100× smaller than the file-read-and-grep loop Claude would otherwise run.
+
+The same redirect fires for `rg <symbol>` and `grep <symbol>` invoked via the Bash tool — checked inside `pre-bash` before the compression rewrite, so subgraph wins over `engraph run rg <symbol>` when both apply.
+
+The gate is deliberately narrow:
+
+| Pattern | Resolves to | Decision |
+|---|---|---|
+| `processOrder` | 1 entity | deny + suggest `engraph subgraph processOrder` |
+| `parse` | 12 entities | passthrough (ambiguous; subgraph would emit a disambiguation block) |
+| `unindexed_helper` | 0 entities | passthrough (not in graph) |
+| `process.*` | — | passthrough (regex metachar) |
+| `id` | — | passthrough (too short) |
+
+When Claude wants the raw grep anyway (e.g. to search for a literal occurrence in comments), adding a regex metachar like `\b` bypasses the redirect.
 
 ---
 

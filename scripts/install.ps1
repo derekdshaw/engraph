@@ -2,7 +2,7 @@
 # Engraph installer for Windows.
 # Resolves the engraph.exe binary relative to this script's directory
 # (matches the release-archive layout), installs it under a per-user prefix,
-# and wires SessionStart + PreToolUse(Bash) hooks into Claude Code's
+# and wires SessionStart + PreToolUse(Bash,Grep) hooks into Claude Code's
 # settings.json.
 
 $ErrorActionPreference = "Stop"
@@ -121,7 +121,7 @@ if (Test-Path $SettingsFile) {
     }
 }
 
-# The two hooks engraph actually implements today.
+# The hooks engraph implements today.
 $hooksConfig = @{
     "SessionStart" = @(
         @{
@@ -133,6 +133,10 @@ $hooksConfig = @{
         @{
             matcher = "Bash"
             hooks   = @(@{ type = "command"; command = "$EngraphPath hook pre-bash" })
+        },
+        @{
+            matcher = "Grep"
+            hooks   = @(@{ type = "command"; command = "$EngraphPath hook pre-grep" })
         }
     )
 }
@@ -179,4 +183,6 @@ Write-Host ""
 Write-Host "Next: open Claude Code in any project. SessionStart will auto-inject"
 Write-Host "a brief if there's prior context for that cwd; Bash commands matching"
 Write-Host "a wrapper (git log, cargo test, etc.) will be silently rewritten to"
-Write-Host "route through 'engraph run'."
+Write-Host "route through 'engraph run'. After 'engraph index .', Grep on a"
+Write-Host "bareword symbol indexed in the codegraph is redirected to"
+Write-Host "'engraph subgraph <symbol>'."

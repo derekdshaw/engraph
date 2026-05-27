@@ -163,3 +163,88 @@ fn env_prefix_is_passthrough() {
     let out = run_hook(&db, "GIT_PAGER=cat git log -n 5");
     assert_eq!(out.trim(), "", "env-prefix should pass through: {out}");
 }
+
+// --- Subgraph redirect for rg/grep ----------------------------------------
+
+fn insert_entity(db: &std::path::Path, name: &str) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let id = format!("scheme cargo testpkg 0.1.0 {name}().");
+    conn.execute(
+        "INSERT INTO entities (id, kind, name, project, file_path, line_range, signature)
+         VALUES (?1, 'function', ?2, 'testproj', 'src/lib.rs', '1:10', 'fn ()')",
+        rusqlite::params![id, name],
+    )
+    .unwrap();
+}
+
+#[test]
+fn rg_on_indexed_symbol_redirects_to_subgraph() {
+    let (_t, db) = db_dir();
+    insert_entity(&db, "auth_handler");
+    let out = run_hook(&db, "rg auth_handler");
+    let v = parse(&out).expect("expected deny JSON");
+    assert_eq!(
+        v.pointer("/hookSpecificOutput/permissionDecision")
+            .and_then(|s| s.as_str()),
+        Some("deny")
+    );
+    let reason = v
+        .pointer("/hookSpecificOutput/permissionDecisionReason")
+        .and_then(|s| s.as_str())
+        .unwrap();
+    assert!(
+        reason.contains("engraph subgraph auth_handler"),
+        "missing subgraph hint: {reason}"
+    );
+}
+
+#[test]
+fn grep_on_indexed_symbol_redirects_to_subgraph() {
+    let (_t, db) = db_dir();
+    insert_entity(&db, "process_event");
+    // `-r` flag before the pattern; first non-flag should still be picked.
+    let out = run_hook(&db, "grep -r process_event .");
+    let v = parse(&out).expect("expected deny JSON");
+    assert_eq!(
+        v.pointer("/hookSpecificOutput/permissionDecision")
+            .and_then(|s| s.as_str()),
+        Some("deny")
+    );
+    let reason = v
+        .pointer("/hookSpecificOutput/permissionDecisionReason")
+        .and_then(|s| s.as_str())
+        .unwrap();
+    assert!(reason.contains("engraph subgraph process_event"));
+}
+
+#[test]
+fn rg_on_unindexed_pattern_still_rewrites_for_compression() {
+    let (_t, db) = db_dir();
+    // No entity inserted. Falls through to the compression rewrite path.
+    let out = run_hook(&db, "rg unindexed_helper");
+    let v = parse(&out).expect("expected rewrite JSON");
+    assert_eq!(
+        v.pointer("/hookSpecificOutput/permissionDecision")
+            .and_then(|s| s.as_str()),
+        Some("allow")
+    );
+    let updated = v
+        .pointer("/hookSpecificOutput/updatedInput/command")
+        .and_then(|s| s.as_str())
+        .unwrap();
+    assert_eq!(updated, "engraph run rg unindexed_helper");
+}
+
+#[test]
+fn rg_on_regex_pattern_still_rewrites_for_compression() {
+    let (_t, db) = db_dir();
+    insert_entity(&db, "process");
+    // Regex metachar → not a single-symbol lookup. Don't redirect; compress.
+    let out = run_hook(&db, "rg process.*");
+    let v = parse(&out).expect("expected rewrite JSON");
+    assert_eq!(
+        v.pointer("/hookSpecificOutput/permissionDecision")
+            .and_then(|s| s.as_str()),
+        Some("allow")
+    );
+}
