@@ -96,8 +96,7 @@ pub fn index_repo(
 
     // Prebuilt SCIP path: load the provided file as-is.
     if let Some(p) = scip_override {
-        let bytes = std::fs::read(p)
-            .with_context(|| format!("reading SCIP at {}", p.display()))?;
+        let bytes = std::fs::read(p).with_context(|| format!("reading SCIP at {}", p.display()))?;
         let load_stats = scip_loader::load(conn, project, &bytes)?;
         return Ok(IndexStats {
             entities_inserted: load_stats.entities_inserted,
@@ -110,8 +109,7 @@ pub fn index_repo(
 
     // Explicit --lang override: pin to one driver, single SCIP load.
     if let Some(name) = lang_override {
-        let drv = driver::by_name(name)
-            .ok_or_else(|| anyhow::anyhow!("unknown driver: {name}"))?;
+        let drv = driver::by_name(name).ok_or_else(|| anyhow::anyhow!("unknown driver: {name}"))?;
         let bytes = run_driver_to_scip(repo, &*drv)?;
         let load_stats = scip_loader::load(conn, project, &bytes)?;
         return Ok(IndexStats {
