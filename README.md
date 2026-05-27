@@ -22,7 +22,7 @@ Six phases of the implementation plan are shipped:
 | SessionStart auto-context inject (F4) | `engraph-cli` | `engraph hook session-start` |
 | Compress-existing sweep | `engraph-ingest` | `engraph compress-existing` |
 | Local embeddings + hybrid retrieval | `engraph-core::embedding`, `engraph-retrieve::hybrid` | `engraph init-embeddings`, `engraph reindex-embeddings`, `engraph recall --hybrid` |
-| Structure-aware code retrieval (F2 Phases 2.1 + 2.2 + 2.3 target-level) | `engraph-codegraph` | `engraph index`, `engraph index --workspace`, `engraph subgraph` |
+| Structure-aware code retrieval (F2 Phases 2.1 + 2.2 + 2.3) | `engraph-codegraph` | `engraph index`, `engraph index --workspace`, `engraph index --bazel-symbols`, `engraph subgraph` |
 
 ### Supported wrapper commands (v2)
 
@@ -271,8 +271,10 @@ calls processOrder."
 
 `scripts/install-scip-indexers.sh` is an idempotent installer for all
 five upstream indexers with per-toolchain prerequisite checks. Phase 2.2
-(cross-repo moniker stitching) and Phase 2.3 (polyglot Bazel via the
-separate `scip-bazel` tool) are tracked in `ROADMAP.md`.
+(cross-repo moniker stitching, see "Cross-repo stitching" below) and
+Phase 2.3 (polyglot Bazel: target-level via `bazel query`, symbol-level
+via the per-language indexers, see "Bazel monorepos" below) are shipped.
+Remaining roadmap items live in `ROADMAP.md`.
 
 ### Example
 

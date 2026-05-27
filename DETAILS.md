@@ -940,10 +940,15 @@ Where each behavior is pinned. Use this as the navigation index.
 | Bazel discovery as workspace root | `engraph-codegraph/tests/bazel_live.rs::discover_recognizes_workspace_file` |
 | Bazel target-level index end-to-end | `bazel_live.rs::target_level_index_creates_targets_and_deps` (soft-skips when bazel/bazelisk absent) |
 | Bazel re-index idempotency | `bazel_live.rs::reindex_is_idempotent` |
+| SCIP loader preserves co-resident `BAZEL_DEPENDS_ON` edges | `loader_unit.rs::loader_preserves_bazel_depends_on_edges` |
+| Symbol-level SCIP byte-stream merge | `bazel_symbols::tests::merge_scip_bytes_preserves_documents_and_externals` / `merge_scip_bytes_empty_input_is_valid_empty_index` / `merge_scip_bytes_skips_empty_byte_blobs` |
+| Symbol-level bazel-query target probe | `bazel_symbols::tests::label_kind_nonempty_detects_lines` |
+| Symbol-level `LangStatus` display formatting | `bazel_symbols::tests::lang_status_display_mentions_binary` / `lang_status_display_failed_message` |
+| Symbol-level Bazel Java end-to-end | `bazel_symbols_live.rs::symbol_level_java_indexes_and_preserves_target_level` (triple-gated on bazel + scip-java + `ENGRAPH_LIVE_BAZEL_SYMBOLS=1`) |
 
 ---
 
-## 14. Codegraph (F2 Phases 2.1 + 2.2 + 2.3 target-level)
+## 14. Codegraph (F2 Phases 2.1 + 2.2 + 2.3)
 
 `engraph index <repo>` runs an external SCIP indexer for the detected
 language, decodes the resulting `index.scip` protobuf, and writes
@@ -984,10 +989,12 @@ crate that does cross-file `who-calls` across Rust/Python/Go/TS/Java.
 | `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index` (chdir into repo) |
 | `ScipJava` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java index --output <repo>/index.scip` (chdir into repo) |
 
-scip-java's `--bazel-*` flags exist for a manual aspect workflow only;
-its `index` subcommand auto-detects `{Maven, Gradle, sbt, mill}` and
-does not drive Bazel. Java-on-Bazel coverage will arrive with the
-separate `scip-bazel` tool in Phase 2.3.
+scip-java's `index` subcommand auto-detects `{Maven, Gradle, sbt, mill}`
+when invoked standalone (the path covered by `drivers_live.rs`).
+On a Bazel workspace the same binary is driven by the symbol-level
+Bazel pathway (§14.9), where scip-java materializes its own aspect and
+orchestrates Bazel internally — engraph does not reimplement aspect
+dispatch.
 
 `scripts/install-scip-indexers.sh` is the companion installer: idempotent,
 per-toolchain prerequisite checks, surfaces WSL-specific failure modes
@@ -1034,21 +1041,47 @@ callers (`open_pool` etc.) instead of nearby variable names.
 `engraph-ingest`) wraps the whole load:
 
 1. `DELETE FROM relations WHERE src_entity IN (SELECT id FROM entities
-   WHERE project = ?)` (and same for `dst_entity`; FK enforcement
-   means relations must die before entities).
-2. `DELETE FROM entities WHERE project = ?`.
-3. Bulk re-insert from the current SCIP run.
-4. `COMMIT`.
+   WHERE project = ?) AND kind != 'BAZEL_DEPENDS_ON'` — narrowed in
+   two steps from the v2.1 original. v2.2 dropped the `dst_entity`
+   variant (cross-repo: deleting inbound edges from *other* projects
+   would silently break app_b → lib_a::foo when lib_a re-indexes) and
+   stopped deleting `entities` entirely (an in-flight referrer's
+   placeholder must not get FK-collapsed during a producer re-index).
+   v2.3 #2 added the `kind != 'BAZEL_DEPENDS_ON'` clause so a SCIP
+   load running under the same project as a prior target-level Bazel
+   pass (§14.8) doesn't wipe its target-level edges. The `!=` form is
+   future-proof: a new SCIP-derived kind (e.g. OVERRIDES) auto-cycles
+   on re-index; an explicit IN-list would silently leak unknown kinds
+   across runs.
+2. Bulk re-insert from the current SCIP run. Entities are upserted;
+   `file_path` / `line_range` / `signature` are refreshed on conflict
+   so a real definition takes ownership from any earlier placeholder.
+3. `COMMIT`.
 
 Readers see the prior snapshot until commit. Staging-tables-then-swap
 (the heavier pattern ROADMAP.md mentions) is overkill below ~10M
-edges; a single `BEGIN…COMMIT` is sufficient at SQLite scale.
+edges; a single `BEGIN…COMMIT` is sufficient at SQLite scale. Stale
+entities from removed source code accumulate; a future GC pass can
+prune them.
+
+Entity-ID collision across the target-level (§14.8) and symbol-level
+(§14.9) Bazel layers is ruled out by inspection: `bazel_target` IDs
+are Bazel labels (`//foo:bar`); `symbol` IDs are SCIP monikers
+(scheme-prefixed). Disjoint by construction, so both layers coexist
+under one project key without ID clashes.
+
+Regression test `loader_preserves_bazel_depends_on_edges`
+(`tests/loader_unit.rs`) seeds a `BAZEL_DEPENDS_ON` row + `bazel_target`
+entity under project X, runs `load(X, ...)`, asserts the row
+survives.
 
 **ID strategy.** `entities.id` is the raw SCIP moniker
 (`rust-analyzer cargo engraph-core 0.1.0 schema/run_migrations().`).
-Cross-machine moniker normalization is deferred to Phase 2.2; without
-it, monikers from different indexer versions don't compare equal
-across machines, and cross-repo stitching doesn't work yet.
+Cross-machine moniker normalization has a wire-in hook
+(`scip_loader::normalize_moniker`) which is a pass-through today; see
+§14.7 for the Phase 2.2 stitching that works against
+canonically-published deps without rewrites and the deferred polish
+items (per-indexer rules, symbol-stability test suite).
 
 ### 14.4 Subgraph query + markdown
 
@@ -1139,7 +1172,7 @@ carries a build manifest, indexes just `<dir>`. Otherwise, walks
 immediate children and indexes each whose `Driver::detect()` matches.
 Per-repo failures are reported but don't abort the run; the CLI prints
 per-repo results plus a workspace summary. Deeper recursion is
-intentionally out of scope until Phase 2.3.
+intentionally out of scope; tracked as a follow-up in §15.
 
 **Cross-repo subgraph annotation.** `format_markdown` now compares the
 queried entity's `project` with each related entity's. When they
@@ -1169,16 +1202,16 @@ symbol-stability test suite (a snapshot of 50 known monikers across
 indexer versions). Both pay back only once there's drift in practice —
 add them when telemetry shows a real failure mode.
 
-### 14.8 Phase 2.3 — target-level Bazel via `bazel query`
+### 14.8 Phase 2.3 #1/#3 — target-level Bazel via `bazel query`
 
-`bazel.rs` adds the target-level half of Phase 2.3: one `bazel query
+`bazel.rs` is the target-level layer of Phase 2.3: one `bazel query
 --output=streamed_jsonproto 'kind(rule, //...)'` invocation enumerates
 every rule target with its direct deps, and the loader writes them as
 `bazel_target` entities plus `BAZEL_DEPENDS_ON` edges. No build runs;
 no per-language SCIP indexer is involved. This is intentionally the
-language-agnostic, deterministic, fast cut — the symbol-level half
-(driving `scip-java` / `scip-go` / `scip-typescript` from Bazel-
-resolved classpaths) is deferred.
+language-agnostic, deterministic, fast cut, and it fires automatically
+on any Bazel workspace. The symbol-level layer (§14.9) opt-in via
+`--bazel-symbols` adds per-language SCIP on top.
 
 **Detection precedence.** `detect_bazel(repo)` checks for `WORKSPACE`,
 `WORKSPACE.bazel`, or `MODULE.bazel` at the root. Phase 2.3 routes
@@ -1215,8 +1248,9 @@ both first-party deps (`//foo:foo`) and Bazel-internal deps
 (`@bazel_tools//tools/genrule:genrule-setup.sh`). The loader only
 emits a `BAZEL_DEPENDS_ON` edge when the dep is itself a target in
 the current workspace (i.e. appears as a `name` in the JSON stream).
-Cross-workspace edges to `@external_repo//...` targets are skipped
-until Phase 2.3 grows a notion of imported repos.
+Cross-workspace edges to `@external_repo//...` targets are skipped;
+a future mode (not yet planned) would let users register external
+workspaces and stitch them like Phase 2.2's cross-repo path does.
 
 **Idempotent re-index.** Following the Phase 2.2 pattern, the Bazel
 loader deletes only its own outgoing `BAZEL_DEPENDS_ON` edges
@@ -1244,38 +1278,137 @@ targets land as `bazel_target` entities with the expected
 A separate test pins idempotency under re-index. Soft-skips when no
 `bazel`/`bazelisk` is on PATH.
 
-**What Phase 2.3 explicitly does NOT do.**
-- **Symbol-level Java via Bazel**: the `scip-java` aspect workflow
-  (write `scip_java.bzl` into the workspace, `bazel build
-  --aspects=...`, harvest per-target SemanticDB → SCIP). Real and
-  doable, but each language's quirks are 1-2 sessions of debugging
-  on its own.
-- **Symbol-level Go / TypeScript via Bazel**: same pattern with
-  `scip-go` / `scip-typescript` against Bazel-resolved srcs.
+**What Phase 2.3 target-level explicitly does NOT do.**
 - **Cross-workspace `@external_repo//...` edges**: today these are
   filtered. A future mode would let users register external
   workspaces and stitch them like Phase 2.2's cross-repo path does
   for non-Bazel projects.
 
+### 14.9 Phase 2.3 #2 — symbol-level Bazel via per-language SCIP indexers
+
+`bazel_symbols.rs` adds the symbol-level layer on top of §14.8. With
+`engraph index --bazel-symbols` set (off by default), after the
+target-level pass writes `bazel_target` entities and
+`BAZEL_DEPENDS_ON` edges, this module drives `scip-java` / `scip-go` /
+`scip-typescript` against the same Bazel workspace, merges their SCIP
+outputs in memory, and loads the result under the same project key.
+The end result: `engraph subgraph <name>` carries both a **Calls /
+References** symbol section (from SCIP) and a **Bazel deps** section
+(from `bazel query`) in one neighborhood rendering.
+
+**Why opt-in.** Toolchain downloads and full Bazel builds make
+`--bazel-symbols` heavy (5s warm to minutes cold per language). The
+target-level pass remains the fast deterministic default that fires
+automatically on any Bazel workspace; symbol-level is the opt-in
+follow-up for when you want navigability.
+
+**Per-language pipeline.** Three steps per language, in order:
+
+1. **Bazel-query probe.** `bazel query 'kind(java_library, //...)
+   union kind(java_binary, //...) union kind(java_test, //...)'
+   --output=label_kind`, with the same `--output_base` as the
+   target-level pass (so the analysis cache stays warm). Empty
+   stdout → `LangStatus::SkippedNoTargets`. Non-empty → continue.
+   Per-language rule classes: Java (`java_library`/`java_binary`/
+   `java_test`), Go (`go_library`/`go_binary`/`go_test`), TS
+   (`ts_project`/`ts_library`).
+2. **Indexer binary probe.** `which scip-<lang>` (implemented as
+   `Command::new(bin).arg("--version").status()`). Missing →
+   `LangStatus::SkippedNoIndexer { binary }`. Present → continue.
+3. **Spawn the indexer.** All three indexers run with
+   `current_dir(repo)`, stdout/stderr piped. SCIP output lands at
+   `~/.cache/engraph/bazel-scip-out/<sha-of-workspace-path>/index-<lang>.scip`
+   (keeps it out of the user's repo and out of Bazel's own
+   `output_base`; stable across runs so re-runs overwrite).
+
+| Language | Command | Rationale |
+|---|---|---|
+| Java | `scip-java index --output <path>` | scip-java auto-detects Bazel via its bundled `BazelBuildTool` — materializes its own `aspects/scip_java.bzl`, runs `bazel build --aspects=...%scip_java_aspect --output_groups=scip //...`, harvests `bazel-out/**/*.scip`, merges. We do **not** reimplement aspect dispatch. |
+| Go | `scip-go --module-root . --output <path>` | scip-go has no first-party Bazel aspect (per its README, Bazel is "supported via the Go Packages Driver Protocol"). MVP requires a `go.mod` at the workspace root; multi-`go.mod` Bazel-go monorepos surface as `SkippedNoTargets`. |
+| TS | `scip-typescript index --output <path>` | scip-typescript has no Bazel aspect either; reads `tsconfig.json` directly. `rules_ts` users may need a prior `bazel build //...` to populate `bazel-bin/<pkg>/node_modules` symlinks — documented limitation. |
+
+**Merge-in-memory, single load.** `scip_loader::load`'s DELETE is
+per-project (§14.3). Calling it once per language under the same
+project would have language 2 wipe language 1's edges, then language
+3 wipe language 2's. The fix: `bazel_symbols::merge_scip_bytes`
+concatenates `Index.documents` and `Index.external_symbols` vectors
+across each language's SCIP output (both are `Vec<...>` in the
+generated protobuf — `Vec::extend`), then reserializes. The merged
+blob is loaded once. Metadata from the first non-empty input wins.
+
+**Soft-skip semantics.** A failing language doesn't abort the rest of
+the symbol-level pass. The `LangStatus` enum has four variants —
+`Indexed`, `SkippedNoTargets`, `SkippedNoIndexer { binary }`,
+`Failed(stderr_tail)` — and each language reports independently. The
+`BazelSymbolStats` return value carries per-language results plus
+aggregate `entities_inserted` / `relations_inserted` / `scip_bytes_total`.
+
+**CLI surface.** `--bazel-symbols` on `Cmd::Index` (composes with
+`--workspace`). Threaded as `bazel_symbols: bool` through
+`index_repo` and `index_workspace`. On a Bazel-detected repo with
+the flag set and no `--scip` override, the symbol-level pass chains
+after the target-level pass; `driver_name` reports
+`"bazel-query+symbols"` (vs the default `"bazel-query"`).
+
+**End-to-end test.** `tests/bazel_symbols_live.rs` is triple-gated:
+`bazel`/`bazelisk` on PATH, `scip-java` on PATH, and
+`ENGRAPH_LIVE_BAZEL_SYMBOLS=1` env var set. Default `cargo test`
+doesn't pay the 2–5 min cold-cache cost. Java-only by design: that's
+the language whose Bazel orchestration (scip-java's bundled aspect) is
+the real risk; Go and TS are simple shell-outs covered by unit tests
+(`merge_scip_bytes_*`, `label_kind_nonempty_detects_lines`,
+`lang_status_display_*`).
+
+**Helpers shared with §14.8.** Three private helpers in `bazel.rs`
+(`bazel_binary`, `output_base_for`, `tail_lines`) were promoted to
+`pub(crate)` so this module reuses them without restructuring the
+target-level module into a directory.
+
+**Known limitations / followups** (documented in `ROADMAP.md`,
+deferred until a real workload trips them):
+- **scip-go multi-`go.mod` Bazel monorepos**: gazelle-managed repos
+  sometimes carry one `go.mod` per package. Today the symbol-level
+  path requires a single `go.mod` at the root; multi-mod would need
+  per-package enumeration + merging.
+- **scip-typescript + rules_ts node_modules**: cold runs may fail
+  until a prior `bazel build //...` populates the package-local
+  `node_modules` symlinks.
+- **scip-java on large monorepos**: 1000+ Java targets can OOM or
+  exceed 30 min. Reserved env var
+  `ENGRAPH_BAZEL_SCIP_JAVA_TARGETS` for a future `--targets <expr>`
+  pass-through, not implemented.
+- **Bazel server isolation gap (Java path)**: §14.8 pins
+  `--output_base` into engraph's cache, but scip-java invokes Bazel
+  internally without a startup-options pass-through we can plumb.
+  With `--bazel-symbols`, scip-java's Bazel build lands in the
+  user's default `~/.cache/bazel`.
+
 ---
 
 ## 15. Forward pointers
 
-The roadmap (`ROADMAP.md`) tracks features that aren't built. The two
-biggest pending items are:
+The roadmap (`ROADMAP.md`) tracks features that aren't built. F2
+Phase 2.3 is fully shipped (target-level §14.8, symbol-level §14.9);
+the largest remaining items are:
 
-- **F2 Phase 2.3 symbol-level**: target-level Bazel ships today
-  (§14.8); driving scip-java/scip-go/scip-typescript from
-  Bazel-resolved classpaths is the remaining piece.
+- **Auto-trigger indexing.** Today `engraph index` is manual. Wiring
+  it into the SessionStart hook (or an MCP tool surface) so a fresh
+  Claude session re-indexes the workspace automatically — with
+  stale-detection so cold scip-java doesn't fire every session — is
+  the most user-visible follow-up.
+- **Deep workspace discovery.** `discover_workspace_repos` walks
+  immediate children only; nested polyrepo layouts need explicit
+  per-repo invocations. Recursion + a depth-limit / `.gitignore`
+  respect would close this.
 - **F2 polish items deferred from 2.2**: per-driver moniker
-  normalization rules (the rewrite hook in `scip_loader::
-  normalize_moniker` is a no-op today) and the 50-symbol stability
-  test suite (snapshot known monikers, regression on every loader
-  change). Both pay back only once indexer-version drift causes a
-  real failure in practice.
+  normalization rules (the rewrite hook in
+  `scip_loader::normalize_moniker` is a no-op today) and the
+  50-symbol stability test suite (snapshot known monikers, regression
+  on every loader change). Both pay back only once indexer-version
+  drift causes a real failure in practice.
 - **MCP server** wrapping `engraph recall` / `engraph subgraph`:
-  worthwhile once there are 5+ tools to expose. With F2 Phase 2.1
-  shipped, that threshold is closer.
+  worthwhile once there are 5+ tools to expose. With F2 fully
+  shipped, that threshold is met.
 
 Everything else listed under "Shipped in the v2.1 polish pass" in the
 roadmap is in this document under the corresponding feature section.
