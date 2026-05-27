@@ -114,7 +114,7 @@ manually or via additional hooks the user wires up.
 
 ### 2.3 Storage: SQLite WAL, schema versioning
 
-One database, opened by `db::open_pool` (`engraph-core/src/db.rs`).
+One database, opened by `db::open_pool` (`engraph-core::db`).
 
 - **WAL mode** set once per DB; multiple readers + one writer without
   blocking. `synchronous = NORMAL` is the WAL-appropriate durability /
@@ -128,7 +128,7 @@ One database, opened by `db::open_pool` (`engraph-core/src/db.rs`).
   absorbs incidental contention.
 - **Schema migrations** are a `&[&str]` array; each entry is one SQL batch
   applied inside its own transaction and recorded in `migrations`
-  (`engraph-core/src/schema.rs`). `SCHEMA_VERSION` is a compile-time
+  (`engraph-core::schema`). `SCHEMA_VERSION` is a compile-time
   constant; `check_drift` refuses to run if the on-disk schema is *newer*
   than the binary expects.
 - The path defaults to `dirs::data_local_dir()/engraph/engraph.db`,
@@ -158,7 +158,7 @@ backup-and-restore story trivial.
 ## 3. The compression pipeline (F6)
 
 Entry: `compress(CompressInput)` → `CompressResult`
-(`engraph-compress/src/lib.rs:77`).
+(`engraph-compress`).
 
 Six steps, in strict order. Each step is independently testable.
 
@@ -168,7 +168,7 @@ Six steps, in strict order. Each step is independently testable.
 text.starts_with("<<engraph:v1:compressed>>") ? return as-is
 ```
 
-This is the idempotency guarantee (`sentinel.rs:4`). Compressing a
+This is the idempotency guarantee (`sentinel.rs`). Compressing a
 compressed string is the literal-bytes identity. The cost: a 25-byte
 string compare. The benefit: callers never need to track whether a row
 has been compressed before, and accidental double-compression in a sweep
@@ -181,7 +181,7 @@ can verify against the original-bytes SHA-256 if they care.
 
 ### 3.2 Step 2 — whitespace normalization
 
-`normalize_whitespace` (`lib.rs:141`): collapse runs of spaces/tabs to one
+`normalize_whitespace` (`lib.rs`): collapse runs of spaces/tabs to one
 space per line, trim trailing whitespace, drop trailing empty lines.
 Paragraph breaks (single `\n\n`) are preserved.
 
@@ -192,7 +192,7 @@ newline conventions.
 
 ### 3.3 Step 3 — per-kind preprocessing
 
-`preprocess::apply` (`preprocess.rs:5`) dispatches on `CompressKind`:
+`preprocess::apply` (`preprocess.rs`) dispatches on `CompressKind`:
 
 | Kind | Preprocessing |
 |---|---|
@@ -215,7 +215,7 @@ count for diagnosability.
 
 ### 3.4 Step 4 — extractive sentence ranking
 
-`rank::extract` (`rank.rs:10`).
+`rank::extract` (`rank.rs`).
 
 The math:
 
@@ -253,12 +253,12 @@ Why this exact shape:
   narrative flow.
 - **Greedy fill with token check.** `target_tokens` is a soft floor —
   the algorithm stops once cumulative ≥ target, with a minimum of 32
-  tokens (`lib.rs:117`) so very short inputs aren't compressed below
+  tokens (`lib.rs`) so very short inputs aren't compressed below
   intelligibility.
 
 ### 3.5 Step 5 — caveman brevity (opt-in)
 
-`brevity::strip_fillers` (`brevity.rs:20`). Removes articles (`a`, `an`,
+`brevity::strip_fillers` (`brevity.rs`). Removes articles (`a`, `an`,
 `the`) and a fixed list of filler words (`just`, `really`, `very`,
 `actually`, `basically`, `literally`, `simply`, `quite`, `rather`,
 `somewhat`, `perhaps`, `maybe`).
@@ -270,7 +270,7 @@ output.
 
 ### 3.6 Step 6 — sentinel stamp
 
-`sentinel::stamp` (`sentinel.rs:13`) prepends `<<engraph:v1:compressed>>\n`.
+`sentinel::stamp` (`sentinel.rs`) prepends `<<engraph:v1:compressed>>\n`.
 No trailer: an in-band hash trailer would be indistinguishable from
 arbitrary content, breaking the "anything starting with sentinel
 round-trips" contract. Provenance (`original_hash`, `original_tokens`,
@@ -284,7 +284,7 @@ f(x)` for all `x`. The sentinel fast-path makes this trivially true on
 the second invocation; the normalization steps before it are what make
 the first invocation produce a stable output that the fast-path will
 recognize. The unit test `idempotent_on_second_pass`
-(`engraph-compress/src/lib.rs:203`) pins this.
+(`engraph-compress`) pins this.
 
 This is why `compress-existing` is safe to run repeatedly: every row
 either passes the sentinel check (no-op) or gets compressed once and
@@ -297,11 +297,11 @@ sentinel'd, after which it joins the no-op group.
 `engraph run <cmd> [args...]` spawns the wrapped command, picks a filter
 based on `(cmd, first arg)`, runs it on the captured `(stdout, stderr,
 exit_code)`, prints the filtered text, and exits with the child's exit
-code (`engraph-cli/src/main.rs` `Cmd::Run` branch).
+code (`engraph-cli` `Cmd::Run` branch).
 
 ### 4.1 Dispatch
 
-`filters::pick(cmd, args)` (`engraph-compress/src/filters/mod.rs:37`) is a
+`filters::pick(cmd, args)` (`engraph-compress::filters`) is a
 single big `match` returning `(FilterFn, &'static str)`. The unknown
 fallback is `(generic::filter, "generic")`.
 
@@ -357,7 +357,7 @@ TF-IDF said was salient and lose the structure ("which commits exist in
 what order"). Per-command filters know that `git log` is N commit
 blocks and can collapse each to its subject without losing the count.
 The ratio gains are dramatic: `git_log_under_quarter`
-(`tests/filter_ratios.rs:25`) demonstrates < 0.3 on 50 commits.
+(`tests/filter_ratios.rs`) demonstrates < 0.3 on 50 commits.
 
 The unknown-command fallback (`generic::filter`) routes through
 `compress(CompressKind::ToolOutput)`, so users still get *some* savings
@@ -411,13 +411,11 @@ characters from getting silently corrupted.
 
 ## 5. Tool-use hooks: PreToolUse and PostToolUse
 
-Three Claude Code lifecycle events get engraph handlers:
-`PreToolUse(Bash)` (`run_pre_bash_hook` at
-`engraph-cli/src/main.rs:998`) rewrites or denies bash commands;
-`PreToolUse(Grep)` (`run_pre_grep_hook` at `:1179`) redirects symbol
-lookups to the codegraph; `PostToolUse(Read)` (`run_post_read_hook` at
-`:1206`) appends an indexed-symbol map to file reads. All three read
-their tool-input JSON from stdin, decide an outcome, emit the
+Three Claude Code lifecycle events get engraph handlers, all in
+`engraph-cli`: `PreToolUse(Bash)` rewrites or denies bash commands;
+`PreToolUse(Grep)` redirects symbol lookups to the codegraph;
+`PostToolUse(Read)` appends an indexed-symbol map to file reads. All
+three read their tool-input JSON from stdin, decide an outcome, emit the
 appropriate JSON on stdout, and exit 0.
 
 ### 5.1 PreToolUse(Bash) decision tree
@@ -450,7 +448,7 @@ otherwise:
 ```
 
 Three outcomes, returned as a `RewriteOutcome` enum
-(`engraph-cli/src/main.rs:734`), each mapping to a Claude Code hook response:
+(`engraph-cli`), each mapping to a Claude Code hook response:
 
 - **Rewrite**: `permissionDecision: "allow"` + `updatedInput.command =
   "engraph run …"`. Claude Code substitutes the new command before
@@ -479,20 +477,20 @@ content.
 
 ### 5.3 Quote-aware shell-meta detection
 
-`has_unquoted_shell_meta` (`engraph-cli/src/main.rs:965`) tracks single quotes, double
+`has_unquoted_shell_meta` (`engraph-cli`) tracks single quotes, double
 quotes, backslash escapes, and `$(...)` substitutions while scanning for
 meta characters. False positives are tolerated (the fallback is the safe
 DenySuggest); false negatives would be catastrophic (rewriting a
 compound pipeline that the wrapper doesn't actually handle), so the
 detection errs conservative.
 
-`has_heredoc` (`:831`) reuses the same quote-tracking loop to spot
+`has_heredoc` reuses the same quote-tracking loop to spot
 `<<TAG` outside quotes. Heredoc detection short-circuits the rest of
 the decision tree to Passthrough: any rewrite that re-shelled the
 command would terminate the heredoc body at the wrong place or pull
 the body lines into argv.
 
-`is_env_assignment` (`:938`) is a tight identifier-equals-anything
+`is_env_assignment` is a tight identifier-equals-anything
 check matching POSIX variable-name rules. It's used both by the
 prefix-peeling logic and (legacy) directly in the compound scan.
 
@@ -500,20 +498,20 @@ prefix-peeling logic and (legacy) directly in the compound scan.
 
 The rewrite pass would misroute several common command shapes without
 explicit normalization. Each is a single helper called from the head
-of `try_auto_rewrite` (`:746`):
+of `try_auto_rewrite` :
 
-- `strip_command_prefix` (`:864`) peels `sudo` / `env` (by bailing
+- `strip_command_prefix` peels `sudo` / `env` (by bailing
   out — different privilege boundary or non-trivial flag parsing)
   and leading `FOO=bar` env assignments (peeled and re-emitted ahead
   of `engraph run` so the child inherits them). Values containing
   whitespace bail to Passthrough — re-quoting `MSG='hello world'` for
   the rewrite is fragile, and Passthrough at least runs the original
   command correctly.
-- `normalize_argv0` (`:891`) maps absolute and `./`-prefixed argv[0]
+- `normalize_argv0` maps absolute and `./`-prefixed argv[0]
   values through `Path::file_name` so `/usr/bin/grep` and
   `./bin/git` classify the same as the bare names. Pure
   normalization — does nothing to non-path argv[0].
-- `strip_git_global_opts` (`:909`) walks argv when argv[0] == "git"
+- `strip_git_global_opts` walks argv when argv[0] == "git"
   and drops the global options `-C path`, `-c key=value`,
   `--git-dir=…`, `--work-tree=…`. Without this, `git -C /tmp status`
   classifies as `generic` (because `pick("git", ["-C", ...])` falls
@@ -521,7 +519,7 @@ of `try_auto_rewrite` (`:746`):
 
 ### 5.5 Subgraph redirect on `rg` / `grep`
 
-`try_subgraph_redirect_for_bash` (`:1134`) runs after the parser
+`try_subgraph_redirect_for_bash` runs after the parser
 normalizers but before the compound-shell and filter-pick branches.
 It uses the same normalized argv: argv[0] must be `rg` or `grep`
 (so `/usr/bin/rg` is in scope thanks to `normalize_argv0`), and the
@@ -529,14 +527,14 @@ first non-flag arg is the candidate pattern.
 
 Shared with the native `PreToolUse(Grep)` path:
 
-- `is_symbol_lookup` (`:1087`) requires bareword shape
+- `is_symbol_lookup` requires bareword shape
   `^[A-Za-z_][A-Za-z0-9_]*$` and length ≥ 3. Regex metachars and
   short tokens (`if`, `id`) skip the redirect.
-- `try_subgraph_redirect` (`:1107`) does a
+- `try_subgraph_redirect` does a
   `SELECT COUNT(*) FROM (SELECT 1 FROM entities WHERE name = ?1
   OR id = ?1 LIMIT 4)`. Only counts 1–3 trigger DenySuggest; 0 is a
   non-indexed name, 4+ would resolve as Ambiguous in
-  `subgraph_for` (subgraph.rs:80) and force a retry anyway.
+  `subgraph_for` (`subgraph.rs`) and force a retry anyway.
 
 The gate matters: a permissive heuristic would deny on common
 identifiers like `new` / `run` / `parse` (any of which has dozens of
@@ -547,7 +545,7 @@ to show.
 
 ### 5.6 PostToolUse(Read) codegraph augment
 
-`run_post_read_hook` (`:1206`) is the answer to "what about file
+`run_post_read_hook` is the answer to "what about file
 reads?" PreToolUse on Read could only rewrite `tool_input.file_path`
 (the path, not the content), and PostToolUse can't replace the tool
 result — so neither hook can *compress* Claude Code's native Read
@@ -558,11 +556,11 @@ Flow:
 1. Parse `tool_input.file_path` from the stdin JSON. Empty path →
    Passthrough.
 2. `engraph_codegraph::subgraph::entities_in_file(conn, path, 30)` —
-   sibling of `query_siblings` (subgraph.rs:141), same predicate
+   sibling of `query_siblings` (`subgraph.rs`), same predicate
    `WHERE file_path = ?1 ORDER BY line_range LIMIT ?2` but without
    the self-id exclusion. Empty result → Passthrough (file isn't
    indexed).
-3. `build_read_context` (`:1254`) renders each entity as
+3. `build_read_context` renders each entity as
    `` - `name` @ line_range — `signature` `` (signatureless entities
    skip the em-dash + backticks block to avoid `— \`\``).
 4. `truncate_to_bytes(out, MAX_BRIEF_BYTES)` caps the addition at
@@ -587,7 +585,7 @@ classification, and entities without signatures rendering cleanly.
 ## 6. JSONL ingest pipeline
 
 `engraph_ingest::ingest_file(conn, path)` is the entry point
-(`engraph-ingest/src/lib.rs:194`). It walks the Claude Code transcript
+(`engraph-ingest`). It walks the Claude Code transcript
 file at `path` and inserts new messages into the DB, tracking offsets so
 re-ingest is incremental.
 
@@ -619,14 +617,14 @@ inside the read loop:
 
 The partial-line fix is critical (regression test
 `ingest_holds_offset_when_trailing_line_is_partial`,
-`engraph-ingest/src/lib.rs`). Without it, a writer flushing mid-line
+`engraph-ingest`). Without it, a writer flushing mid-line
 would commit our offset past the unparsed bytes, permanently skipping
 that line on the next ingest.
 
 ### 6.2 Sidechain filtering
 
 Claude Code's sub-agent feature emits transcript events with
-`isSidechain: true`. `RawEvent::is_sidechain` (`engraph-ingest/src/lib.rs:42`)
+`isSidechain: true`. `RawEvent::is_sidechain` (`engraph-ingest`)
 catches them at parse time and skips them — those events would otherwise
 pollute the main session memory with sub-agent chatter.
 
@@ -636,7 +634,7 @@ The previous auto-commit path issued ~3 statements per message
 (`upsert_session`, `INSERT` into `messages`, scope membership). On a
 5k-message transcript that's ~15k fsyncs in WAL mode. The current
 implementation wraps the whole file's writes in a single SQL transaction
-via a `TxGuard` RAII helper (`engraph-ingest/src/lib.rs:58`).
+via a `TxGuard` RAII helper (`engraph-ingest`).
 
 ```rust
 struct TxGuard<'a> {
@@ -663,7 +661,7 @@ statements per message → 1 fsync for the whole file).
 
 ### 6.4 Compress-existing sweep + FTS retention
 
-`compress_existing(conn, batch)` (`engraph-ingest/src/lib.rs:100`) walks
+`compress_existing(conn, batch)` (`engraph-ingest`) walks
 `messages` and `context_items`, compresses any row whose
 `content_compressed = 0` and whose token count exceeds the threshold,
 and writes the compressed text back. Idempotent: the sentinel fast-path
@@ -693,7 +691,7 @@ hits the original phrase against the compressed message.
 ## 7. Retrieval (F3)
 
 `engraph_retrieve::search(conn, &Query)` returns `Vec<Hit>` sorted by
-score (`engraph-retrieve/src/lib.rs:69`).
+score (`engraph-retrieve`).
 
 ### 7.1 Targets
 
@@ -709,7 +707,7 @@ substring filter because their content is typically short and structured.
 
 ### 7.2 FTS5 query sanitization
 
-`sanitize_fts(s)` (`engraph-retrieve/src/lib.rs:272`) strips FTS5
+`sanitize_fts(s)` (`engraph-retrieve`) strips FTS5
 meta-characters (`"`, `*`, `(`, `)`, `:`), then quotes each remaining
 word and joins with whitespace (implicit AND). The empty case yields
 `"\"\""`, a valid no-match query — avoids a syntax error when sanitizing
@@ -724,7 +722,7 @@ This means user-supplied text like `auth: token?` is rendered as
 resolves to the set of `scope_members` whose scope has
 `kind = 'project' AND name = ?`. `ScopeFilter::Scope(id)` is a single
 scope. Resolution happens once per query (`scope::resolve`,
-`engraph-retrieve/src/scope.rs:8`).
+`engraph-retrieve::scope`).
 
 The SQL is built dynamically because the placeholder count varies with
 the number of scope IDs (`?{i}` per ID, then the FTS query, then the
@@ -741,7 +739,7 @@ descending uniformly.
 ### 7.5 The hybrid path (Reciprocal Rank Fusion)
 
 Behind the `embeddings` Cargo feature, `Strategy::Hybrid` fuses three
-sources via RRF (`engraph-retrieve/src/hybrid.rs:53`):
+sources via RRF (`engraph-retrieve::hybrid`):
 
 ```
                 ┌────────────────────────────┐
@@ -819,7 +817,7 @@ wire-up by setting `target_id` to alphabetically disagree with `ts`.
 
 ### 7.6 Embedding provider trait
 
-`EmbeddingProvider` (`engraph-core/src/embedding.rs:10`):
+`EmbeddingProvider` (`engraph-core::embedding`):
 
 ```rust
 pub trait EmbeddingProvider: Send + Sync {
@@ -836,7 +834,7 @@ upgrade can detect stale rows ("vectors under `bge-small-en-v1.5`" vs
 hooks.
 
 Default implementation (`fastembed_provider::FastEmbedProvider`,
-`engraph-core/src/embedding.rs:41`) wraps `fastembed-rs` with the
+`engraph-core::embedding`) wraps `fastembed-rs` with the
 `bge-small-en-v1.5` model (~130MB on disk, 384 dims). The `Mutex` around
 the underlying `TextEmbedding` matches fastembed's `&mut self`
 requirement on `embed`; for our workload (compress-existing sweep +
@@ -849,7 +847,7 @@ implementing the same trait. No call site changes needed.
 
 ## 8. SessionStart brief hook (F4)
 
-`run_session_start_hook` (`engraph-cli/src/main.rs:421`). Reads Claude's
+`run_session_start_hook` (`engraph-cli`). Reads Claude's
 SessionStart JSON from stdin, produces a markdown brief, emits it as
 `hookSpecificOutput.additionalContext`.
 
@@ -867,7 +865,7 @@ For the resolved `session_id`:
 Empty briefs are emitted as the empty string. A truly fresh project
 costs zero injected tokens. The cap is `MAX_BRIEF_BYTES = 2048`;
 overflow is truncated with a `…[truncated]` marker preserving UTF-8
-boundaries (`truncate_to_bytes`, `engraph-cli/src/main.rs:516`).
+boundaries (`truncate_to_bytes`, `engraph-cli`).
 
 ### 8.2 Why this exact set
 
@@ -885,7 +883,7 @@ building the producer (F8 deferred).
 
 ## 9. Budget enforcement (F11)
 
-`engraph-core/src/budget.rs`. Per-session token budget with escalation
+`engraph-core::budget`. Per-session token budget with escalation
 levels.
 
 ### 9.1 Schema
@@ -923,7 +921,7 @@ increments and verifies the final sum is exactly 400.
 
 ### 9.4 When charges happen
 
-`Cmd::Run` (`engraph-cli/src/main.rs`) calls `budget::add_used` with
+`Cmd::Run` (`engraph-cli`) calls `budget::add_used` with
 the post-filter `output_tokens` if `CLAUDE_SESSION_ID` is set in the
 environment. The post-filter count is what actually lands in Claude's
 context; the pre-filter input is recorded for telemetry but never gets
@@ -948,7 +946,7 @@ kind ∈ {compress, retrieve, hook, wrapped_cmd}
 UUIDv7 IDs are time-ordered for natural chronological indexing without
 needing a separate `created_at` column.
 
-`record_event` (`engraph-core/src/telemetry.rs:15`) is the single insert
+`record_event` (`engraph-core::telemetry`) is the single insert
 point. Every feature that compresses, retrieves, hooks, or runs a
 wrapped command writes a row.
 
@@ -972,11 +970,11 @@ row at the bottom sums only the rows that contributed a numeric
 
 Exactly two places.
 
-- **File inode** (`engraph-ingest/src/lib.rs:414`): used in the rotation
+- **File inode** (`engraph-ingest`): used in the rotation
   fingerprint. On non-Unix the function returns `None`, and the rotation
   detection relies entirely on `(size, mtime)` — slightly weaker but
   functional.
-- **Signal handling** (`engraph-cli/src/main.rs:791`): `tokio::signal::unix`
+- **Signal handling** (`engraph-cli`): `tokio::signal::unix`
   installs no-op handlers for SIGINT/SIGTERM during `engraph run` so
   the parent doesn't die before draining the child's output. The block
   is `#[cfg(unix)]`; on Windows the terminal Ctrl-C still reaches the
@@ -989,7 +987,7 @@ rusqlite, regex — is portable.
 
 `Cmd::Run` is the only async surface. The CLI builds a single-threaded
 tokio runtime *inside* the synchronous main loop (`run_wrapped_command`,
-`engraph-cli/src/main.rs`). This keeps the rest of the CLI sync and
+`engraph-cli`). This keeps the rest of the CLI sync and
 avoids paying tokio's startup cost for subcommands that don't need it
 (`gain`, `recall`, `compress`, `ingest`, `budget`, …).
 
@@ -1013,7 +1011,7 @@ buffer).
 
 ## 12. Schema migrations & drift detection
 
-`engraph-core/src/schema.rs`.
+`engraph-core::schema`.
 
 `MIGRATIONS: &[&str]` — each entry is one SQL batch. On open,
 `run_migrations` applies any whose index ≥ current version, inside a
@@ -1041,69 +1039,25 @@ but logs a warning if it ever happens.
 
 ## 13. Test coverage map
 
-Where each behavior is pinned. Use this as the navigation index.
+Coverage is organized per-crate. Each crate's unit tests live alongside
+the modules they exercise; cross-cutting behavior lives under
+`<crate>/tests/`.
 
-| Behavior | Test |
+| Crate | What its tests pin down |
 |---|---|
-| Schema migrations idempotent | `engraph-core/src/schema.rs::tests::migrations_apply_idempotently` |
-| Schema drift refused | `db::tests::open_pool_creates_and_migrates` |
-| Budget escalation thresholds | `budget::tests::escalation_thresholds` |
-| Budget atomic under threads | `budget::tests::add_used_is_atomic_under_threads` |
-| Compress idempotent (fixed-point) | `engraph-compress/src/lib.rs::tests::idempotent_on_second_pass` |
-| Compress sentinel marker | `tests::sentinel_marker_present_after_compress` |
-| Compress ratio < 1 on long input | `tests::ratio_under_one_for_long_input` |
-| Ranking determinism | `rank::tests::deterministic` |
-| Brevity drops articles | `brevity::tests::drops_articles_and_fillers` |
-| Per-filter ratio gates | `engraph-compress/tests/filter_ratios.rs` (one test per filter) |
-| Picker / FilterOutput id agreement | `picker_and_filter_output_agree_on_filter_id` |
-| Shared util: strip_ansi, dedup_consecutive, truncate_lines, tail_lines, drop_matching | `engraph-compress/src/filters/util.rs::tests` |
-| Golden snapshot fixtures | `engraph-compress/tests/golden_fixtures.rs` |
-| cargo-nextest format | `filters::cargo::tests::nextest_failures_counted_and_pass_lines_dropped` |
-| Pre-bash auto-rewrite branches + parser shapes (sudo/env/abs-path/git -C/heredoc) | `engraph-cli/tests/pre_bash_hook.rs` |
-| Pre-grep subgraph redirect gate (1–3 match, regex, short, ambiguous) | `engraph-cli/tests/pre_grep_hook.rs` |
-| Post-read augment shape (additionalContext, signatureless entity, unindexed file passthrough) | `engraph-cli/tests/post_read_hook.rs` |
-| Read-bucket filter: per-language comment strip, head/tail no-rewindow, empty-filter fallback | `engraph-compress/tests/read_filter.rs` |
-| Session-start brief content | `engraph-cli/tests/session_start_hook.rs` |
-| `engraph run` budget tracking | `engraph-cli/tests/run_budget.rs::wrapped_run_charges_session_budget` |
-| `engraph run` stdin inheritance | `wrapped_run_inherits_stdin` |
-| `engraph run` no pipe-buffer deadlock | `wrapped_run_drains_large_concurrent_output_without_deadlock` |
-| Ingest M2 partial trailing line | `ingest_holds_offset_when_trailing_line_is_partial` |
-| Ingest rotation/truncation replay | `ingest_detects_truncation_and_replays` |
-| Ingest sidechain skip | `ingest_skips_sidechain_events` |
-| Sweep preserves FTS recall | `compress_existing_keeps_fts_pointed_at_original` |
-| Sweep recoverability hash | `compress_existing_preserves_recoverability_hash` |
-| FTS query sanitization | `engraph-retrieve/src/lib.rs::tests::sanitize_quotes_words` |
-| Recall + scoping end-to-end | `engraph-retrieve/tests/end_to_end.rs` |
-| Hybrid RRF reordering | `hybrid_path.rs::hybrid_reorders_vs_fts` |
-| Hybrid recency tiebreak | `hybrid_recency_tiebreaks_toward_newer` |
-| Hybrid handles missing embeddings | `hybrid_handles_unembedded_candidates` |
-| Embedding upsert idempotent | `upsert_is_idempotent` |
-| Cosine basics + length mismatch | `embedding::tests::cosine_basics` / `cosine_handles_mismatched_lengths` |
-| Schema v6 entity columns present | `schema::tests::migrates_through_v6_entity_columns` |
-| SCIP loader two-pass emits CALLS edges | `engraph-codegraph/tests/loader_unit.rs::loader_emits_entities_and_a_calls_edge` |
-| SCIP loader idempotency (re-load is a no-op) | `loader_unit.rs::reloading_same_bytes_is_idempotent` |
-| SCIP loader scopes DELETE to project | `loader_unit.rs::loader_scopes_deletes_to_project` |
-| Subgraph markdown shape + sections | `subgraph::tests::subgraph_returns_calls_called_by_and_siblings` |
-| Subgraph ambiguity disambiguation | `subgraph::tests::ambiguous_name_emits_disambiguation` |
-| Subgraph byte-cap truncation | `subgraph::tests::byte_cap_truncates_with_marker` |
-| Driver file-probe detection | `engraph-codegraph/tests/drivers_detect.rs` (one per build system) |
-| Driver live end-to-end (per language) | `engraph-codegraph/tests/drivers_live.rs` (soft-skips when the indexer or build tool is absent) |
-| Suffix-fallback kind classifier | `scip_loader::tests::suffix_kind_classifies_descriptors` |
-| Cross-repo subgraph annotation | `subgraph::tests::cross_repo_edge_gets_repo_annotation` |
-| Workspace discovery (single root, children, exclusions) | `engraph-codegraph/tests/workspace_cross_repo.rs::discover_*` |
-| Workspace cross-repo CALLS edge end-to-end | `workspace_cross_repo.rs::workspace_links_app_b_caller_to_lib_a_foo` |
-| Bazel detection markers | `bazel::tests::detect_bazel_recognizes_markers` |
-| Bazel JSON-proto parser | `bazel::tests::parse_jsonproto_lines_extracts_rules` |
-| Bazel location string parser | `bazel::tests::parse_location_handles_file_line_col` |
-| Bazel target display name | `bazel::tests::target_display_name_strips_pkg_prefix` |
-| Bazel discovery as workspace root | `engraph-codegraph/tests/bazel_live.rs::discover_recognizes_workspace_file` |
-| Bazel target-level index end-to-end | `bazel_live.rs::target_level_index_creates_targets_and_deps` (soft-skips when bazel/bazelisk absent) |
-| Bazel re-index idempotency | `bazel_live.rs::reindex_is_idempotent` |
-| SCIP loader preserves co-resident `BAZEL_DEPENDS_ON` edges | `loader_unit.rs::loader_preserves_bazel_depends_on_edges` |
-| Symbol-level SCIP byte-stream merge | `bazel_symbols::tests::merge_scip_bytes_preserves_documents_and_externals` / `merge_scip_bytes_empty_input_is_valid_empty_index` / `merge_scip_bytes_skips_empty_byte_blobs` |
-| Symbol-level bazel-query target probe | `bazel_symbols::tests::label_kind_nonempty_detects_lines` |
-| Symbol-level `LangStatus` display formatting | `bazel_symbols::tests::lang_status_display_mentions_binary` / `lang_status_display_failed_message` |
-| Symbol-level Bazel Java end-to-end | `bazel_symbols_live.rs::symbol_level_java_indexes_and_preserves_target_level` (triple-gated on bazel + scip-java + `ENGRAPH_LIVE_BAZEL_SYMBOLS=1`) |
+| `engraph-core` | UP-only schema migrations are idempotent and refuse a binary older than the on-disk schema; the connection-acquire pragmas apply correctly; the budget gate's escalation thresholds and atomicity under concurrent writers; cosine math and length-mismatch handling for the embedding trait. |
+| `engraph-compress` | The compress pipeline is idempotent (a second pass is a no-op), stamps the sentinel header, and reduces ratio below 1 on realistic input. The ranker is deterministic. Per-filter tests pin token-reduction ratios for every command in the dispatcher and check picker↔FilterOutput id agreement. A separate golden-fixture pass guards byte-exact output drift for high-signal filters (git log, cargo check, cargo-nextest). The read-bucket tests cover per-language comment stripping, no head/tail re-windowing, and the empty-filter fallback. |
+| `engraph-retrieve` | FTS query sanitization, scope filtering applied in WHERE not in Rust, recall end-to-end. Behind the `embeddings` feature: RRF re-ranking actually changes order vs FTS-only, recency tiebreaks toward newer items, missing embeddings produce zero contribution rather than worst-rank, and embedding upserts are idempotent. |
+| `engraph-ingest` | M2-style partial-trailing-line handling on every JSONL chunk; rotation/truncation detection that replays the new file from offset zero; sidechain events are dropped; the per-file transaction commits or rolls back atomically; the compress-existing sweep keeps FTS pointed at the original hash so recall doesn't lose pre-compression matches. |
+| `engraph-codegraph` | The SCIP loader's two-pass classifier emits CALLS edges, is idempotent under re-load, and scopes its DELETE to the current project (cross-repo loads don't trample each other). The subgraph renderer covers the four-section markdown shape, disambiguation on ambiguous names, byte-cap truncation, and the cross-repo `repo:<name>` annotation. Driver detection is unit-pinned per build system. Driver end-to-end tests under `tests/drivers_live.rs` soft-skip when the indexer or build tool is absent. Bazel coverage splits into target-level (JSON-proto parsing, location parser, idempotent re-index, target/dep round-trip) and symbol-level (SCIP byte-stream merge that preserves `documents` + `external_symbols`, lang-status display, and a triple-gated live Java integration test). |
+| `engraph-cli` | The four Claude Code hooks are integration-tested against the binary. Pre-bash covers every parser shape (sudo, env prefix, absolute path, `git -C`, heredoc, unquoted shell metachars). Pre-grep exercises the subgraph-redirect gate (1–3 match, regex shape, short patterns, ambiguous resolution). Post-read pins the `additionalContext` shape, the no-signature passthrough, and the unindexed-file no-op. Session-start tests the brief content + byte cap. `engraph run` is tested for budget charging, stdin inheritance, and concurrent pipe drain without deadlock under large output. |
+
+Live-binary tests in `engraph-codegraph/tests/drivers_live.rs`,
+`bazel_live.rs`, and `bazel_symbols_live.rs` soft-skip when the external
+toolchain is missing, so `cargo test --workspace` stays green on a clean
+machine. The symbol-level Java test is additionally gated on
+`ENGRAPH_LIVE_BAZEL_SYMBOLS=1` because a cold-cache Bazel + scip-java run
+costs 2–5 minutes and is not part of every `cargo test`.
 
 ---
 
