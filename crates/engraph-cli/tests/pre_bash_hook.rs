@@ -205,28 +205,40 @@ fn absolute_path_argv0_is_normalized() {
 }
 
 #[test]
-fn git_dash_capital_c_is_stripped() {
+fn git_dash_capital_c_is_preserved_in_rewrite() {
     let (_t, db) = db_dir();
-    // `git -C /tmp status` is the same classification as `git status`.
+    // `git -C <path> status` classifies as `git status`, but the `-C <path>`
+    // must survive into the wrapped command — dropping it would silently run
+    // against cwd instead of the target repo.
     let out = run_hook(&db, "git -C /tmp/x status");
     let v = parse(&out).expect("expected rewrite JSON");
     let updated = v
         .pointer("/hookSpecificOutput/updatedInput/command")
         .and_then(|s| s.as_str())
         .unwrap();
-    assert_eq!(updated, "engraph run git status");
+    assert_eq!(updated, "engraph run git -C /tmp/x status");
 }
 
 #[test]
-fn git_lowercase_c_with_value_is_stripped() {
+fn git_lowercase_c_with_value_is_preserved_in_rewrite() {
     let (_t, db) = db_dir();
+    // Same invariant for `-c <k=v>`: the global option must reach the wrapped
+    // command. (`shell_words::quote` may wrap the `k=v` token in quotes; assert
+    // the value is present and nothing is dropped rather than its exact quoting.)
     let out = run_hook(&db, "git -c color.ui=always log");
     let v = parse(&out).expect("expected rewrite JSON");
     let updated = v
         .pointer("/hookSpecificOutput/updatedInput/command")
         .and_then(|s| s.as_str())
         .unwrap();
-    assert_eq!(updated, "engraph run git log");
+    assert!(
+        updated.starts_with("engraph run git -c ") && updated.ends_with(" log"),
+        "-c global opt dropped from rewrite: {updated}"
+    );
+    assert!(
+        updated.contains("color.ui=always"),
+        "-c value dropped from rewrite: {updated}"
+    );
 }
 
 #[test]

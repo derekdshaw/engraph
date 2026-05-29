@@ -39,6 +39,15 @@ pub struct FilterOutput {
 pub type FilterFn = fn(&FilterCtx) -> FilterOutput;
 
 pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
+    // `git`'s subcommand can be preceded by global options (`-C <path>`,
+    // `-c <k=v>`, `--git-dir[=...]`, `--work-tree[=...]`). Skip them so we
+    // classify on the subcommand, not the global flag — otherwise
+    // `git -C /repo log` would key off `-C` and fall through to `generic`.
+    let args = if cmd == "git" {
+        &args[git_global_opt_len(args)..]
+    } else {
+        args
+    };
     let first = args.first().map(|s| s.as_str()).unwrap_or("");
     let second = args.get(1).map(|s| s.as_str()).unwrap_or("");
     match (cmd, first) {
@@ -117,5 +126,64 @@ pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
         ("head" | "tail", _) => (read::head_tail, "read_head_tail"),
 
         _ => (generic::filter, "generic"),
+    }
+}
+
+/// Number of leading global-option tokens in `args` (the tokens *after* the
+/// `git` word), i.e. the index of the git subcommand. For `git -C <path> log`
+/// the caller passes `["-C", "<path>", "log", ...]` and this returns 2.
+///
+/// Handles the value-taking flags `-C`/`-c` (flag + separate value) and the
+/// inline `--git-dir=...`/`--work-tree=...` forms. Stops at the first token
+/// that isn't one of those — the subcommand, or an unrecognized flag we leave
+/// for the classifier to reject. Result is clamped to `args.len()`, so a
+/// trailing `-C` with no value can't push the index out of bounds.
+pub fn git_global_opt_len(args: &[String]) -> usize {
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-C" | "-c" => i += 2,
+            s if s.starts_with("--git-dir=") || s.starts_with("--work-tree=") => i += 1,
+            _ => break,
+        }
+    }
+    i.min(args.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn git_global_opts_classify_to_subcommand() {
+        assert_eq!(pick("git", &argv(&["-C", "/repo", "log"])).1, "git_log");
+        assert_eq!(
+            pick("git", &argv(&["-c", "color.ui=always", "log"])).1,
+            "git_log"
+        );
+        assert_eq!(pick("git", &argv(&["-C", "/repo", "show"])).1, "git_show");
+        assert_eq!(
+            pick("git", &argv(&["--git-dir=/r/.git", "diff"])).1,
+            "git_diff"
+        );
+        assert_eq!(
+            pick("git", &argv(&["-C", "/repo", "status"])).1,
+            "git_status"
+        );
+    }
+
+    #[test]
+    fn git_without_global_opts_still_classifies() {
+        assert_eq!(pick("git", &argv(&["log", "--oneline"])).1, "git_log");
+    }
+
+    #[test]
+    fn git_trailing_value_flag_does_not_panic() {
+        // Malformed `git -C` (no value, no subcommand) must classify, not panic.
+        assert_eq!(pick("git", &argv(&["-C"])).1, "generic");
     }
 }

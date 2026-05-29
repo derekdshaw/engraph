@@ -803,8 +803,14 @@ fn try_auto_rewrite(command: &str) -> RewriteOutcome {
         return RewriteOutcome::Passthrough;
     }
     normalize_argv0(&mut argv);
-    strip_git_global_opts(&mut argv);
-    if argv.is_empty() {
+    // Classify on a copy with git's global options (`-C <path>`, `-c k=v`,
+    // …) stripped so the subcommand is visible to `filters::pick`. The
+    // original `argv` keeps those options intact and is what we re-emit —
+    // dropping `-C <path>` here would silently run the wrapped command
+    // against the wrong repo (cwd instead of the `-C` target).
+    let mut classify = argv.clone();
+    strip_git_global_opts(&mut classify);
+    if classify.is_empty() {
         return RewriteOutcome::Passthrough;
     }
 
@@ -813,8 +819,8 @@ fn try_auto_rewrite(command: &str) -> RewriteOutcome {
     // For compound commands we scan the parsed argv for ANY wrappable token,
     // so `cd /tmp && git log` and `git log | head` both surface a suggestion.
     if has_unquoted_shell_meta(command) {
-        for (i, tok) in argv.iter().enumerate() {
-            let next = argv.get(i + 1).map(String::as_str).unwrap_or("");
+        for (i, tok) in classify.iter().enumerate() {
+            let next = classify.get(i + 1).map(String::as_str).unwrap_or("");
             let (_fn, fid) = filters::pick(tok, &[next.to_string()]);
             if fid != "generic" {
                 let reason = format!(
@@ -829,8 +835,8 @@ fn try_auto_rewrite(command: &str) -> RewriteOutcome {
         return RewriteOutcome::Passthrough;
     }
 
-    let cmd_word = argv[0].as_str();
-    let arg_word = argv.get(1).map(String::as_str).unwrap_or("");
+    let cmd_word = classify[0].as_str();
+    let arg_word = classify.get(1).map(String::as_str).unwrap_or("");
     let (_filter_fn, filter_id) = filters::pick(cmd_word, &[arg_word.to_string()]);
     if filter_id == "generic" {
         return RewriteOutcome::Passthrough;
@@ -938,29 +944,10 @@ fn strip_git_global_opts(argv: &mut Vec<String>) {
     if argv.first().map(String::as_str) != Some("git") {
         return;
     }
-    // i never increments: each branch either breaks or drains/removes the
-    // element at i (so i now points at what used to be i+1).
-    let i = 1;
-    while i < argv.len() {
-        let tok = argv[i].as_str();
-        if tok == "-C" || tok == "-c" {
-            // Flag + value pair. Drop both (or just the flag if it's trailing).
-            let end = (i + 1).min(argv.len() - 1);
-            argv.drain(i..=end);
-            continue;
-        }
-        if tok.starts_with("--git-dir=") || tok.starts_with("--work-tree=") {
-            argv.remove(i);
-            continue;
-        }
-        // First positional → subcommand. Stop.
-        if !tok.starts_with('-') {
-            break;
-        }
-        // Other flags (e.g. `--no-pager`): leave them, stop peeling. They
-        // don't change classification.
-        break;
-    }
+    // The global-option set itself lives in engraph-compress so this rewrite
+    // path and `filters::pick` agree on where the subcommand starts.
+    let n = filters::git_global_opt_len(&argv[1..]);
+    argv.drain(1..1 + n);
 }
 
 fn is_env_assignment(tok: &str) -> bool {
