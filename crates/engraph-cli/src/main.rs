@@ -262,7 +262,7 @@ fn main() -> Result<()> {
                 EventInput {
                     session_id: session_id.as_deref(),
                     kind: EventKind::WrappedCmd,
-                    feature: "F1",
+                    feature: "output_filter",
                     filter_id: Some(filter_id),
                     input_tokens,
                     output_tokens,
@@ -355,7 +355,7 @@ fn main() -> Result<()> {
                 EventInput {
                     session_id: std::env::var("CLAUDE_SESSION_ID").ok().as_deref(),
                     kind: EventKind::Retrieve,
-                    feature: "F3",
+                    feature: "recall",
                     filter_id: Some("fts"),
                     input_tokens: 0,
                     output_tokens: hits.iter().map(|h| tokens::count(&h.preview) as i64).sum(),
@@ -424,7 +424,7 @@ fn main() -> Result<()> {
                     EventInput {
                         session_id: session_id.as_deref(),
                         kind: EventKind::WrappedCmd,
-                        feature: "F2",
+                        feature: "codegraph_index",
                         filter_id: Some("workspace"),
                         input_tokens: total_bytes as i64,
                         output_tokens: 0,
@@ -451,7 +451,7 @@ fn main() -> Result<()> {
                     EventInput {
                         session_id: session_id.as_deref(),
                         kind: EventKind::WrappedCmd,
-                        feature: "F2",
+                        feature: "codegraph_index",
                         filter_id: Some(stats.driver_name),
                         input_tokens: stats.scip_bytes as i64,
                         output_tokens: 0,
@@ -489,7 +489,7 @@ fn main() -> Result<()> {
                 EventInput {
                     session_id: std::env::var("CLAUDE_SESSION_ID").ok().as_deref(),
                     kind: EventKind::Retrieve,
-                    feature: "F2",
+                    feature: "subgraph",
                     filter_id: Some("subgraph"),
                     input_tokens: 0,
                     output_tokens: tokens::count(&body) as i64,
@@ -564,7 +564,7 @@ fn main() -> Result<()> {
                 EventInput {
                     session_id: None,
                     kind: EventKind::Compress,
-                    feature: "F6",
+                    feature: "compress",
                     filter_id: Some(result.algorithm_id),
                     input_tokens: result.original_tokens as i64,
                     output_tokens: result.compressed_tokens as i64,
@@ -702,7 +702,7 @@ fn run_session_start_hook(conn: &db::PooledConn) -> Result<()> {
             EventInput {
                 session_id: session_id.as_deref(),
                 kind: EventKind::Hook,
-                feature: "F4",
+                feature: "session_brief",
                 filter_id: Some("session_start"),
                 input_tokens: 0,
                 output_tokens: tokens::count(&body) as i64,
@@ -1049,7 +1049,7 @@ fn run_pre_bash_hook(conn: &db::PooledConn) -> Result<()> {
     // pointing at `engraph subgraph <symbol>`. That's an order of magnitude
     // smaller than even the compressed grep output, and gives structured edges.
     if let Some(reason) = try_subgraph_redirect_for_bash(&command, conn) {
-        emit_subgraph_deny(conn, &reason, "F2_pre_bash_grep");
+        emit_subgraph_deny(conn, &reason, "grep_redirect");
         return Ok(());
     }
 
@@ -1072,7 +1072,7 @@ fn run_pre_bash_hook(conn: &db::PooledConn) -> Result<()> {
                 EventInput {
                     session_id: session_id.as_deref(),
                     kind: EventKind::Hook,
-                    feature: "F1_rewrite",
+                    feature: "cmd_rewrite",
                     filter_id: Some(filter_id),
                     input_tokens: 0,
                     output_tokens: 0,
@@ -1095,7 +1095,7 @@ fn run_pre_bash_hook(conn: &db::PooledConn) -> Result<()> {
                 EventInput {
                     session_id: session_id.as_deref(),
                     kind: EventKind::Hook,
-                    feature: "F1_deny",
+                    feature: "cmd_deny",
                     filter_id: Some(filter_id),
                     input_tokens: 0,
                     output_tokens: 0,
@@ -1222,7 +1222,7 @@ fn run_pre_grep_hook(conn: &db::PooledConn) -> Result<()> {
         .trim()
         .to_string();
     if let Some(reason) = try_subgraph_redirect(&pattern, conn) {
-        emit_subgraph_deny(conn, &reason, "F2_pre_grep");
+        emit_subgraph_deny(conn, &reason, "grep_redirect");
     }
     Ok(())
 }
@@ -1268,7 +1268,7 @@ fn run_post_read_hook(conn: &db::PooledConn) -> Result<()> {
         EventInput {
             session_id: session_id.as_deref(),
             kind: EventKind::Hook,
-            feature: "F3_post_read",
+            feature: "read_augment",
             filter_id: Some("read-augment"),
             input_tokens: 0,
             output_tokens: tokens::count(&context) as i64,
@@ -1308,7 +1308,7 @@ fn run_session_end_hook(conn: &db::PooledConn) -> Result<()> {
         EventInput {
             session_id: session_id.as_deref(),
             kind: EventKind::Hook,
-            feature: "F5_session_end",
+            feature: "session_ingest",
             filter_id: Some("ingest"),
             input_tokens: stats.bytes_read as i64,
             output_tokens: stats.messages_inserted as i64,

@@ -45,7 +45,7 @@ why the codebase is shaped the way it is.
 ```
 crates/
 ├── engraph-core/          schema, db pool, telemetry, budget, tokens, embedding trait
-├── engraph-compress/      F6 compressor + per-command filters (git, cargo, npm, …)
+├── engraph-compress/      compressor + per-command filters (git, cargo, npm, …)
 ├── engraph-retrieve/      FTS+scoping+KG, hybrid (feature-gated)
 ├── engraph-ingest/        JSONL → SQLite, rotation guard, compress-existing sweep
 └── engraph-cli/           the `engraph` binary (subcommands + hooks)
@@ -80,7 +80,7 @@ dependencies on the other engraph crates — it's where shared types
                 └─────┬─────────────┬─────────┘
                       ▲             ▲
                       │             │
-   PreToolUse(Bash) ──┤             │── F6 sweep, recall, telemetry
+   PreToolUse(Bash) ──┤             │── compress sweep, recall, telemetry
                       │             │
                       ▼             │
               ┌─────────────────┐   │
@@ -149,13 +149,13 @@ backup-and-restore story trivial.
 | `messages_fts`, `context_items_fts` | FTS5 external-content indexes. `INSERT`/`DELETE` triggers keep them aligned; `UPDATE` triggers were intentionally dropped in v5 so `compress-existing` doesn't overwrite the index with compressed text (see §6.4). |
 | `embeddings` | `(target_kind, target_id, model_id)` PK so vectors under different model versions coexist; cosine search ignores wrong-model rows. |
 | `events`, `session_budget` | The telemetry + budget surface. |
-| `entities`, `relations` | Knowledge-graph tables with `provenance ∈ {extracted, inferred, ambiguous, generated}`. F2 codegraph populates these from SCIP per-language indexers; `entities` carries `file_path`, `line_range`, `signature` (v6). |
+| `entities`, `relations` | Knowledge-graph tables with `provenance ∈ {extracted, inferred, ambiguous, generated}`. The codegraph populates these from SCIP per-language indexers; `entities` carries `file_path`, `line_range`, `signature` (v6). |
 | `scopes`, `scope_members` | Mempalace-style hierarchical scoping (project / topic / time-window / custom). Used by recall to restrict results to a `cwd` or named scope. |
 | `ingestion_log` | One row per JSONL path with `(last_offset, last_inode, last_size, last_mtime)` so we can detect rotation/truncation (§5.1). |
 
 ---
 
-## 3. The compression pipeline (F6)
+## 3. The compression pipeline
 
 Entry: `compress(CompressInput)` → `CompressResult`
 (`engraph-compress`).
@@ -292,7 +292,7 @@ sentinel'd, after which it joins the no-op group.
 
 ---
 
-## 4. Per-command output filters (F1)
+## 4. Per-command output filters
 
 `engraph run <cmd> [args...]` spawns the wrapped command, picks a filter
 based on `(cmd, first arg)`, runs it on the captured `(stdout, stderr,
@@ -688,7 +688,7 @@ hits the original phrase against the compressed message.
 
 ---
 
-## 7. Retrieval (F3)
+## 7. Retrieval
 
 `engraph_retrieve::search(conn, &Query)` returns `Vec<Hit>` sorted by
 score (`engraph-retrieve`).
@@ -845,7 +845,7 @@ implementing the same trait. No call site changes needed.
 
 ---
 
-## 8. SessionStart brief hook (F4)
+## 8. SessionStart brief hook
 
 `run_session_start_hook` (`engraph-cli`). Reads Claude's
 SessionStart JSON from stdin, produces a markdown brief, emits it as
@@ -1033,7 +1033,7 @@ but logs a warning if it ever happens.
 | 3 | `embeddings` table (always present; feature-gated only at query time). |
 | 4 | `ingestion_log` rotation fingerprint columns (`last_inode`, `last_size`). |
 | 5 | Drop `messages_au` / `context_items_au` triggers so `compress-existing` doesn't overwrite the FTS index (§6.4). |
-| 6 | F2 codegraph: add `file_path`, `line_range`, `signature` columns to `entities` plus `idx_entities_file_path`. `relations.kind` is validated in Rust (`RelationKind` enum) rather than via DB CHECK; SQLite can't `ALTER ADD CHECK` and rebuilding the FK-referenced table risked dropping rows. |
+| 6 | Codegraph: add `file_path`, `line_range`, `signature` columns to `entities` plus `idx_entities_file_path`. `relations.kind` is validated in Rust (`RelationKind` enum) rather than via DB CHECK; SQLite can't `ALTER ADD CHECK` and rebuilding the FK-referenced table risked dropping rows. |
 
 ---
 
@@ -1061,7 +1061,7 @@ costs 2–5 minutes and is not part of every `cargo test`.
 
 ---
 
-## 14. Codegraph (F2 Phases 2.1 + 2.2 + 2.3)
+## 14. Codegraph
 
 `engraph index <repo>` runs an external SCIP indexer for the detected
 language, decodes the resulting `index.scip` protobuf, and writes
@@ -1238,18 +1238,17 @@ items (per-indexer rules, symbol-stability test suite).
 (rust-analyzer emits one occurrence per call site, which would
 otherwise list `migrations_apply_idempotently` twice), filters out
 empty-name entries, and stops appending lines once cumulative byte
-size hits `DEFAULT_BYTE_CAP = 8192`. The roadmap's goal example is
-matched exactly. `engraph subgraph <sym> --json` emits the raw
-`Neighborhood` struct for programmatic callers.
+size hits `DEFAULT_BYTE_CAP = 8192`. `engraph subgraph <sym> --json`
+emits the raw `Neighborhood` struct for programmatic callers.
 
 ### 14.5 Telemetry
 
-`Index` events: `kind = WrappedCmd, feature = "F2", filter_id =
+`Index` events: `kind = WrappedCmd, feature = "codegraph_index", filter_id =
 <driver name>, input_tokens = scip_bytes, output_tokens = 0`. The
 driver name (`"rust-analyzer"`, `"scip-go"`, …) lets `engraph gain`
 slice per-language indexer cost.
 
-`Subgraph` events: `kind = Retrieve, feature = "F2", filter_id =
+`Subgraph` events: `kind = Retrieve, feature = "subgraph", filter_id =
 "subgraph", output_tokens = tokens::count(&markdown)`. Token cost is
 the bytes-out into Claude's context — comparable to a `recall`
 event for savings accounting.
@@ -1318,7 +1317,7 @@ sees `lib_foo (repo:lib_a :: src/lib.rs:1)` instead of a bare
 
 **Moniker normalization.** `scip_loader::normalize_moniker` is wired in
 as the hook for per-indexer rewrite rules (the scip-go pre-0.7
-absolute-path strip the roadmap calls out, etc.) but is a pass-through
+absolute-path strip, etc.) but is a pass-through
 today. Real-world stitching of canonically-published deps (Cargo, npm,
 PyPI, Go modules) works without any rewrites because their monikers
 are already machine-stable.
@@ -1531,8 +1530,8 @@ deferred until a real workload trips them):
 
 ## 15. Forward pointers
 
-The roadmap (`ROADMAP.md`) tracks features that aren't built. F2
-Phase 2.3 is fully shipped (target-level §14.8, symbol-level §14.9);
+The roadmap (`ROADMAP.md`) tracks features that aren't built. The
+codegraph is fully shipped (target-level §14.8, symbol-level §14.9);
 the largest remaining items are:
 
 - **Auto-trigger indexing.** Today `engraph index` is manual. Wiring
@@ -1544,15 +1543,12 @@ the largest remaining items are:
   immediate children only; nested polyrepo layouts need explicit
   per-repo invocations. Recursion + a depth-limit / `.gitignore`
   respect would close this.
-- **F2 polish items deferred from 2.2**: per-driver moniker
+- **Codegraph polish items**: per-driver moniker
   normalization rules (the rewrite hook in
   `scip_loader::normalize_moniker` is a no-op today) and the
   50-symbol stability test suite (snapshot known monikers, regression
   on every loader change). Both pay back only once indexer-version
   drift causes a real failure in practice.
 - **MCP server** wrapping `engraph recall` / `engraph subgraph`:
-  worthwhile once there are 5+ tools to expose. With F2 fully
-  shipped, that threshold is met.
-
-Everything else listed under "Shipped in the v2.1 polish pass" in the
-roadmap is in this document under the corresponding feature section.
+  worthwhile once there are 5+ tools to expose. With the codegraph
+  fully shipped, that threshold is met.

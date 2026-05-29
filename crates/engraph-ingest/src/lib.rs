@@ -174,7 +174,7 @@ fn sweep_table(conn: &PooledConn, table: &str, batch: usize, stats: &mut SweepSt
             telemetry::EventInput {
                 session_id: None,
                 kind: EventKind::Compress,
-                feature: "F6_sweep",
+                feature: "compress_sweep",
                 filter_id: Some(table),
                 input_tokens: r.original_tokens as i64,
                 output_tokens: r.compressed_tokens as i64,
@@ -380,7 +380,7 @@ pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
                 telemetry::EventInput {
                     session_id: Some(&session_id),
                     kind: EventKind::Compress,
-                    feature: "F6_ingest",
+                    feature: "compress_ingest",
                     filter_id: Some("session_message"),
                     input_tokens: orig_tokens as i64,
                     output_tokens: comp_tokens as i64,

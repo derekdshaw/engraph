@@ -96,7 +96,7 @@ mod tests {
             EventInput {
                 session_id: None,
                 kind: EventKind::Compress,
-                feature: "F6",
+                feature: "compress",
                 filter_id: None,
                 input_tokens: 1000,
                 output_tokens: 400,
@@ -119,7 +119,7 @@ mod tests {
             EventInput {
                 session_id: None,
                 kind: EventKind::Retrieve,
-                feature: "F3",
+                feature: "recall",
                 filter_id: None,
                 input_tokens: 0,
                 output_tokens: 200,
