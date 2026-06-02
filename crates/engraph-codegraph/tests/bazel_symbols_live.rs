@@ -109,7 +109,9 @@ fn symbol_level_java_indexes_and_preserves_target_level() {
     write_java_fixture(&root);
 
     let output_base = dir.path().join("bazel-out");
-    std::env::set_var("ENGRAPH_BAZEL_OUTPUT_BASE", &output_base);
+    unsafe {
+        std::env::set_var("ENGRAPH_BAZEL_OUTPUT_BASE", &output_base);
+    }
 
     let pool = open_pool(&dir.path().join("eg.db")).unwrap();
     let conn = pool.get().unwrap();

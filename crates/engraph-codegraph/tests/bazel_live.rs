@@ -84,7 +84,9 @@ fn target_level_index_creates_targets_and_deps() {
     // Point Bazel's output_base into the per-test tempdir so we don't
     // pollute the user's ~/.cache/engraph between unrelated test runs.
     let output_base = dir.path().join("bazel-out");
-    std::env::set_var("ENGRAPH_BAZEL_OUTPUT_BASE", &output_base);
+    unsafe {
+        std::env::set_var("ENGRAPH_BAZEL_OUTPUT_BASE", &output_base);
+    }
 
     let pool = open_pool(&dir.path().join("eg.db")).unwrap();
     let conn = pool.get().unwrap();
@@ -167,7 +169,9 @@ fn reindex_is_idempotent() {
     let root = dir.path().join("ws");
     std::fs::create_dir_all(&root).unwrap();
     write_fixture(&root);
-    std::env::set_var("ENGRAPH_BAZEL_OUTPUT_BASE", dir.path().join("bazel-out"));
+    unsafe {
+        std::env::set_var("ENGRAPH_BAZEL_OUTPUT_BASE", dir.path().join("bazel-out"));
+    }
 
     let pool = open_pool(&dir.path().join("eg.db")).unwrap();
     let conn = pool.get().unwrap();

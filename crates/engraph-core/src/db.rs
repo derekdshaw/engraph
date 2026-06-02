@@ -1,10 +1,36 @@
 use crate::{schema, Result, SCHEMA_VERSION};
-use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
 
 pub type Pool = r2d2::Pool<SqliteConnectionManager>;
 pub type PooledConn = r2d2::PooledConnection<SqliteConnectionManager>;
+
+/// Minimal r2d2 connection manager for rusqlite. Replaces the `r2d2_sqlite`
+/// crate, whose latest release (0.34) pins `rusqlite ^0.39` and blocked the
+/// 0.40 upgrade (two `libsqlite3-sys` versions both `links = "sqlite3"`).
+/// `r2d2` itself has no sqlite dependency, so owning this small manager removes
+/// the pin while keeping the pool API identical.
+pub struct SqliteConnectionManager {
+    path: PathBuf,
+    flags: OpenFlags,
+}
+
+impl r2d2::ManageConnection for SqliteConnectionManager {
+    type Connection = Connection;
+    type Error = rusqlite::Error;
+
+    fn connect(&self) -> std::result::Result<Connection, rusqlite::Error> {
+        Connection::open_with_flags(&self.path, self.flags)
+    }
+
+    fn is_valid(&self, conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
+        conn.execute_batch("SELECT 1;")
+    }
+
+    fn has_broken(&self, _conn: &mut Connection) -> bool {
+        false
+    }
+}
 
 #[derive(Debug)]
 struct Pragmas;
@@ -38,11 +64,12 @@ pub fn open_pool(path: &Path) -> Result<Pool> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let manager = SqliteConnectionManager::file(path).with_flags(
-        OpenFlags::SQLITE_OPEN_READ_WRITE
+    let manager = SqliteConnectionManager {
+        path: path.to_path_buf(),
+        flags: OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_URI,
-    );
+    };
     let pool = r2d2::Pool::builder()
         .max_size(4)
         .connection_customizer(Box::new(Pragmas))
