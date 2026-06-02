@@ -1,4 +1,4 @@
-use crate::{schema, Result, SCHEMA_VERSION};
+use crate::{Result, SCHEMA_VERSION, schema};
 use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
 

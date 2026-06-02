@@ -3,10 +3,10 @@
 
 #![cfg(feature = "embeddings")]
 
-use engraph_core::{db::open_pool, embedding::EmbeddingProvider, Result};
+use engraph_core::{Result, db::open_pool, embedding::EmbeddingProvider};
 use engraph_retrieve::{
-    hybrid::{reindex_messages, search_hybrid, upsert_embedding},
     Query, ScopeFilter, Strategy, Target,
+    hybrid::{reindex_messages, search_hybrid, upsert_embedding},
 };
 use tempfile::tempdir;
 

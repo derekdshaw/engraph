@@ -28,7 +28,10 @@ pub fn log(ctx: &FilterCtx<'_>) -> FilterOutput {
         if subject_emitted_for_current {
             continue;
         }
-        if current_hash.is_some() && is_subject_line(stripped) && let Some(h) = &current_hash {
+        if current_hash.is_some()
+            && is_subject_line(stripped)
+            && let Some(h) = &current_hash
+        {
             out.push_str(&format!("{h} {stripped}\n"));
             subject_emitted_for_current = true;
         }
@@ -138,7 +141,9 @@ pub fn diff(ctx: &FilterCtx<'_>) -> FilterOutput {
                         hunk_preview = Some(format!("+{rest}"));
                     }
                 }
-            } else if let Some(rest) = line.strip_prefix('-') && !line.starts_with("---") {
+            } else if let Some(rest) = line.strip_prefix('-')
+                && !line.starts_with("---")
+            {
                 removed += 1;
                 if hunk_preview.is_none() {
                     hunk_preview = Some(format!("-{rest}"));

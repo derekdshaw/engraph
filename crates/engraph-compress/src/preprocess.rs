@@ -1,5 +1,5 @@
-use crate::filters::util;
 use crate::CompressKind;
+use crate::filters::util;
 use regex::Regex;
 use std::sync::OnceLock;
 

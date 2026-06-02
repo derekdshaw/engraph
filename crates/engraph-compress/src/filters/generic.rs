@@ -1,5 +1,5 @@
 use super::{FilterCtx, FilterOutput};
-use crate::{compress, CompressInput, CompressKind};
+use crate::{CompressInput, CompressKind, compress};
 
 pub fn filter(ctx: &FilterCtx<'_>) -> FilterOutput {
     let mut combined = String::with_capacity(ctx.stdout.len() + ctx.stderr.len() + 32);

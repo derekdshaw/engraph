@@ -219,7 +219,9 @@ pub fn format_markdown(n: &Neighborhood, byte_cap: usize) -> String {
         &format!("## Symbol `{}` (defined in {})\n", head.name, head_loc),
         byte_cap,
     );
-    if let Some(sig) = head.signature.as_deref() && !sig.is_empty() {
+    if let Some(sig) = head.signature.as_deref()
+        && !sig.is_empty()
+    {
         push_capped(&mut out, &format!("```\n{sig}\n```\n"), byte_cap);
     }
 

@@ -37,11 +37,11 @@
 //! 5. Sort by RRF score descending; stable secondary sort by `target_id`.
 //! 6. Truncate to `q.limit`.
 
-use crate::{search, Hit, Query, ScopeFilter, Strategy};
+use crate::{Hit, Query, ScopeFilter, Strategy, search};
 use engraph_core::{
-    db::PooledConn,
-    embedding::{cosine, EmbeddingProvider},
     Result,
+    db::PooledConn,
+    embedding::{EmbeddingProvider, cosine},
 };
 
 /// RRF smoothing constant; standard value from the original RRF paper.

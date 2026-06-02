@@ -30,7 +30,7 @@ mod rank;
 mod sentinel;
 mod stopwords;
 
-pub use sentinel::{is_compressed, ALGO_ID, SENTINEL};
+pub use sentinel::{ALGO_ID, SENTINEL, is_compressed};
 
 use engraph_core::tokens;
 use sha2::{Digest, Sha256};

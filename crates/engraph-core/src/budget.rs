@@ -1,4 +1,4 @@
-use crate::{db::PooledConn, Result};
+use crate::{Result, db::PooledConn};
 
 pub const DEFAULT_SOFT_LIMIT: i64 = 100_000;
 pub const DEFAULT_HARD_LIMIT: i64 = 150_000;

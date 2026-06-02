@@ -1,7 +1,7 @@
 //! Verification gate from the plan:
 //! "Token reduction: on a 2k-line `git log` fixture, ratio < 0.5"
 
-use engraph_compress::{compress, CompressInput, CompressKind};
+use engraph_compress::{CompressInput, CompressKind, compress};
 
 fn synthetic_git_log(commits: usize) -> String {
     let mut s = String::new();

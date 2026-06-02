@@ -6,7 +6,7 @@
 //! `cwd`, and tracks file offsets in `ingestion_log` for incremental re-runs.
 
 use anyhow::{Context, Result};
-use engraph_compress::{compress, CompressInput, CompressKind};
+use engraph_compress::{CompressInput, CompressKind, compress};
 use engraph_core::{db::PooledConn, models::EventKind, telemetry, tokens};
 use engraph_retrieve::scope;
 use serde::Deserialize;

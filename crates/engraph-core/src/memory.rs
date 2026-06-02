@@ -5,7 +5,7 @@
 //! All rows are keyed by `project` (a cwd path string) so the brief's
 //! per-project readers find them.
 
-use crate::{db::PooledConn, Result};
+use crate::{Result, db::PooledConn};
 use uuid::Uuid;
 
 /// Record a do-not-repeat rule scoped to `project`. Returns the new row id.

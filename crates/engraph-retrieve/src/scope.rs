@@ -2,7 +2,7 @@
 //! members should be included in a search. Returns `None` for unscoped queries.
 
 use crate::ScopeFilter;
-use engraph_core::{db::PooledConn, Result};
+use engraph_core::{Result, db::PooledConn};
 use uuid::Uuid;
 
 pub fn resolve(conn: &PooledConn, f: &ScopeFilter) -> Result<Option<Vec<String>>> {

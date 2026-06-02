@@ -6,13 +6,13 @@ pub mod relation_kind;
 pub mod scip_loader;
 pub mod subgraph;
 
-pub use bazel::{detect_bazel, index_bazel_workspace, BazelStats};
-pub use bazel_symbols::{index_bazel_symbols, BazelSymbolStats, LangIndexResult, LangStatus};
-pub use driver::{registry, Driver};
+pub use bazel::{BazelStats, detect_bazel, index_bazel_workspace};
+pub use bazel_symbols::{BazelSymbolStats, LangIndexResult, LangStatus, index_bazel_symbols};
+pub use driver::{Driver, registry};
 pub use index::{
-    discover_workspace_repos, index_repo, index_workspace, IndexStats, WorkspaceRepoResult,
-    WorkspaceStats,
+    IndexStats, WorkspaceRepoResult, WorkspaceStats, discover_workspace_repos, index_repo,
+    index_workspace,
 };
 pub use relation_kind::RelationKind;
-pub use scip_loader::{load, LoadStats};
-pub use subgraph::{format_markdown, subgraph_for, Neighborhood};
+pub use scip_loader::{LoadStats, load};
+pub use subgraph::{Neighborhood, format_markdown, subgraph_for};

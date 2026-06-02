@@ -30,11 +30,7 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
         nb += y * y;
     }
     let denom = na.sqrt() * nb.sqrt();
-    if denom == 0.0 {
-        0.0
-    } else {
-        dot / denom
-    }
+    if denom == 0.0 { 0.0 } else { dot / denom }
 }
 
 #[cfg(feature = "embeddings")]

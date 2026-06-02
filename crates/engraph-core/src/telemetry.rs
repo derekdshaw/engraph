@@ -1,4 +1,4 @@
-use crate::{db::PooledConn, models::EventKind, Result};
+use crate::{Result, db::PooledConn, models::EventKind};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]

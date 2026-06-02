@@ -7,7 +7,7 @@ use engraph_codegraph::scip_loader::load;
 use engraph_core::db::open_pool;
 use protobuf::{EnumOrUnknown, Message, MessageField};
 use scip::types::{
-    symbol_information::Kind as SymKind, Document, Index, Occurrence, SymbolInformation, SymbolRole,
+    Document, Index, Occurrence, SymbolInformation, SymbolRole, symbol_information::Kind as SymKind,
 };
 use tempfile::tempdir;
 

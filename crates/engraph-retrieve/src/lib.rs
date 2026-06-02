@@ -2,7 +2,7 @@
 //! lightweight knowledge graph layer. Embeddings + hybrid scoring are
 //! reserved for Phase 6 behind a Cargo feature.
 
-use engraph_core::{db::PooledConn, Result};
+use engraph_core::{Result, db::PooledConn};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

@@ -4,7 +4,7 @@
 //! head + elided-middle + tail window when the file exceeds the cap.
 //! Falls back to raw text if language stripping accidentally emptied input.
 
-use super::{util, FilterCtx, FilterOutput};
+use super::{FilterCtx, FilterOutput, util};
 
 const CAT_HEAD_LINES: usize = 400;
 const CAT_TAIL_LINES: usize = 100;

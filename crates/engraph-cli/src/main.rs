@@ -1,9 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use engraph_compress::{
-    compress,
+    CompressInput, CompressKind, compress,
     filters::{self, FilterCtx},
-    CompressInput, CompressKind,
 };
 use engraph_core::{
     budget, db,
@@ -1539,7 +1538,7 @@ fn run_wrapped_command(command: &str, args: &[String]) -> Result<std::process::O
         // signals still reach the child either way.
         #[cfg(unix)]
         let _signal_swallower = {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
             (
                 signal(SignalKind::interrupt()).ok(),
                 signal(SignalKind::terminate()).ok(),

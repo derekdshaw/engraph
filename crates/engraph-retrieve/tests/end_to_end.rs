@@ -5,7 +5,7 @@
 
 use engraph_core::db::open_pool;
 use engraph_ingest::ingest_file;
-use engraph_retrieve::{scope, search, Query, ScopeFilter, Target};
+use engraph_retrieve::{Query, ScopeFilter, Target, scope, search};
 use std::io::Write;
 use tempfile::tempdir;
 use uuid::Uuid;

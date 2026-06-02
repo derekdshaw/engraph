@@ -17,7 +17,7 @@ use crate::relation_kind::RelationKind;
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
 use protobuf::{EnumOrUnknown, Message};
-use scip::types::{symbol_information::Kind as SymKind, Document, Index, SymbolRole};
+use scip::types::{Document, Index, SymbolRole, symbol_information::Kind as SymKind};
 use std::collections::HashMap;
 use uuid::Uuid;
 
