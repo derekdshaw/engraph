@@ -153,6 +153,41 @@ enum Cmd {
         #[arg(long)]
         in_place: bool,
     },
+    /// Record a do-not-repeat rule for the current project
+    Remember {
+        /// The rule text (e.g. "never force-push main")
+        rule: String,
+        /// Project key override (default: the current working directory)
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Log a bug for the current project (open by default), or close an
+    /// existing one with `--resolve <id>`
+    Bug {
+        /// One-line bug summary (required unless --resolve is given)
+        #[arg(required_unless_present = "resolve")]
+        summary: Option<String>,
+        /// Optional long-form detail (root cause, repro, fix notes)
+        #[arg(long)]
+        content: Option<String>,
+        /// Project key override (default: the current working directory)
+        #[arg(long)]
+        project: Option<String>,
+        /// Mark an existing bug resolved by id instead of creating one
+        #[arg(long, value_name = "ID")]
+        resolve: Option<String>,
+    },
+    /// Save a curated decision/note for the current project
+    Save {
+        /// The decision / note text
+        decision: String,
+        /// Category of the saved item
+        #[arg(long, value_enum, default_value_t = SaveKind::Decision)]
+        kind: SaveKind,
+        /// Project key override (default: the current working directory)
+        #[arg(long)]
+        project: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -193,6 +228,25 @@ impl From<CliKind> for CompressKind {
             CliKind::SessionMessage => CompressKind::SessionMessage,
             CliKind::ToolOutput => CompressKind::ToolOutput,
             CliKind::Generic => CompressKind::Generic,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum SaveKind {
+    Decision,
+    Architecture,
+    Convention,
+    Performance,
+}
+
+impl SaveKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            SaveKind::Decision => "decision",
+            SaveKind::Architecture => "architecture",
+            SaveKind::Convention => "convention",
+            SaveKind::Performance => "performance",
         }
     }
 }
@@ -423,7 +477,7 @@ fn main() -> Result<()> {
                     &conn,
                     EventInput {
                         session_id: session_id.as_deref(),
-                        kind: EventKind::WrappedCmd,
+                        kind: EventKind::Index,
                         feature: "codegraph_index",
                         filter_id: Some("workspace"),
                         input_tokens: total_bytes as i64,
@@ -450,7 +504,7 @@ fn main() -> Result<()> {
                     &conn,
                     EventInput {
                         session_id: session_id.as_deref(),
-                        kind: EventKind::WrappedCmd,
+                        kind: EventKind::Index,
                         feature: "codegraph_index",
                         filter_id: Some(stats.driver_name),
                         input_tokens: stats.scip_bytes as i64,
@@ -609,6 +663,51 @@ fn main() -> Result<()> {
                 println!("set session={session_id} soft={soft} hard={hard}");
             }
         },
+        Cmd::Remember { rule, project } => {
+            let project = resolve_project(project)?;
+            let id = engraph_core::memory::add_do_not_repeat(&conn, &project, &rule)?;
+            println!("remembered rule {id} for {project}");
+        }
+        Cmd::Bug {
+            summary,
+            content,
+            project,
+            resolve,
+        } => {
+            if let Some(id) = resolve {
+                if engraph_core::memory::resolve_bug(&conn, &id)? == 0 {
+                    anyhow::bail!("no bug with id {id}");
+                }
+                println!("resolved bug {id}");
+            } else {
+                let summary = summary.expect("clap requires summary unless --resolve");
+                let project = resolve_project(project)?;
+                let id =
+                    engraph_core::memory::log_bug(&conn, &project, &summary, content.as_deref())?;
+                println!("logged bug {id} for {project}");
+            }
+        }
+        Cmd::Save {
+            decision,
+            kind,
+            project,
+        } => {
+            let project = resolve_project(project)?;
+            let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
+            let id = engraph_core::memory::save_context(
+                &conn,
+                &project,
+                kind.as_str(),
+                &decision,
+                session_id.as_deref(),
+            )?;
+            // Recall parity: scope the item to the project so
+            // `engraph recall --project <p>` finds it, mirroring how ingest
+            // scopes messages.
+            let scope_id = engraph_retrieve::scope::ensure_project_scope(&conn, &project)?;
+            engraph_retrieve::scope::add_member(&conn, &scope_id, "context_item", &id)?;
+            println!("saved {} {id} for {project}", kind.as_str());
+        }
     }
     Ok(())
 }
@@ -656,6 +755,13 @@ fn run_session_start_hook(conn: &db::PooledConn) -> Result<()> {
             signal_sections.push("## open bugs".to_string());
             for b in bugs {
                 signal_sections.push(format!("- {b}"));
+            }
+        }
+        let decisions = recent_decisions(conn, cwd, 5)?;
+        if !decisions.is_empty() {
+            signal_sections.push("## decisions".to_string());
+            for d in decisions {
+                signal_sections.push(format!("- {d}"));
             }
         }
     }
@@ -733,6 +839,22 @@ fn truncate_to_bytes(s: &str, max: usize) -> String {
     out
 }
 
+/// Project key for a memory write: explicit `--project` wins; otherwise the
+/// canonicalized current working directory. The SessionStart brief keys rows on
+/// the session's `cwd` string, so canonicalizing here maximizes the chance a
+/// row written mid-session is matched by the next session's brief.
+fn resolve_project(over: Option<String>) -> Result<String> {
+    if let Some(p) = over {
+        return Ok(p);
+    }
+    let cwd = std::env::current_dir()?;
+    Ok(cwd
+        .canonicalize()
+        .unwrap_or(cwd)
+        .to_string_lossy()
+        .into_owned())
+}
+
 fn recent_do_not_repeat(conn: &db::PooledConn, project: &str, limit: i64) -> Result<Vec<String>> {
     let mut stmt = conn
         .prepare("SELECT rule FROM do_not_repeat WHERE project = ?1 ORDER BY ts DESC LIMIT ?2")?;
@@ -752,20 +874,25 @@ fn open_bugs(conn: &db::PooledConn, project: &str, limit: i64) -> Result<Vec<Str
     Ok(out)
 }
 
-/// PreToolUse(Bash) hook: read tool_input.command, and if we have a wrapper
-/// for it (and it isn't already wrapped via `engraph run`), emit a deny+suggest
-/// JSON. Otherwise stay silent and exit 0.
-/// Decision returned by the pre-bash analysis. Phase A of v2: prefer Rewrite
-/// (silent allow + updatedInput); fall back to DenySuggest only when the
-/// command can't be safely re-wrapped.
+fn recent_decisions(conn: &db::PooledConn, project: &str, limit: i64) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT content FROM context_items \
+         WHERE project = ?1 \
+           AND kind IN ('decision','architecture','convention','performance') \
+         ORDER BY ts DESC LIMIT ?2",
+    )?;
+    let out = stmt
+        .query_map(rusqlite::params![project, limit], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(out)
+}
+
+/// Decision returned by the pre-bash analysis: silently rewrite the command to
+/// route through `engraph run` (allow + updatedInput), or leave it untouched.
 #[derive(Debug, PartialEq, Eq)]
 enum RewriteOutcome {
     Rewrite {
         new_command: String,
-        filter_id: &'static str,
-    },
-    DenySuggest {
-        reason: String,
         filter_id: &'static str,
     },
     Passthrough,
@@ -786,78 +913,169 @@ fn try_auto_rewrite(command: &str) -> RewriteOutcome {
         return RewriteOutcome::Passthrough;
     }
 
-    let mut argv = match shell_words::split(command) {
-        Ok(v) if !v.is_empty() => v,
-        _ => return RewriteOutcome::Passthrough,
-    };
+    // Commands with shell metacharacters: only a pure pipeline whose downstream
+    // stages all just *display* bytes can be rewritten (wrap the producer);
+    // everything else passes through untouched — see `rewrite_pipeline`.
+    if has_unquoted_shell_meta(command) {
+        return rewrite_pipeline(command);
+    }
 
-    // Peel sudo/env/`FOO=bar` prefix. `None` means the prefix shape is one we
-    // can't safely re-emit (sudo would run engraph as root with a different
-    // $HOME; `env` arg-parsing is non-trivial; whitespace-containing values
-    // would need fragile re-quoting).
-    let prefix = match strip_command_prefix(&mut argv) {
-        Some(p) => p,
-        None => return RewriteOutcome::Passthrough,
+    // Plain single command: wrap it if engraph has a filter for it.
+    match classify_for_wrap(command) {
+        Some((prefix, argv, filter_id)) => RewriteOutcome::Rewrite {
+            new_command: build_wrapped(&prefix, &argv),
+            filter_id,
+        },
+        None => RewriteOutcome::Passthrough,
+    }
+}
+
+/// Parse a single command (one pipeline stage, or a whole non-compound command)
+/// and, if engraph has a non-generic filter for it, return the pieces needed to
+/// wrap it: the env prefix to re-emit, the argv to pass to `engraph run`, and
+/// the filter id. `None` when the segment is empty, parses badly, carries an
+/// unsafe prefix (sudo/env/whitespace-value), or has no dedicated filter.
+///
+/// `argv` keeps git's global options (`-C <path>`, `-c k=v`, …) so the wrapped
+/// command runs against the right repo; classification strips them on a copy so
+/// the subcommand is visible to `filters::pick`.
+fn classify_for_wrap(segment: &str) -> Option<(Vec<String>, Vec<String>, &'static str)> {
+    let mut argv = match shell_words::split(segment) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return None,
     };
+    let prefix = strip_command_prefix(&mut argv)?;
     if argv.is_empty() {
-        return RewriteOutcome::Passthrough;
+        return None;
     }
     normalize_argv0(&mut argv);
-    // Classify on a copy with git's global options (`-C <path>`, `-c k=v`,
-    // …) stripped so the subcommand is visible to `filters::pick`. The
-    // original `argv` keeps those options intact and is what we re-emit —
-    // dropping `-C <path>` here would silently run the wrapped command
-    // against the wrong repo (cwd instead of the `-C` target).
     let mut classify = argv.clone();
     strip_git_global_opts(&mut classify);
     if classify.is_empty() {
-        return RewriteOutcome::Passthrough;
+        return None;
     }
-
-    // Compound / pipeline detection — checked on the raw string with quote
-    // awareness so things like `git log --grep='foo && bar'` don't trip.
-    // For compound commands we scan the parsed argv for ANY wrappable token,
-    // so `cd /tmp && git log` and `git log | head` both surface a suggestion.
-    if has_unquoted_shell_meta(command) {
-        for (i, tok) in classify.iter().enumerate() {
-            let next = classify.get(i + 1).map(String::as_str).unwrap_or("");
-            let (_fn, fid) = filters::pick(tok, &[next.to_string()]);
-            if fid != "generic" {
-                let reason = format!(
-                    "engraph has a wrapper for `{tok} {next}` but the command contains shell operators we can't auto-rewrap. Re-run the wrappable part as: engraph run {tok} {next}"
-                );
-                return RewriteOutcome::DenySuggest {
-                    reason,
-                    filter_id: fid,
-                };
-            }
-        }
-        return RewriteOutcome::Passthrough;
-    }
-
     let cmd_word = classify[0].as_str();
     let arg_word = classify.get(1).map(String::as_str).unwrap_or("");
     let (_filter_fn, filter_id) = filters::pick(cmd_word, &[arg_word.to_string()]);
     if filter_id == "generic" {
-        return RewriteOutcome::Passthrough;
+        return None;
     }
+    Some((prefix, argv, filter_id))
+}
 
-    // Build the wrapped command. shell_words::quote preserves any whitespace
-    // or special-char arg in argv. Env prefix is re-emitted verbatim — quoting
-    // `KEY=value` would turn it into a literal command name. strip_command_prefix
-    // already validated the prefix tokens are shape-safe (identifier=novalue-ws).
+/// Assemble `[env-prefix] engraph run <argv…>`. `shell_words::quote` preserves
+/// whitespace/special-char args; the env prefix is emitted verbatim (quoting a
+/// `KEY=value` token would turn it into a literal command name — and
+/// `strip_command_prefix` already validated the prefix tokens are shape-safe).
+fn build_wrapped(prefix: &[String], argv: &[String]) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(prefix.len() + argv.len() + 2);
-    parts.extend(prefix);
+    parts.extend(prefix.iter().cloned());
     parts.push("engraph".to_string());
     parts.push("run".to_string());
-    for a in &argv {
+    for a in argv {
         parts.push(shell_words::quote(a).into_owned());
     }
-    let new_command = parts.join(" ");
+    parts.join(" ")
+}
+
+/// Rewrite a command containing shell metacharacters. We only touch a *pure
+/// pipeline* (`producer | sink | …` — no `;`, `&&`/`||`, `&`, redirects, or
+/// command substitution), and only when the producer has a filter and every
+/// downstream stage is a display sink (head/tail/less/cat/more/bat). In that
+/// case we wrap just the producer and keep the pipe intact, so engraph still
+/// compresses the bulky output while the user's window is preserved.
+///
+/// Anything else passes through untouched: feeding engraph's lossy,
+/// sentinel-decorated output into a byte *consumer* (grep/wc/awk/jq/…) would
+/// silently change that consumer's result, which is worse than not compressing.
+fn rewrite_pipeline(command: &str) -> RewriteOutcome {
+    let segments = match split_pipeline(command) {
+        Some(s) if s.len() >= 2 => s,
+        _ => return RewriteOutcome::Passthrough,
+    };
+    let (prefix, argv, filter_id) = match classify_for_wrap(segments[0].trim()) {
+        Some(x) => x,
+        None => return RewriteOutcome::Passthrough,
+    };
+    if !segments[1..].iter().all(|s| is_display_sink(s)) {
+        return RewriteOutcome::Passthrough;
+    }
+    let mut new_command = build_wrapped(&prefix, &argv);
+    for seg in &segments[1..] {
+        new_command.push_str(" | ");
+        new_command.push_str(seg.trim());
+    }
     RewriteOutcome::Rewrite {
         new_command,
         filter_id,
     }
+}
+
+/// A pipeline stage that merely displays or pages bytes — safe to feed
+/// engraph's filtered output into. Deliberately tight: anything not listed
+/// (grep, wc, awk, jq, sort, …) consumes bytes semantically and must see the
+/// raw stream, so it disqualifies the rewrite.
+fn is_display_sink(segment: &str) -> bool {
+    let argv = match shell_words::split(segment) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return false,
+    };
+    let mut cmd = argv[0].clone();
+    normalize_argv0(std::slice::from_mut(&mut cmd));
+    matches!(
+        cmd.as_str(),
+        "head" | "tail" | "less" | "cat" | "more" | "bat"
+    )
+}
+
+/// Split a pure pipeline into its verbatim stage substrings on unquoted single
+/// `|`. Returns `None` if the command holds any other shell metacharacter
+/// (`;`, `&&`/`&`, `||`, redirects, command substitution) or has unbalanced
+/// quotes — shapes we can't rewrite safely, so the caller passes them through.
+/// Quote/backslash tracking mirrors `has_unquoted_shell_meta`.
+fn split_pipeline(command: &str) -> Option<Vec<String>> {
+    let bytes = command.as_bytes();
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && !in_single {
+            i += 2;
+            continue;
+        }
+        if b == b'\'' && !in_double {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+        if b == b'"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+        if !in_single && !in_double {
+            match b {
+                // `||` is logical-or, not a pipe — bail out of the rewrite.
+                b'|' if bytes.get(i + 1) == Some(&b'|') => return None,
+                b'|' => {
+                    segments.push(command[start..i].to_string());
+                    start = i + 1;
+                }
+                b';' | b'&' | b'<' | b'>' | b'`' => return None,
+                b'$' if bytes.get(i + 1) == Some(&b'(') => return None,
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    if in_single || in_double {
+        return None;
+    }
+    segments.push(command[start..].to_string());
+    Some(segments)
 }
 
 /// Detects `<<TAG`/`<<-TAG` (heredoc) outside of single/double quotes.
@@ -1060,29 +1278,6 @@ fn run_pre_bash_hook(conn: &db::PooledConn) -> Result<()> {
                     session_id: session_id.as_deref(),
                     kind: EventKind::Hook,
                     feature: "cmd_rewrite",
-                    filter_id: Some(filter_id),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    latency_ms: 0,
-                },
-            )
-            .ok();
-        }
-        RewriteOutcome::DenySuggest { reason, filter_id } => {
-            let decision = serde_json::json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": reason
-                }
-            });
-            println!("{decision}");
-            telemetry::record_event(
-                conn,
-                EventInput {
-                    session_id: session_id.as_deref(),
-                    kind: EventKind::Hook,
-                    feature: "cmd_deny",
                     filter_id: Some(filter_id),
                     input_tokens: 0,
                     output_tokens: 0,

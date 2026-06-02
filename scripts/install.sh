@@ -187,11 +187,44 @@ PYEOF
 
 ok "Updated $SETTINGS_FILE"
 
+# --- Install memory-capture guidance ---
+# The writer commands (remember/bug/save) only get called if Claude is told
+# when to call them. Ship a memory file and import it from CLAUDE.md so the
+# guidance loads in every session (same pattern as the SessionStart hook's
+# consumers). engraph becomes the single capture path.
+
+info "Installing memory-capture guidance"
+
+ENGRAPH_MD="$CLAUDE_DIR/engraph.md"
+cat > "$ENGRAPH_MD" <<'MDEOF'
+# Engraph memory
+Persist durable signals so the next session's SessionStart brief surfaces them.
+These are plain Bash calls; the engraph pre-bash hook passes `engraph …` through
+untouched.
+
+- **User corrects you / states a hard rule** → `engraph remember "<imperative, specific rule>"`
+- **After you fix a bug** → `engraph bug "<one-line summary incl. the error>" --content "<root cause + fix>"`; when a tracked bug is fixed, close it with `engraph bug --resolve <id>`
+- **Architecture / library / design decision** → `engraph save "<decision + one-line rationale>" --kind architecture` (use `--kind convention` for style/naming/workflow rules, `--kind performance` for optimization choices, default `decision` otherwise)
+
+Run these from the project root so the stored project key matches the session
+cwd. From a subdirectory, pass `--project <repo-root-abs-path>`.
+MDEOF
+ok "Wrote $ENGRAPH_MD"
+
+CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
+if [ ! -f "$CLAUDE_MD" ] || ! grep -q '@engraph.md' "$CLAUDE_MD"; then
+    printf '\n@engraph.md\n' >> "$CLAUDE_MD"
+    ok "Imported @engraph.md in $CLAUDE_MD"
+else
+    info "@engraph.md already imported in $CLAUDE_MD"
+fi
+
 echo ""
 printf "${GREEN}${BOLD}Engraph installed successfully!${RESET}\n"
 echo ""
 echo "Binary:    $ENGRAPH"
 echo "Settings:  $SETTINGS_FILE"
+echo "Memory:    $ENGRAPH_MD (imported via @engraph.md)"
 echo "Database:  \$ENGRAPH_DB_PATH (default: ~/.local/share/engraph/engraph.db)"
 echo ""
 echo "Sanity check:"
@@ -206,6 +239,22 @@ echo "bareword symbol indexed in the codegraph is redirected to"
 echo "'engraph subgraph <symbol>'."
 echo ""
 echo "Codegraph features (engraph index / subgraph) need external SCIP"
-echo "indexers — one per language. If you want them, run the companion"
-echo "installer next:"
-echo "  $SCRIPT_DIR/install-scip-indexers.sh"
+echo "indexers — one per language (rust-analyzer, scip-python, scip-go,"
+echo "scip-typescript, scip-java)."
+
+SCIP_INSTALLER="$SCRIPT_DIR/install-scip-indexers.sh"
+if [ -x "$SCIP_INSTALLER" ]; then
+    echo ""
+    read -rp "Install the SCIP indexers now? [y/N]: " run_scip
+    case "$run_scip" in
+        [yY] | [yY][eE][sS])
+            echo ""
+            "$SCIP_INSTALLER"
+            ;;
+        *)
+            echo "Skipped. Run later with: $SCIP_INSTALLER"
+            ;;
+    esac
+else
+    echo "Run the companion installer when ready: $SCIP_INSTALLER"
+fi

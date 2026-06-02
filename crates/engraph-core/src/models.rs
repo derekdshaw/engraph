@@ -28,6 +28,10 @@ pub enum EventKind {
     Retrieve,
     Hook,
     WrappedCmd,
+    /// Codegraph index build (`engraph index`). Volume/latency telemetry only —
+    /// NOT a savings kind: `input` holds index bytes and `output` is 0, so
+    /// `saved_for` must not read `input - output` as tokens saved.
+    Index,
 }
 
 impl EventKind {
@@ -37,6 +41,7 @@ impl EventKind {
             EventKind::Retrieve => "retrieve",
             EventKind::Hook => "hook",
             EventKind::WrappedCmd => "wrapped_cmd",
+            EventKind::Index => "index",
         }
     }
 }

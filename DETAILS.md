@@ -857,6 +857,12 @@ For the resolved `cwd`:
 
 - `## do-not-repeat` — top 5 rules from `do_not_repeat WHERE project = ?`.
 - `## open bugs` — top 5 unresolved rows from `bugs`.
+- `## decisions` — top 5 `context_items` rows for the project whose `kind` is
+  `decision`/`architecture`/`convention`/`performance`.
+
+These three tables are written by the capture commands `engraph remember`,
+`engraph bug` (+ `--resolve`), and `engraph save`, which Claude calls during a
+session (wired via `~/.claude/engraph.md`).
 
 For the resolved `session_id`:
 
@@ -874,10 +880,10 @@ context Claude could spend on the actual task, so the bar is high:
 each section must surface information Claude would otherwise have to
 hunt for. Do-not-repeat rules are obvious wins (the user explicitly
 told us to avoid these); open bugs come second (the user expects
-continuity across sessions). Decisions/notes were *also* in this
-brief originally, but the query was dead (no producer ever wrote those
-rows) — fixed in the v2.1 polish by deleting the query rather than
-building the producer (F8 deferred).
+continuity across sessions). Decisions/notes round out the set: the
+producer (`engraph save`) and the `## decisions` reader now ship
+together, so the section is live. (It was briefly removed during the
+v2.1 polish when no writer existed; the writer commands closed that gap.)
 
 ---
 

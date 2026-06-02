@@ -41,7 +41,7 @@ pub struct GainRow {
     /// Token savings. Defined only for kinds where `input` represents the
     /// pre-compression size and `output` represents the post-compression size
     /// (`compress`, `wrapped_cmd`). `None` for kinds where the diff has no
-    /// savings semantic (`retrieve`, `hook`).
+    /// savings semantic (`retrieve`, `hook`, `index`).
     pub saved_tokens: Option<i64>,
 }
 
@@ -124,6 +124,30 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 200,
                 latency_ms: 5,
+            },
+        )
+        .unwrap();
+        let rows = gain_report(&conn).unwrap();
+        assert_eq!(rows[0].saved_tokens, None);
+    }
+
+    #[test]
+    fn index_kind_has_no_savings() {
+        // `codegraph_index` records index bytes in `input` and 0 in `output`;
+        // under the `index` kind that must NOT read as input-output saved.
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        record_event(
+            &conn,
+            EventInput {
+                session_id: None,
+                kind: EventKind::Index,
+                feature: "codegraph_index",
+                filter_id: None,
+                input_tokens: 5_000_000,
+                output_tokens: 0,
+                latency_ms: 42,
             },
         )
         .unwrap();

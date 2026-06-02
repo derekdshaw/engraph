@@ -40,13 +40,11 @@ under its feature section, not here.
 
 ## `/resume` and `/save` skills
 
-**What:** user-facing slash commands in `~/.claude/skills/` for explicit session bookmarking. `/save <summary>` writes a `context_items` row with `kind = 'decision'` scoped to the current project. `/resume` queries the latest decisions and pretty-prints them.
+**What:** the writer (`engraph save`) and the SessionStart `## decisions` surfacing now ship (alongside `engraph remember` and `engraph bug`). What remains is the optional skill UX: a `/save` shortcut and a `/resume` (thin `engraph resume`) that queries the latest decisions and pretty-prints them mid-session.
 
-**Why deferred:** the SessionStart brief auto-inject covers ~80% of this. The manual variants matter when auto-inject is wrong or when the user wants to bookmark mid-session. Build after measuring how often the auto-brief misses.
+**Why deferred:** the SessionStart brief already auto-surfaces saved decisions, covering ~80% of this. `/resume` matters when you want to pull them up explicitly mid-session.
 
-**Dependencies:** none — the schema (`context_items.kind = 'decision'`) already exists.
-
-**Effort:** 1 day (mostly skill markdown + a thin `engraph save` / `engraph resume` CLI).
+**Effort:** ~0.5 day (skill markdown + a thin `engraph resume` reader).
 
 ---
 

@@ -1,6 +1,7 @@
 //! Integration tests for `engraph hook pre-bash` (v2 auto-rewrite):
 //! - rewrite-eligible commands → allow + updatedInput
-//! - compound commands → deny + suggestion
+//! - display-sink pipelines (`cmd | head`) → wrap producer, keep the pipe
+//! - other compound commands → passthrough (empty stdout)
 //! - unknown commands → passthrough (empty stdout)
 //! - already-wrapped → passthrough (recursion guard)
 //! - quoted args preserved through the rewrite
@@ -98,35 +99,81 @@ fn quoted_args_are_preserved() {
 }
 
 #[test]
-fn compound_command_falls_back_to_deny() {
+fn non_pipeline_compound_is_passthrough() {
     let (_t, db) = db_dir();
+    // `&&` isn't a pipe — we can't safely wrap it, so it passes through raw
+    // (previously this denied with a suggestion).
     let out = run_hook(&db, "cd /tmp && git log -n 5");
-    let v = parse(&out).expect("expected deny JSON");
-    assert_eq!(
-        v.pointer("/hookSpecificOutput/permissionDecision")
-            .and_then(|s| s.as_str()),
-        Some("deny")
-    );
-    let reason = v
-        .pointer("/hookSpecificOutput/permissionDecisionReason")
-        .and_then(|s| s.as_str())
-        .unwrap();
-    assert!(
-        reason.contains("engraph run"),
-        "missing suggestion in {reason}"
-    );
+    assert_eq!(out.trim(), "", "expected passthrough, got: {out}");
 }
 
 #[test]
-fn piped_command_falls_back_to_deny() {
+fn pipe_to_display_sink_wraps_producer() {
     let (_t, db) = db_dir();
+    // `producer | head` wraps only the producer and keeps the pipe, so engraph
+    // still compresses the bulky output while the user's window is preserved.
     let out = run_hook(&db, "git log -n 5 | head");
-    let v = parse(&out).expect("expected deny JSON");
+    let v = parse(&out).expect("expected rewrite JSON");
     assert_eq!(
         v.pointer("/hookSpecificOutput/permissionDecision")
             .and_then(|s| s.as_str()),
-        Some("deny")
+        Some("allow")
     );
+    let updated = v
+        .pointer("/hookSpecificOutput/updatedInput/command")
+        .and_then(|s| s.as_str())
+        .expect("missing updatedInput.command");
+    assert_eq!(updated, "engraph run git log -n 5 | head");
+}
+
+#[test]
+fn pipe_to_non_sink_is_passthrough() {
+    let (_t, db) = db_dir();
+    // grep consumes bytes semantically; feeding it engraph's lossy output would
+    // silently change the result (comment lines already stripped, etc.), so the
+    // whole pipeline runs raw.
+    let out = run_hook(&db, "cat src/main.rs | grep TODO");
+    assert_eq!(out.trim(), "", "expected passthrough, got: {out}");
+}
+
+#[test]
+fn pipe_with_non_wrappable_producer_is_passthrough() {
+    let (_t, db) = db_dir();
+    // `echo` has no filter — nothing to compress, so leave the pipe alone.
+    let out = run_hook(&db, "echo hi | head");
+    assert_eq!(out.trim(), "", "expected passthrough, got: {out}");
+}
+
+#[test]
+fn multi_stage_display_sink_pipe_wraps_producer() {
+    let (_t, db) = db_dir();
+    // Every downstream stage is a display sink, so the whole pipe is preserved
+    // verbatim after the wrapped producer.
+    let out = run_hook(&db, "cat foo.py | head -100 | tail -20");
+    let v = parse(&out).expect("expected rewrite JSON");
+    let updated = v
+        .pointer("/hookSpecificOutput/updatedInput/command")
+        .and_then(|s| s.as_str())
+        .expect("missing updatedInput.command");
+    assert_eq!(updated, "engraph run cat foo.py | head -100 | tail -20");
+}
+
+#[test]
+fn logical_or_is_passthrough() {
+    let (_t, db) = db_dir();
+    // `||` is control flow, not a pipe — passthrough even though `cat` is
+    // wrappable.
+    let out = run_hook(&db, "cat a.py || cat b.py");
+    assert_eq!(out.trim(), "", "expected passthrough, got: {out}");
+}
+
+#[test]
+fn redirect_is_passthrough() {
+    let (_t, db) = db_dir();
+    // A redirect (`>`) disqualifies the rewrite; the command runs raw. This is
+    // the `cargo test > out.txt` / `2>&1` shape that used to deny.
+    let out = run_hook(&db, "cargo test > out.txt");
+    assert_eq!(out.trim(), "", "expected passthrough, got: {out}");
 }
 
 #[test]

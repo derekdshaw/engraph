@@ -200,6 +200,26 @@ Write-Host "bareword symbol indexed in the codegraph is redirected to"
 Write-Host "'engraph subgraph <symbol>'."
 Write-Host ""
 Write-Host "Codegraph features (engraph index / subgraph) need external SCIP"
-Write-Host "indexers — one per language. If you want them, the SCIP indexer"
-Write-Host "installer is the companion script in this directory:"
-Write-Host "  $ScriptDir\install-scip-indexers.sh   (run under WSL or Git Bash)"
+Write-Host "indexers — one per language (rust-analyzer, scip-python, scip-go,"
+Write-Host "scip-typescript, scip-java). The installer is a bash script, so it"
+Write-Host "needs WSL or Git Bash."
+
+$scipInstaller = Join-Path $ScriptDir "install-scip-indexers.sh"
+if (Test-Path $scipInstaller) {
+    Write-Host ""
+    $runScip = Read-Host "Install the SCIP indexers now? (needs WSL or Git Bash) [y/N]"
+    if ($runScip -eq "y" -or $runScip -eq "Y" -or $runScip -eq "yes") {
+        $bash = Get-Command bash -ErrorAction SilentlyContinue
+        if ($bash) {
+            & $bash.Source $scipInstaller
+        }
+        else {
+            Write-Warn "No 'bash' found on PATH. Install WSL or Git Bash, then run:"
+            Write-Host "  bash `"$scipInstaller`""
+        }
+    }
+    else {
+        Write-Host "Skipped. Run later (under WSL or Git Bash) with:"
+        Write-Host "  bash `"$scipInstaller`""
+    }
+}

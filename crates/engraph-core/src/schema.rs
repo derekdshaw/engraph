@@ -220,6 +220,42 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE entities ADD COLUMN signature TEXT;
     CREATE INDEX IF NOT EXISTS idx_entities_file_path ON entities(file_path);
     "#,
+    // v7 — widen events.kind CHECK to allow 'index' (codegraph index telemetry,
+    // a non-savings kind). SQLite can't ALTER a CHECK constraint, so rebuild the
+    // table with the new constraint. `events` has no foreign keys in or out, so
+    // the rebuild is safe; seq and all rows are preserved.
+    r#"
+    CREATE TABLE events_new (
+        seq INTEGER PRIMARY KEY,
+        id TEXT NOT NULL UNIQUE,
+        session_id TEXT,
+        kind TEXT NOT NULL CHECK (kind IN ('compress','retrieve','hook','wrapped_cmd','index')),
+        feature TEXT NOT NULL,
+        filter_id TEXT,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        latency_ms INTEGER NOT NULL DEFAULT 0,
+        ts TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    INSERT INTO events_new (seq, id, session_id, kind, feature, filter_id, input_tokens, output_tokens, latency_ms, ts)
+        SELECT seq, id, session_id, kind, feature, filter_id, input_tokens, output_tokens, latency_ms, ts FROM events;
+    DROP TABLE events;
+    ALTER TABLE events_new RENAME TO events;
+    CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);
+    CREATE INDEX IF NOT EXISTS idx_events_feature ON events(feature);
+    CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
+    CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+    "#,
+    // v8 — project-scope context_items so `engraph save` decisions surface in
+    // the SessionStart brief without joining sessions (sessions.project is only
+    // populated at ingest, so a live-session decision has no session row to join
+    // on). ADD COLUMN is metadata-only and leaves rowids untouched, so the
+    // external-content FTS triggers on context_items keep working — same pattern
+    // as v6's entity columns.
+    r#"
+    ALTER TABLE context_items ADD COLUMN project TEXT;
+    CREATE INDEX IF NOT EXISTS idx_context_items_project ON context_items(project);
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
@@ -303,6 +339,28 @@ mod tests {
         conn.execute(
             "INSERT INTO entities (id, kind, name, project, file_path, line_range, signature)
              VALUES ('e1', 'symbol', 'foo', '/p', 'src/lib.rs', '10:20', 'fn foo() -> i32')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn migrates_through_v8_context_items_project() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        // v8 added a `project` column to context_items.
+        let present: bool = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('context_items') WHERE name = 'project'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        assert!(present, "missing context_items.project column");
+        // Inserting a row using the new column must succeed.
+        conn.execute(
+            "INSERT INTO context_items (id, kind, content, project)
+             VALUES ('c1', 'decision', 'use rusqlite pool', '/p')",
             [],
         )
         .unwrap();
