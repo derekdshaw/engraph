@@ -1430,12 +1430,14 @@ A separate test pins idempotency under re-index. Soft-skips when no
 
 `bazel_symbols.rs` adds the symbol-level layer on top of §14.8. After
 the target-level pass writes `bazel_target` entities and
-`BAZEL_DEPENDS_ON` edges, this module drives `scip-java` / `scip-go` /
-`scip-typescript` against the same Bazel workspace, merges their SCIP
-outputs in memory, and loads the result under the same project key.
-The end result: `engraph subgraph <name>` carries both a **Calls /
-References** symbol section (from SCIP) and a **Bazel deps** section
-(from `bazel query`) in one neighborhood rendering.
+`BAZEL_DEPENDS_ON` edges, this module produces per-language SCIP, merges
+it in memory, and loads the result under the same project key. The
+standalone SCIP indexers don't drive Bazel, so each language is handled
+the way that actually works on a real Bazel monorepo — the three paths
+diverge (see **Per-language strategy**). The end result: `engraph
+subgraph <name>` carries both a **Calls / References** symbol section
+(from SCIP) and a **Bazel deps** section (from `bazel query`) in one
+neighborhood rendering.
 
 **Default policy.** `--bazel-symbols` is ON by default in `--workspace`
 mode and OFF for single-repo `engraph index <repo>` runs. `--no-bazel-
@@ -1449,30 +1451,39 @@ Toolchain downloads and full Bazel builds make `--bazel-symbols` heavy
 (5s warm to minutes cold per language); the explicit `--bazel-symbols`
 flag is still available to opt in on a single-repo run.
 
-**Per-language pipeline.** Three steps per language, in order:
+**Per-language strategy.** Three distinct paths:
 
-1. **Bazel-query probe.** `bazel query 'kind(java_library, //...)
-   union kind(java_binary, //...) union kind(java_test, //...)'
-   --output=label_kind`, with the same `--output_base` as the
-   target-level pass (so the analysis cache stays warm). Empty
-   stdout → `LangStatus::SkippedNoTargets`. Non-empty → continue.
-   Per-language rule classes: Java (`java_library`/`java_binary`/
-   `java_test`), Go (`go_library`/`go_binary`/`go_test`), TS
-   (`ts_project`/`ts_library`).
-2. **Indexer binary probe.** `which scip-<lang>` (implemented as
-   `Command::new(bin).arg("--version").status()`). Missing →
-   `LangStatus::SkippedNoIndexer { binary }`. Present → continue.
-3. **Spawn the indexer.** All three indexers run with
-   `current_dir(repo)`, stdout/stderr piped. SCIP output lands at
-   `~/.cache/engraph/bazel-scip-out/<sha-of-workspace-path>/index-<lang>.scip`
-   (keeps it out of the user's repo and out of Bazel's own
-   `output_base`; stable across runs so re-runs overwrite).
-
-| Language | Command | Rationale |
-|---|---|---|
-| Java | `scip-java index --output <path>` | scip-java auto-detects Bazel via its bundled `BazelBuildTool` — materializes its own `aspects/scip_java.bzl`, runs `bazel build --aspects=...%scip_java_aspect --output_groups=scip //...`, harvests `bazel-out/**/*.scip`, merges. We do **not** reimplement aspect dispatch. |
-| Go | `scip-go --module-root . --output <path>` | scip-go has no first-party Bazel aspect (per its README, Bazel is "supported via the Go Packages Driver Protocol"). MVP requires a `go.mod` at the workspace root; multi-`go.mod` Bazel-go monorepos surface as `SkippedNoTargets`. |
-| TS | `scip-typescript index --output <path>` | scip-typescript has no Bazel aspect either; reads `tsconfig.json` directly. `rules_ts` users may need a prior `bazel build //...` to populate `bazel-bin/<pkg>/node_modules` symlinks — documented limitation. |
+- **TypeScript / Python** (`run_language`, single-shot). Gate on a
+  `bazel query --output=label_kind` probe for the language's rule
+  classes (shared `--output_base` with the target-level pass, so the
+  analysis cache stays warm) → `SkippedNoTargets` if empty; gate on
+  `which scip-<lang>` → `SkippedNoIndexer`; then spawn the indexer at the
+  workspace root, SCIP landing under
+  `~/.cache/engraph/bazel-scip-out/<sha>/`. Best-effort: `rules_ts`
+  `node_modules` and `rules_python` venv resolution are unresolved.
+- **Go** (`run_go_modules`, multi-module). scip-go needs a module root,
+  and Bazel-go repos rarely have one at the workspace root.
+  `discover_go_modules` walks for every `go.mod` (pruning symlinked /
+  `vendor` / `testdata` / hidden trees); each module runs `scip-go index
+  --module-root <rel> --module-version SCIP_GO_VERSION --skip-tests`;
+  `rebase_documents` prepends the module's repo-relative dir to its
+  document paths (scip-go emits module-root-relative paths and the loader
+  stores them verbatim as `file_path`, so two modules' `main.go` would
+  collide otherwise). Per-module failures are isolated; `--module-version`
+  is pinned (like `SCIP_PYTHON_VERSION`) for cross-commit-stable IDs.
+  `IndexedModules { indexed, failed, targets }` surfaces the gazelle gap:
+  go.mod-rooted modules « `go_library` targets.
+- **Java** (`run_java`, delegated). A Java SCIP build is too repo-specific
+  to bake in — a Bazel SemanticDB aspect, Maven, Gradle, and custom
+  annotation-processor toolchains all differ, and stock scip-java's bundled
+  aspect is Bazel-7-only and does **not** auto-detect Bazel. engraph runs
+  the command named by `ENGRAPH_BAZEL_SCIP_JAVA_CMD` as `<cmd> <repo>
+  <out.scip>` and merges the SCIP it writes; unset →
+  `SkippedNotConfigured { env }`. The command owns all build-system
+  knowledge. A ready-made Bazel driver — scip-java's SemanticDB aspect
+  patched for Bazel 8 + custom annotation-processor toolchains, plus the
+  per-target `.scip` merge — ships as
+  `docs/examples/scip-java-bazel-index.sh` (not compiled in).
 
 **Merge-in-memory, single load.** `scip_loader::load`'s DELETE is
 per-project (§14.3). Calling it once per language under the same
@@ -1484,11 +1495,13 @@ generated protobuf — `Vec::extend`), then reserializes. The merged
 blob is loaded once. Metadata from the first non-empty input wins.
 
 **Soft-skip semantics.** A failing language doesn't abort the rest of
-the symbol-level pass. The `LangStatus` enum has four variants —
-`Indexed`, `SkippedNoTargets`, `SkippedNoIndexer { binary }`,
-`Failed(stderr_tail)` — and each language reports independently. The
-`BazelSymbolStats` return value carries per-language results plus
-aggregate `entities_inserted` / `relations_inserted` / `scip_bytes_total`.
+the symbol-level pass. `LangStatus`: `Indexed`, `IndexedModules {
+indexed, failed, targets }` (Go's per-module aggregate),
+`SkippedNoTargets`, `SkippedNoIndexer { binary }`, `SkippedNotConfigured
+{ env }` (Java with no command configured), `Failed(stderr_tail)` — each
+language reports independently. The `BazelSymbolStats` return value
+carries per-language results plus aggregate `entities_inserted` /
+`relations_inserted` / `scip_bytes_total`.
 
 **CLI surface.** `--bazel-symbols` / `--no-bazel-symbols` on `Cmd::Index`
 (mutually exclusive at the clap layer via `conflicts_with`). The CLI
@@ -1499,38 +1512,36 @@ flag effectively set and no `--scip` override, the symbol-level pass
 chains after the target-level pass; `driver_name` reports
 `"bazel-query+symbols"` (vs the default `"bazel-query"`).
 
-**End-to-end test.** `tests/bazel_symbols_live.rs` is triple-gated:
-`bazel`/`bazelisk` on PATH, `scip-java` on PATH, and
-`ENGRAPH_LIVE_BAZEL_SYMBOLS=1` env var set. Default `cargo test`
-doesn't pay the 2–5 min cold-cache cost. Java-only by design: that's
-the language whose Bazel orchestration (scip-java's bundled aspect) is
-the real risk; Go and TS are simple shell-outs covered by unit tests
-(`merge_scip_bytes_*`, `label_kind_nonempty_detects_lines`,
-`lang_status_display_*`).
+**Tests.** `run_java`'s delegation is unit-tested in-crate (a fake
+command writes a known SCIP, `run_java` merges it; the unconfigured case
+reports `SkippedNotConfigured`), as are `discover_go_modules`,
+`rebase_documents`, `merge_scip_bytes`, `count_label_kind_lines`, and the
+`LangStatus` displays. `tests/bazel_symbols_live.rs` is a live
+integration check (gated behind `bazel` on PATH +
+`ENGRAPH_LIVE_BAZEL_SYMBOLS=1`) that the full `--bazel-symbols` pass runs
+on a real Bazel fixture and reports the (delegated) Java pass without
+breaking the target-level pass.
 
 **Helpers shared with §14.8.** Three private helpers in `bazel.rs`
 (`bazel_binary`, `output_base_for`, `tail_lines`) were promoted to
 `pub(crate)` so this module reuses them without restructuring the
 target-level module into a directory.
 
-**Known limitations / followups** (documented in `ROADMAP.md`,
-deferred until a real workload trips them):
-- **scip-go multi-`go.mod` Bazel monorepos**: gazelle-managed repos
-  sometimes carry one `go.mod` per package. Today the symbol-level
-  path requires a single `go.mod` at the root; multi-mod would need
-  per-package enumeration + merging.
-- **scip-typescript + rules_ts node_modules**: cold runs may fail
-  until a prior `bazel build //...` populates the package-local
-  `node_modules` symlinks.
-- **scip-java on large monorepos**: 1000+ Java targets can OOM or
-  exceed 30 min. Reserved env var
-  `ENGRAPH_BAZEL_SCIP_JAVA_TARGETS` for a future `--targets <expr>`
-  pass-through, not implemented.
-- **Bazel server isolation gap (Java path)**: §14.8 pins
-  `--output_base` into engraph's cache, but scip-java invokes Bazel
-  internally without a startup-options pass-through we can plumb.
-  With `--bazel-symbols`, scip-java's Bazel build lands in the
-  user's default `~/.cache/bazel`.
+**Known limitations / followups** (`ROADMAP.md`, deferred until a real
+workload trips them):
+- **Go gazelle bulk**: `go_library` targets without a `go.mod` are
+  unreachable by scip-go; the `IndexedModules` `targets` count makes the
+  gap visible. "Deeper Go support" in `ROADMAP.md` scopes closing it (a
+  delegated `ENGRAPH_BAZEL_SCIP_GO_CMD` hook, or synthesized go.mod).
+- **scip-typescript + rules_ts node_modules**: cold runs may fail until a
+  prior `bazel build //...` populates the package-local `node_modules`
+  symlinks; likely delegated like Java.
+- **scip-python rules_python venv**: per-project environment resolution
+  is unbuilt (Phase D).
+- **Cross-repo moniker collisions**: Java first-party monikers carry a
+  constant empty version (`semanticdb maven . . …`) — cross-commit
+  stable but cross-repo collision-prone; `scip_loader::normalize_moniker`
+  is a no-op today.
 
 ---
 

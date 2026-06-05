@@ -60,17 +60,25 @@ under its feature section, not here.
 
 ## Codegraph follow-ups
 
-The codegraph (single-repo, cross-repo, and Bazel polyglot) is shipped. These robustness items were documented at ship time and deferred until a real workload trips them:
+The codegraph (single-repo, cross-repo, and Bazel polyglot) is shipped, now including **Bazel symbol-level indexing for Go and Java** (Phases A/C of **`docs/bazel-symbol-indexing.md`**): Go via multi-`go.mod` enumeration (`run_go_modules`), Java via a delegated build command (`ENGRAPH_BAZEL_SCIP_JAVA_CMD` + the driver in `docs/examples/scip-java-bazel-index.sh`). Remaining items, deferred until a real workload trips them:
 
-- **scip-go multi-`go.mod` monorepos:** the symbol-level path requires a single `go.mod` at the workspace root. Gazelle-managed Bazel-go repos sometimes carry one per package; would need enumeration + merging.
-- **scip-typescript + rules_ts node_modules:** cold runs may fail until a prior `bazel build //...` populates `bazel-bin/<pkg>/node_modules` symlinks.
-- **scip-java on large monorepos:** 1000+ Java targets can OOM or exceed 30 min. Future `--targets <expr>` pass-through (reserved env var `ENGRAPH_BAZEL_SCIP_JAVA_TARGETS`).
-- **Bazel server isolation (Java path):** the target-level pass pins Bazel's `--output_base` into engraph's cache, but scip-java invokes Bazel internally with no startup-option pass-through to plumb, so its build lands in the user's default `~/.cache/bazel`. Verify scip-java exposes a `--bazel-startup-options` flag (or similar) and thread engraph's output_base through it.
-- **Per-driver moniker normalization rules:** the rewrite hook in `scip_loader::normalize_moniker` is a no-op today.
+- **scip-typescript + rules_ts node_modules** (Phase B): cold runs may fail until a prior `bazel build //...` populates `bazel-bin/<pkg>/node_modules` symlinks. Likely delegated the same way Java is (an `ENGRAPH_BAZEL_SCIP_TS_CMD` hook), since `rules_ts` / pnpm-workspace materialization is repo-specific.
+- **scip-python in rules_python** (Phase D): per-project venv / site-packages resolution; the hardest to make useful, reasonable to leave for last.
+- **Per-driver moniker normalization rules:** `scip_loader::normalize_moniker` is a no-op today. Java first-party monikers carry a constant empty version (`semanticdb maven . . …`) — cross-commit stable, but cross-*repo* collision-prone; a per-scheme rewrite would disambiguate.
 - **50-symbol stability test suite:** snapshot known monikers across a polyrepo and regress on every loader change. Pays back once indexer-version drift causes a real failure.
-
-- **Auto-trigger indexing.** Today `engraph index` is manual. Wiring it into the SessionStart hook (or an MCP tool surface) so a fresh session re-indexes the workspace automatically — with stale-detection so cold scip-java doesn't fire every session — is the most user-visible follow-up.
+- **Auto-trigger indexing.** Today `engraph index` is manual. Wiring it into the SessionStart hook (or an MCP tool surface) so a fresh session re-indexes the workspace automatically — with stale-detection so cold builds don't fire every session — is the most user-visible follow-up.
 - **Deep workspace discovery.** `discover_workspace_repos` walks immediate children only; nested polyrepo layouts need explicit per-repo invocations. Recursion + a depth-limit / `.gitignore` respect would close this.
+
+### Deeper Go support
+
+Phase A indexes `go.mod`-rooted modules, but on gazelle-managed `rules_go` monorepos that's the *minority* of the code — a large gazelle repo can have thousands of `go_library` targets but only a handful of `go.mod` files. `LangStatus::IndexedModules` already surfaces the gap (`indexed N go.mod modules of M go targets`). Closing it:
+
+- **Gazelle bulk (no `go.mod`).** scip-go needs a module root; gazelle expresses the module graph in BUILD files + `# gazelle:prefix`, not `go.mod`. Two routes:
+  - *Delegate* (consistent with Java): an `ENGRAPH_BAZEL_SCIP_GO_CMD` hook so a repo drives scip-go through its own `bazel run @rules_go//go` / resolved module graph and feeds engraph the merged SCIP. Lowest coupling, repo owns the build-system glue.
+  - *Synthesize* an ephemeral `go.mod` per gazelle prefix from `go_library` importpaths, run scip-go per synthesized root, clean up. Fully in-engraph but fiddly, and must not mutate the target repo.
+- **Cross-module resolution.** Verify monikers link across the merged per-module SCIP streams — a call from module A into a type defined in module B should resolve, not dangle — and that vendored copies don't double-count.
+- **Build-tag / `GOOS`·`GOARCH` awareness.** scip-go indexes one build configuration; platform-gated files (`_linux.go`, `//go:build` tags) are missed. Document the limitation; optionally index multiple configs and merge.
+- **Optional test-file coverage.** The pass mirrors Java's `--skip-tests`; add a toggle to index `_test.go` for test→impl edges when wanted.
 
 ---
 

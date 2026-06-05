@@ -1,20 +1,21 @@
-//! F2 Phase 2.3 #2 — end-to-end symbol-level Bazel indexing.
+//! F2 Phase 2.3 #2 — live integration check for the symbol-level Bazel pass.
 //!
-//! Drives `scip-java` from a minimal `java_library` fixture, asserts symbol
-//! entities land in the DB alongside the target-level pass's
-//! `bazel_target` rows. Java-only by design — that's the language whose
-//! Bazel orchestration (scip-java's bundled aspect) is the real risk;
-//! Go/TS Bazel integration is plain "run the indexer at the workspace
-//! root" and is covered by unit tests in `bazel_symbols.rs`.
+//! Java is *delegated* (`run_java` runs the command named by
+//! `ENGRAPH_BAZEL_SCIP_JAVA_CMD`), so the heavy scip-java build is no longer
+//! engraph's code — the delegation contract itself is unit-tested in
+//! `bazel_symbols.rs` (`run_java_delegates_to_configured_command`). This live
+//! test verifies the *integrated* `--bazel-symbols` pass against a real Bazel
+//! fixture: the target-level pass still writes `bazel_target` rows, the symbol
+//! pass runs and reports the (here unconfigured) Java language without aborting,
+//! and the symbol load doesn't wipe the target-level rows.
 //!
-//! Triple-gated so default `cargo test` doesn't pay the 2-5 min cold cost
-//! of fetching the Bazel Java toolchain + the scip-java jar:
+//! Double-gated so default `cargo test` doesn't pay the cold-cache cost of
+//! fetching the Bazel Java toolchain:
 //!   1. `bazel` / `bazelisk` on PATH
-//!   2. `scip-java` on PATH
-//!   3. `ENGRAPH_LIVE_BAZEL_SYMBOLS=1` env var set
+//!   2. `ENGRAPH_LIVE_BAZEL_SYMBOLS=1` env var set
 //!
-//! Any failure that smells like a transient cold-cache issue soft-skips
-//! with diagnostic rather than failing the suite.
+//! Any failure that smells like a transient cold-cache issue soft-skips with a
+//! diagnostic rather than failing the suite.
 
 use engraph_codegraph::index_repo;
 use engraph_core::db::open_pool;
@@ -33,14 +34,6 @@ fn bazel_present() -> bool {
         }
     }
     false
-}
-
-fn binary_present(bin: &str) -> bool {
-    Command::new(bin)
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 fn live_gate_set() -> bool {
@@ -89,17 +82,13 @@ public class Hello {
 }
 
 #[test]
-fn symbol_level_java_indexes_and_preserves_target_level() {
+fn bazel_symbols_pass_runs_with_java_delegated() {
     if !live_gate_set() {
         eprintln!("skip: set ENGRAPH_LIVE_BAZEL_SYMBOLS=1 to run; cold runs cost minutes");
         return;
     }
     if !bazel_present() {
         eprintln!("skip: neither bazel nor bazelisk on PATH");
-        return;
-    }
-    if !binary_present("scip-java") {
-        eprintln!("skip: scip-java not installed");
         return;
     }
 
@@ -109,8 +98,12 @@ fn symbol_level_java_indexes_and_preserves_target_level() {
     write_java_fixture(&root);
 
     let output_base = dir.path().join("bazel-out");
+    // SAFETY: single-threaded test setup. Pin the output_base, and ensure Java
+    // is unconfigured so the delegated pass reports SkippedNotConfigured rather
+    // than trying to run a user's real command against this throwaway fixture.
     unsafe {
         std::env::set_var("ENGRAPH_BAZEL_OUTPUT_BASE", &output_base);
+        std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD");
     }
 
     let pool = open_pool(&dir.path().join("eg.db")).unwrap();
@@ -128,7 +121,8 @@ fn symbol_level_java_indexes_and_preserves_target_level() {
         "with --bazel-symbols on a Bazel root, driver should report both passes"
     );
 
-    // Target-level pass must have produced the java_library target entity.
+    // Target-level pass must have produced the java_library target entity, and
+    // the symbol load must not have wiped it.
     let target_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM entities
@@ -139,28 +133,12 @@ fn symbol_level_java_indexes_and_preserves_target_level() {
         .unwrap();
     assert_eq!(target_count, 1, "java_library target should be present");
 
-    // Symbol-level pass must have produced at least one Hello.java symbol.
-    // `name` is the SymbolInformation display_name; greet() typically shows
-    // up as "greet" (scip-java strips the parens). Match loosely.
-    let greet_rows: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM entities
-             WHERE kind='symbol' AND name LIKE '%greet%'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
+    // The delegated Java pass should soft-report skipped-not-configured (no
+    // ENGRAPH_BAZEL_SCIP_JAVA_CMD), proving the symbol pass ran without aborting.
+    let java = stats.symbol_langs.iter().find(|l| l.language == "java");
     assert!(
-        greet_rows >= 1,
-        "expected at least one symbol entity named like 'greet'"
+        java.map(|l| l.status.contains("not set")).unwrap_or(false),
+        "java symbol pass should report 'skipped (… not set)'; got {:?}",
+        java.map(|l| &l.status)
     );
-
-    // The DELETE-scoping fix in scip_loader: the symbol-level SCIP load
-    // must NOT have wiped the BAZEL_DEPENDS_ON edges the target-level pass
-    // emitted under the same project. (The fixture's single java_library
-    // has zero intra-workspace deps; in lieu, just assert no
-    // BAZEL_DEPENDS_ON edge was deleted — the test passes as long as the
-    // DELETE didn't accidentally widen.)
-    // No explicit dep edge to count; the surviving target row above
-    // proves entity rows weren't dropped.
 }

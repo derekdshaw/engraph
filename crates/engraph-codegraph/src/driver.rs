@@ -48,6 +48,12 @@ impl Driver for RustAnalyzer {
     }
 }
 
+/// Fixed `--project-version` passed to scip-python (standalone driver and the
+/// Bazel symbol pass). Intentionally overrides scip-python's resolved version
+/// (git revision / pyproject) — see `ScipPython::command` for the full
+/// rationale (crash avoidance + stable entity IDs).
+pub(crate) const SCIP_PYTHON_VERSION: &str = "0.0.0";
+
 pub struct ScipPython;
 impl Driver for ScipPython {
     fn name(&self) -> &'static str {
@@ -71,10 +77,31 @@ impl Driver for ScipPython {
             .arg("--output")
             .arg(self.output_path(repo))
             .arg("--project-name")
-            .arg(project_name);
+            .arg(project_name)
+            // Pin a fixed --project-version, deliberately OVERRIDING scip-python's
+            // resolved version (the git revision, or `[project].version` from
+            // pyproject.toml). Two reasons to override:
+            //   1. Crash avoidance: with no flag and no git repo, the version is
+            //      undefined and scip-python 0.6.6 crashes in normalizeNameOrVersion
+            //      (ScipSymbol.ts) — it then writes an empty, metadata-only index.
+            //   2. Stable entity IDs: SCIP monikers embed the version and engraph
+            //      uses monikers as entity IDs (scip_loader.rs). A git-revision
+            //      version would change every ID on each commit, churning the whole
+            //      codegraph on re-index; a fixed version keeps IDs stable.
+            // Discarding the "real" version is an accepted tradeoff: engraph treats
+            // monikers as opaque keys, so version fidelity buys nothing here.
+            .arg("--project-version")
+            .arg(SCIP_PYTHON_VERSION);
         c
     }
 }
+
+/// Fixed `--module-version` passed to scip-go by the Bazel multi-module symbol
+/// pass (`bazel_symbols::run_go_modules`). scip-go defaults this to the git
+/// short hash of the cwd repo, which embeds into every moniker — so without a
+/// pin, Go entity IDs churn on each commit. Same rationale as
+/// `SCIP_PYTHON_VERSION`. NOT applied to the standalone `ScipGo` driver below.
+pub(crate) const SCIP_GO_VERSION: &str = "0.0.0";
 
 pub struct ScipGo;
 impl Driver for ScipGo {
@@ -131,5 +158,23 @@ impl Driver for ScipJava {
             .arg(self.output_path(repo))
             .current_dir(repo);
         c
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scip_python_command_pins_project_version() {
+        let cmd = ScipPython.command(Path::new("/tmp/some-repo"));
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        // Pinning --project-version avoids scip-python's undefined-version crash.
+        assert!(args.contains(&"--project-version".to_string()));
+        assert!(args.contains(&SCIP_PYTHON_VERSION.to_string()));
+        assert!(args.contains(&"--project-name".to_string()));
     }
 }

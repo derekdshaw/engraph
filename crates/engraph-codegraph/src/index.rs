@@ -4,7 +4,7 @@ use engraph_core::db::PooledConn;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct IndexStats {
     pub entities_inserted: usize,
     pub relations_inserted: usize,
@@ -12,6 +12,19 @@ pub struct IndexStats {
     pub elapsed_ms: i64,
     /// Whichever driver name actually ran, or "prebuilt" when --scip was used.
     pub driver_name: &'static str,
+    /// Per-language outcomes of the Bazel symbol-level pass. Empty unless the
+    /// `--bazel-symbols` pass ran; lets the CLI report why symbols were (or
+    /// were not) produced instead of silently degrading to target-level.
+    pub symbol_langs: Vec<SymbolLangSummary>,
+}
+
+/// One language's result from the Bazel symbol-level pass, flattened for
+/// reporting. `status` is the `LangStatus` Display string.
+#[derive(Debug, Clone)]
+pub struct SymbolLangSummary {
+    pub language: &'static str,
+    pub status: String,
+    pub scip_bytes: usize,
 }
 
 /// One repo's outcome within a workspace run. Failed indexes are reported
@@ -77,6 +90,7 @@ pub fn index_repo(
         let mut relations = target_stats.deps_inserted;
         let mut scip_bytes_total = 0usize;
         let mut driver_name: &'static str = "bazel-query";
+        let mut symbol_langs = Vec::new();
         if bazel_symbols {
             tracing::info!("--bazel-symbols set; running symbol-level pass");
             let sym = bazel_symbols::index_bazel_symbols(conn, repo, project)?;
@@ -84,6 +98,15 @@ pub fn index_repo(
             relations += sym.relations_inserted;
             scip_bytes_total += sym.scip_bytes_total;
             driver_name = "bazel-query+symbols";
+            symbol_langs = sym
+                .results()
+                .into_iter()
+                .map(|r| SymbolLangSummary {
+                    language: r.language,
+                    status: r.status.to_string(),
+                    scip_bytes: r.scip_bytes,
+                })
+                .collect();
         }
         return Ok(IndexStats {
             entities_inserted: entities,
@@ -91,6 +114,7 @@ pub fn index_repo(
             scip_bytes: scip_bytes_total,
             elapsed_ms: start.elapsed().as_millis() as i64,
             driver_name,
+            symbol_langs,
         });
     }
 
@@ -104,6 +128,7 @@ pub fn index_repo(
             scip_bytes: bytes.len(),
             elapsed_ms: start.elapsed().as_millis() as i64,
             driver_name: "prebuilt",
+            symbol_langs: Vec::new(),
         });
     }
 
@@ -118,6 +143,7 @@ pub fn index_repo(
             scip_bytes: bytes.len(),
             elapsed_ms: start.elapsed().as_millis() as i64,
             driver_name: driver_static_name(drv.name()),
+            symbol_langs: Vec::new(),
         });
     }
 
@@ -181,6 +207,7 @@ pub fn index_repo(
         scip_bytes: total_scip_bytes,
         elapsed_ms: start.elapsed().as_millis() as i64,
         driver_name,
+        symbol_langs: Vec::new(),
     })
 }
 
@@ -279,6 +306,77 @@ pub fn index_workspace(
     Ok(stats)
 }
 
+/// What `index_repo` *would* do, without doing it. Used by `engraph index
+/// --dry-run` to preview the chosen path with no side effects.
+#[derive(Debug)]
+pub enum IndexPlan {
+    /// Bazel target-level pass (`bazel query //...`, covers the whole tree in
+    /// one pass). `symbol_langs` is empty unless `--bazel-symbols` is in effect.
+    Bazel {
+        symbol_langs: Vec<crate::bazel_symbols::SymbolLangPlan>,
+    },
+    /// Load a prebuilt SCIP file as-is (`--scip <path>`).
+    PrebuiltScip(PathBuf),
+    /// Run exactly one driver (`--lang <name>`).
+    ForcedDriver(String),
+    /// Auto-detect: run every driver whose `detect()` matched, by name.
+    AutoDrivers(Vec<&'static str>),
+    /// No driver matched and no override given — `index_repo` would bail.
+    NoDriverMatch,
+}
+
+/// Pure preview of `index_repo`'s decision. MUST mirror the precedence in
+/// `index_repo` (bazel > `--scip` > `--lang` > auto-detect); keep the two in
+/// sync. No process spawned, no Bazel server, no DB writes.
+pub fn plan_repo(
+    repo: &Path,
+    scip_override: Option<&Path>,
+    lang_override: Option<&str>,
+    bazel_symbols: bool,
+) -> IndexPlan {
+    if scip_override.is_none() && lang_override.is_none() && bazel::detect_bazel(repo) {
+        let symbol_langs = if bazel_symbols {
+            crate::bazel_symbols::plan_symbol_langs()
+        } else {
+            Vec::new()
+        };
+        return IndexPlan::Bazel { symbol_langs };
+    }
+    if let Some(p) = scip_override {
+        return IndexPlan::PrebuiltScip(p.to_path_buf());
+    }
+    if let Some(name) = lang_override {
+        return IndexPlan::ForcedDriver(name.to_string());
+    }
+    let detected: Vec<&'static str> = driver::registry()
+        .iter()
+        .filter(|d| d.detect(repo))
+        .map(|d| d.name())
+        .collect();
+    if detected.is_empty() {
+        IndexPlan::NoDriverMatch
+    } else {
+        IndexPlan::AutoDrivers(detected)
+    }
+}
+
+/// Pure preview of `index_workspace`: which repos would be discovered and what
+/// each one's plan is. Reuses the same `discover_workspace_repos` the real run
+/// uses, so the discovered set matches exactly.
+pub fn plan_workspace(
+    workspace_root: &Path,
+    bazel_symbols: bool,
+) -> Result<Vec<(PathBuf, IndexPlan)>> {
+    let repos = discover_workspace_repos(workspace_root)?;
+    Ok(repos
+        .into_iter()
+        .map(|repo| {
+            let plan = plan_repo(&repo, None, None, bazel_symbols);
+            (repo, plan)
+        })
+        .collect())
+}
+
 /// Driver names are static strings declared in driver.rs; promote the runtime
 /// `&str` back to one for telemetry.
 fn driver_static_name(name: &str) -> &'static str {
@@ -289,5 +387,116 @@ fn driver_static_name(name: &str) -> &'static str {
         "scip-typescript" => "scip-typescript",
         "scip-java" => "scip-java",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn touch(dir: &Path, name: &str) {
+        std::fs::write(dir.join(name), "").unwrap();
+    }
+
+    #[test]
+    fn plan_repo_bazel_wins_over_lang_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path(), "MODULE.bazel");
+        touch(dir.path(), "Cargo.toml"); // Bazel still wins.
+        match plan_repo(dir.path(), None, None, false) {
+            IndexPlan::Bazel { symbol_langs } => assert!(symbol_langs.is_empty()),
+            other => panic!("expected Bazel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_repo_bazel_symbols_lists_python() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path(), "WORKSPACE.bazel");
+        match plan_repo(dir.path(), None, None, true) {
+            IndexPlan::Bazel { symbol_langs } => {
+                let langs: Vec<&str> = symbol_langs.iter().map(|l| l.language).collect();
+                assert!(langs.contains(&"python"));
+                assert!(langs.contains(&"java"));
+            }
+            other => panic!("expected Bazel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_repo_auto_detects_single_driver() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path(), "Cargo.toml");
+        match plan_repo(dir.path(), None, None, false) {
+            IndexPlan::AutoDrivers(names) => assert_eq!(names, vec!["rust-analyzer"]),
+            other => panic!("expected AutoDrivers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_repo_auto_detects_multiple_drivers() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path(), "pyproject.toml");
+        touch(dir.path(), "package.json");
+        touch(dir.path(), "tsconfig.json");
+        match plan_repo(dir.path(), None, None, false) {
+            IndexPlan::AutoDrivers(names) => {
+                assert!(names.contains(&"scip-python"));
+                assert!(names.contains(&"scip-typescript"));
+            }
+            other => panic!("expected AutoDrivers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_repo_scip_override_beats_drivers() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path(), "Cargo.toml");
+        let scip = dir.path().join("prebuilt.scip");
+        match plan_repo(dir.path(), Some(&scip), None, false) {
+            IndexPlan::PrebuiltScip(p) => assert_eq!(p, scip),
+            other => panic!("expected PrebuiltScip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_repo_lang_override_forces_driver() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path(), "Cargo.toml");
+        match plan_repo(dir.path(), None, Some("scip-go"), false) {
+            IndexPlan::ForcedDriver(name) => assert_eq!(name, "scip-go"),
+            other => panic!("expected ForcedDriver, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_repo_no_match_on_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            plan_repo(dir.path(), None, None, false),
+            IndexPlan::NoDriverMatch
+        ));
+    }
+
+    #[test]
+    fn plan_workspace_discovers_child_repos() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("crate-a");
+        std::fs::create_dir(&child).unwrap();
+        touch(&child, "Cargo.toml");
+        let plans = plan_workspace(root.path(), false).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].0, child);
+        assert!(matches!(plans[0].1, IndexPlan::AutoDrivers(_)));
+    }
+
+    #[test]
+    fn plan_workspace_bazel_root_collapses_to_root() {
+        let root = tempfile::tempdir().unwrap();
+        touch(root.path(), "MODULE.bazel");
+        let plans = plan_workspace(root.path(), true).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].0, root.path());
+        assert!(matches!(plans[0].1, IndexPlan::Bazel { .. }));
     }
 }

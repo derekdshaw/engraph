@@ -76,7 +76,19 @@ The pre-bash parser handles common command shapes that would otherwise misroute.
 
 **Bazel monorepos:** `engraph index` on a directory containing `WORKSPACE`, `WORKSPACE.bazel`, or `MODULE.bazel` runs `bazel query --output=streamed_jsonproto 'kind(rule, //...)'` and writes one `bazel_target` entity per rule target plus `BAZEL_DEPENDS_ON` edges. No build runs. Fast and deterministic.
 
-`engraph index --bazel-symbols` adds symbol-level indexing on top by driving `scip-java` / `scip-go` / `scip-typescript` against the same Bazel workspace. **Defaults: on for `--workspace` runs** (a workspace index is already a one-time commitment, and the symbol pass is the only path to function-level data inside Bazel), **off for single-repo `engraph index <repo>`** (the target-level Bazel pass is fast and deterministic by itself). Use `--no-bazel-symbols` to disable inside a workspace run.
+`engraph index --bazel-symbols` adds symbol-level indexing on top of the target-level pass. **Defaults: on for `--workspace` runs** (a workspace index is already a one-time commitment, and the symbol pass is the only path to function-level data inside Bazel), **off for single-repo `engraph index <repo>`** (the target-level Bazel pass is fast and deterministic by itself). Use `--no-bazel-symbols` to disable inside a workspace run. Each language is driven the way that actually works on real Bazel monorepos:
+
+- **Go** — enumerates every `go.mod` under the workspace and runs `scip-go` per module, rebasing each module's paths to repo-root before merging. The report's `symbol[go]: indexed N go.mod modules of M go targets` line makes the coverage gap visible: gazelle-managed `go_library` targets without a `go.mod` are unreachable by scip-go.
+- **Java** — *delegated*. A Java SCIP build is too repo-specific to bake in (a Bazel SemanticDB aspect, Maven, Gradle, and custom annotation-processor toolchains all differ), so engraph runs the command named by **`ENGRAPH_BAZEL_SCIP_JAVA_CMD`** as `<cmd> <repo> <out.scip>` and merges the SCIP it writes; unset reports `skipped (… not set)`. A ready-made Bazel driver — the scip-java SemanticDB aspect patched for Bazel 8 + custom annotation-processor toolchains — ships as **`docs/examples/scip-java-bazel-index.sh`**. Point the env var at it (optionally scope with `ENGRAPH_BAZEL_SCIP_JAVA_TARGETS`, default first-party Java roots):
+
+  ```sh
+  export ENGRAPH_BAZEL_SCIP_JAVA_CMD="$PWD/docs/examples/scip-java-bazel-index.sh"
+  export ENGRAPH_BAZEL_SCIP_JAVA_TARGETS='//src/java/...'   # optional; scope to your repo's first-party Java roots
+  engraph index --bazel-symbols ~/src/monorepo
+  ```
+
+  Any other Java build system plugs in by pointing the same env var at its own SCIP-producing command — engraph stays build-system-agnostic.
+- **TypeScript / Python** — run their standalone indexers against the workspace root (best-effort; `rules_ts` `node_modules` and `rules_python` venv resolution are follow-ups).
 
 ### Hybrid retrieval
 
@@ -322,7 +334,7 @@ Key test locations:
 | Driver live end-to-end (soft-skips when indexer absent) | `engraph-codegraph/tests/drivers_live.rs` |
 | Cross-repo workspace discovery and CALLS edge annotation | `engraph-codegraph/tests/workspace_cross_repo.rs` |
 | Bazel target-level index and re-index idempotency | `engraph-codegraph/tests/bazel_live.rs` |
-| Bazel symbol-level Java end-to-end (gated behind env var) | `engraph-codegraph/tests/bazel_symbols_live.rs` |
+| Bazel symbol pass runs with Java delegated (gated behind env var) | `engraph-codegraph/tests/bazel_symbols_live.rs` |
 
 ---
 
