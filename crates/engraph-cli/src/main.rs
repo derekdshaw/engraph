@@ -105,6 +105,12 @@ enum Cmd {
         /// Use a prebuilt SCIP file instead of running a driver
         #[arg(long)]
         scip: Option<PathBuf>,
+        /// Load externally-produced SCIP files from a manifest (TSV:
+        /// `<repo-relative-root>\t<scip-file>` per line; `#` comments allowed).
+        /// engraph rebases each to repo-root, merges, and loads once. Mutually
+        /// exclusive with --scip / --lang / --workspace / --bazel-symbols.
+        #[arg(long, conflicts_with_all = ["scip", "lang", "workspace", "bazel_symbols"])]
+        scip_manifest: Option<PathBuf>,
         /// Force a driver: rust-analyzer, scip-python, scip-go, scip-typescript, scip-java
         #[arg(long)]
         lang: Option<String>,
@@ -429,6 +435,7 @@ fn main() -> Result<()> {
         Cmd::Index {
             repo,
             scip,
+            scip_manifest,
             lang,
             project,
             workspace,
@@ -454,6 +461,21 @@ fn main() -> Result<()> {
                 if let Some(root) = &workspace {
                     let plans = engraph_codegraph::plan_workspace(root, effective_bazel_symbols)?;
                     print_workspace_plan(root, &plans);
+                } else if let Some(m) = &scip_manifest {
+                    let text = std::fs::read_to_string(m)?;
+                    let entries: Vec<&str> = text
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                        .collect();
+                    println!(
+                        "dry-run: scip-manifest {} ({} entries)",
+                        m.display(),
+                        entries.len()
+                    );
+                    for e in &entries {
+                        println!("  {e}");
+                    }
                 } else {
                     let plan = engraph_codegraph::plan_repo(
                         &repo,
@@ -509,6 +531,32 @@ fn main() -> Result<()> {
                 if stats.err_count() > 0 && stats.ok_count() == 0 {
                     anyhow::bail!("every repo in the workspace failed to index");
                 }
+            } else if let Some(m) = &scip_manifest {
+                let canonical = repo.canonicalize().unwrap_or_else(|_| repo.clone());
+                let project_key =
+                    project.unwrap_or_else(|| canonical.to_string_lossy().into_owned());
+                let stats = engraph_codegraph::index_scip_manifest(&conn, m, &project_key)?;
+                telemetry::record_event(
+                    &conn,
+                    EventInput {
+                        session_id: session_id.as_deref(),
+                        kind: EventKind::Index,
+                        feature: "codegraph_index",
+                        filter_id: Some(stats.driver_name),
+                        input_tokens: stats.scip_bytes as i64,
+                        output_tokens: 0,
+                        latency_ms: start.elapsed().as_millis() as i64,
+                    },
+                )?;
+                println!(
+                    "indexed {} ({} entities, {} relations, {} SCIP bytes, {}ms, driver={})",
+                    project_key,
+                    stats.entities_inserted,
+                    stats.relations_inserted,
+                    stats.scip_bytes,
+                    stats.elapsed_ms,
+                    stats.driver_name
+                );
             } else {
                 let canonical = repo.canonicalize().unwrap_or_else(|_| repo.clone());
                 let project_key =

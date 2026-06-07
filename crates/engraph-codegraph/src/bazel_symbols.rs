@@ -626,7 +626,7 @@ fn walk_go_modules(repo: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
 /// left alone (tolerates scip-go builds that already emit repo-relative paths).
 /// Monikers (which encode the module *path*, not the file path) and
 /// `external_symbols` are untouched. Empty prefix (repo-root module) is a no-op.
-fn rebase_documents(bytes: &[u8], prefix: &Path) -> Result<Vec<u8>> {
+pub(crate) fn rebase_documents(bytes: &[u8], prefix: &Path) -> Result<Vec<u8>> {
     use protobuf::Message;
     use scip::types::Index;
 

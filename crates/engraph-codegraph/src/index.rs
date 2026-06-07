@@ -211,6 +211,99 @@ pub fn index_repo(
     })
 }
 
+/// Load a manifest of externally-produced SCIP files, each rooted at a
+/// repo-relative subdir. Every entry's document paths are rebased to repo-root
+/// so per-project indexers don't collide, all entries are merged, and the
+/// result is loaded once — the loader's per-project DELETE means a single
+/// merged load is required.
+///
+/// Manifest format: one entry per line, `<repo-relative-root>\t<scip-file>`.
+/// Blank lines and lines starting with `#` are ignored. A root of `.` or empty
+/// means repo-root (no rebase). Relative `<scip-file>` paths resolve against the
+/// manifest's own directory.
+pub fn index_scip_manifest(
+    conn: &PooledConn,
+    manifest: &Path,
+    project: &str,
+) -> Result<IndexStats> {
+    let start = Instant::now();
+    let (merged, scip_bytes_in) = build_manifest_scip(manifest)?;
+    let load_stats = scip_loader::load(conn, project, &merged)?;
+    Ok(IndexStats {
+        entities_inserted: load_stats.entities_inserted,
+        relations_inserted: load_stats.relations_inserted,
+        scip_bytes: scip_bytes_in,
+        elapsed_ms: start.elapsed().as_millis() as i64,
+        driver_name: "scip-manifest",
+        symbol_langs: Vec::new(),
+    })
+}
+
+/// Read every SCIP named in `manifest`, rebase each by its entry's root prefix,
+/// and merge into one SCIP blob. Returns the merged bytes and the total input
+/// byte count. DB-free so it can be unit-tested directly.
+fn build_manifest_scip(manifest: &Path) -> Result<(Vec<u8>, usize)> {
+    let text = std::fs::read_to_string(manifest)
+        .with_context(|| format!("reading manifest {}", manifest.display()))?;
+    let base = manifest.parent().unwrap_or_else(|| Path::new("."));
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    let mut scip_bytes_in = 0usize;
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (root, scip_path) = parse_manifest_line(line, base, manifest, i + 1)?;
+        let bytes = std::fs::read(&scip_path).with_context(|| {
+            format!(
+                "reading SCIP {} ({}:{})",
+                scip_path.display(),
+                manifest.display(),
+                i + 1
+            )
+        })?;
+        scip_bytes_in += bytes.len();
+        let rebased = bazel_symbols::rebase_documents(&bytes, Path::new(&root))
+            .with_context(|| format!("rebasing {} under root '{root}'", scip_path.display()))?;
+        parts.push(rebased);
+    }
+    if parts.is_empty() {
+        anyhow::bail!("manifest {} has no entries", manifest.display());
+    }
+    let merged = bazel_symbols::merge_scip_bytes(&parts)?;
+    Ok((merged, scip_bytes_in))
+}
+
+/// Parse one `<repo-relative-root>\t<scip-file>` line. `.`/empty root normalizes
+/// to empty (no rebase). Relative scip paths resolve against `base`.
+fn parse_manifest_line(
+    line: &str,
+    base: &Path,
+    manifest: &Path,
+    lineno: usize,
+) -> Result<(String, PathBuf)> {
+    let (root, path) = line.split_once('\t').ok_or_else(|| {
+        anyhow::anyhow!(
+            "{}:{}: expected '<root>\\t<scip-file>', got: {line}",
+            manifest.display(),
+            lineno
+        )
+    })?;
+    let path = path.trim();
+    if path.is_empty() {
+        anyhow::bail!("{}:{}: empty SCIP path", manifest.display(), lineno);
+    }
+    let root = root.trim();
+    let root = if root == "." { String::new() } else { root.to_string() };
+    let p = Path::new(path);
+    let scip_path = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base.join(p)
+    };
+    Ok((root, scip_path))
+}
+
 fn run_driver_to_scip(repo: &Path, drv: &dyn driver::Driver) -> Result<Vec<u8>> {
     let mut cmd = drv.command(repo);
     tracing::info!(driver = drv.name(), ?cmd, "running SCIP indexer");
@@ -498,5 +591,86 @@ mod tests {
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].0, root.path());
         assert!(matches!(plans[0].1, IndexPlan::Bazel { .. }));
+    }
+
+    fn write_scip(path: &Path, doc_paths: &[&str]) {
+        use protobuf::Message;
+        use scip::types::{Document, Index};
+        let mut idx = Index::new();
+        for p in doc_paths {
+            let mut d = Document::new();
+            d.relative_path = (*p).to_string();
+            idx.documents.push(d);
+        }
+        std::fs::write(path, idx.write_to_bytes().unwrap()).unwrap();
+    }
+
+    fn merged_doc_paths(bytes: &[u8]) -> Vec<String> {
+        use protobuf::Message;
+        use scip::types::Index;
+        Index::parse_from_bytes(bytes)
+            .unwrap()
+            .documents
+            .iter()
+            .map(|d| d.relative_path.clone())
+            .collect()
+    }
+
+    #[test]
+    fn manifest_rebases_per_root_and_merges() {
+        let dir = tempfile::tempdir().unwrap();
+        let go = dir.path().join("go.scip");
+        let py = dir.path().join("py.scip");
+        write_scip(&go, &["pkg/widget.go"]); // root "." -> unchanged
+        write_scip(&py, &["bar.py"]); // root "py/foo" -> prefixed
+        let manifest = dir.path().join("m.tsv");
+        std::fs::write(
+            &manifest,
+            format!(
+                "# comment\n\n.\t{}\npy/foo\t{}\n",
+                go.display(),
+                py.display()
+            ),
+        )
+        .unwrap();
+
+        let (merged, n) = build_manifest_scip(&manifest).unwrap();
+        assert!(n > 0);
+        let paths = merged_doc_paths(&merged);
+        assert_eq!(paths.len(), 2, "{paths:?}");
+        assert!(paths.contains(&"pkg/widget.go".to_string()), "{paths:?}");
+        assert!(paths.contains(&"py/foo/bar.py".to_string()), "{paths:?}");
+    }
+
+    #[test]
+    fn manifest_relative_scip_paths_resolve_against_manifest_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        write_scip(&dir.path().join("a.scip"), &["x.go"]);
+        let manifest = dir.path().join("m.tsv");
+        std::fs::write(&manifest, ".\ta.scip\n").unwrap(); // relative path
+        let (merged, _) = build_manifest_scip(&manifest).unwrap();
+        assert_eq!(merged_doc_paths(&merged), vec!["x.go".to_string()]);
+    }
+
+    #[test]
+    fn manifest_empty_or_missing_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty.tsv");
+        std::fs::write(&empty, "# only a comment\n\n").unwrap();
+        assert!(build_manifest_scip(&empty).is_err());
+
+        let bad = dir.path().join("bad.tsv");
+        std::fs::write(&bad, ".\t/no/such/file.scip\n").unwrap();
+        assert!(build_manifest_scip(&bad).is_err());
+    }
+
+    #[test]
+    fn manifest_line_requires_tab_and_normalizes_dot() {
+        let base = Path::new("/tmp");
+        let manifest = Path::new("/tmp/m.tsv");
+        assert!(parse_manifest_line("no-tab-here", base, manifest, 1).is_err());
+        let (root, path) = parse_manifest_line(".\tx.scip", base, manifest, 1).unwrap();
+        assert_eq!(root, ""); // "." normalized to empty (no rebase)
+        assert_eq!(path, Path::new("/tmp/x.scip"));
     }
 }

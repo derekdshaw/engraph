@@ -1140,7 +1140,11 @@ failures are warnings (the indexer binary might be missing, or the
 language's project structure might be malformed) and the load proceeds
 with whatever did succeed; if **every** driver fails we bail. `--lang
 <name>` still pins to one driver as before, and `--scip <path>` skips
-driver dispatch entirely.
+driver dispatch entirely. `--scip-manifest <path>` ingests a set of
+externally-produced SCIP files (TSV `<repo-relative-root>` + `<scip-file>`
+lines): each is rebased to repo-root via `rebase_documents`, all are merged
+via `merge_scip_bytes`, and the result loads once — for external orchestrators
+that produce SCIP per language/module themselves.
 
 ### 14.3 SCIP loader — two-pass
 
