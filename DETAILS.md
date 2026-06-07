@@ -1472,7 +1472,11 @@ flag is still available to opt in on a single-repo run.
   collide otherwise). Per-module failures are isolated; `--module-version`
   is pinned (like `SCIP_PYTHON_VERSION`) for cross-commit-stable IDs.
   `IndexedModules { indexed, failed, targets }` surfaces the gazelle gap:
-  go.mod-rooted modules « `go_library` targets.
+  go.mod-rooted modules « `go_library` targets. When
+  `ENGRAPH_BAZEL_SCIP_GO_CMD` is set the Go pass delegates to it instead
+  (identical contract to Java, via the shared `run_delegated`), so a repo
+  reaches the gazelle bulk through its own Bazel→scip-go glue; unset → the
+  native multi-module pass above.
 - **Java** (`run_java`, delegated). A Java SCIP build is too repo-specific
   to bake in — a Bazel SemanticDB aspect, Maven, Gradle, and custom
   annotation-processor toolchains all differ, and stock scip-java's bundled

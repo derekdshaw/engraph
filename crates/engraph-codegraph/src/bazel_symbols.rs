@@ -17,12 +17,14 @@
 //!   it writes. The command owns all build-system knowledge; engraph stays
 //!   agnostic. Unset → reported not-configured. A ready-made Bazel-aspect driver
 //!   ships in `docs/examples/scip-java-bazel-index.sh`.
-//! - **Go**: enumerate every `go.mod` in the workspace (`discover_go_modules`,
-//!   skipping symlinked / `vendor` / `testdata` / hidden trees) and run
-//!   `scip-go index --module-root <dir>` per module, rebasing each module's
-//!   document paths back to repo-root before merging. gazelle-managed
-//!   `go_library` targets that have no `go.mod` are unreachable by scip-go;
-//!   they are reported as un-indexed via the `go targets` count in the status.
+//! - **Go**: if `ENGRAPH_BAZEL_SCIP_GO_CMD` is set, delegated exactly like Java
+//!   (it owns the Bazel→scip-go glue and reaches gazelle-managed `go_library`
+//!   targets that have no `go.mod`). Unset → the native multi-module pass:
+//!   enumerate every `go.mod` (`discover_go_modules`, skipping symlinked /
+//!   `vendor` / `testdata` / hidden trees), run `scip-go index --module-root
+//!   <dir>` per module, and rebase each module's document paths back to
+//!   repo-root before merging. The native pass can't see `go_library` targets
+//!   without a `go.mod`; that gap is reported via the `go targets` count.
 //! - **TypeScript**: `scip-typescript index` at the workspace root.
 //!   `rules_ts`-based repos may need a prior `bazel build //...` to
 //!   populate `bazel-bin/<pkg>/node_modules` symlinks; documented
@@ -201,16 +203,14 @@ pub fn index_bazel_symbols(
 
     let mut parts: Vec<Vec<u8>> = Vec::new();
     for spec in LANGS {
-        // Go takes the multi-module path (enumerate go.mod, index each, rebase
-        // paths, merge); the other three are single-shot at the workspace root.
-        let outcome = if spec.language == "go" {
-            run_go_modules(spec, repo, &bazel, &scip_dir, &mut parts)
-        } else if spec.language == "java" {
-            // Java's SCIP build is repo-specific; delegate to a configured
-            // command rather than baking any one monorepo's toolchain in.
-            run_java(spec, repo, &scip_dir, &mut parts)
-        } else {
-            run_language(spec, repo, &bazel, &scip_dir, &mut parts)
+        // Go: delegate if ENGRAPH_BAZEL_SCIP_GO_CMD is set, else the native
+        // multi-module pass. Java: always delegated (its SCIP build is
+        // repo-specific). TS / Python: single-shot standalone indexer at the
+        // workspace root.
+        let outcome = match spec.language {
+            "go" => run_go(spec, repo, &bazel, &scip_dir, &mut parts),
+            "java" => run_java(spec, repo, &scip_dir, &mut parts),
+            _ => run_language(spec, repo, &bazel, &scip_dir, &mut parts),
         };
         let result = match outcome {
             Ok(r) => r,
@@ -306,21 +306,22 @@ fn run_language(
     })
 }
 
-/// Java symbol pass. Java's SCIP build is too repo-specific to bake into engraph
-/// — a Bazel SemanticDB aspect, Maven, Gradle, and custom annotation-processor
-/// toolchains all differ — so engraph delegates instead of hard-wiring any one
-/// monorepo's setup. It runs the command named by `ENGRAPH_BAZEL_SCIP_JAVA_CMD`
-/// as `<cmd> <repo> <out.scip>` and merges whatever SCIP that command writes; the
-/// command owns all build-system knowledge. Unset → reported as not-configured
-/// (no silent degradation). A ready-made Bazel-aspect driver lives in
-/// `docs/examples/scip-java-bazel-index.sh`.
-fn run_java(
+/// Delegated symbol pass, shared by Java and Go. The language's SCIP build is too
+/// repo-specific to bake into engraph (a Bazel aspect vs Maven/Gradle, hermetic Go
+/// deps vs GOPATH, custom toolchains all differ), so engraph runs the command named
+/// by `cmd_env` as `<cmd> <repo> <out.scip>` and merges whatever SCIP that command
+/// writes; the command owns all build-system knowledge. The command must emit
+/// repo-root-relative document paths (no rebasing happens here). Unset → reported as
+/// not-configured (no silent degradation). Ready-made Bazel drivers live under
+/// `docs/examples/`.
+fn run_delegated(
     spec: &LangSpec,
     repo: &Path,
     scip_dir: &Path,
     parts: &mut Vec<Vec<u8>>,
+    cmd_env: &'static str,
+    out_name: &str,
 ) -> Result<LangIndexResult> {
-    const CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_JAVA_CMD";
     let start = Instant::now();
     let skip = |status: LangStatus| LangIndexResult {
         language: spec.language,
@@ -329,12 +330,12 @@ fn run_java(
         status,
     };
 
-    let cmd = match std::env::var(CMD_ENV) {
+    let cmd = match std::env::var(cmd_env) {
         Ok(c) if !c.trim().is_empty() => c,
-        _ => return Ok(skip(LangStatus::SkippedNotConfigured { env: CMD_ENV })),
+        _ => return Ok(skip(LangStatus::SkippedNotConfigured { env: cmd_env })),
     };
 
-    let out_path = scip_dir.join("index-java.scip");
+    let out_path = scip_dir.join(out_name);
     let _ = std::fs::remove_file(&out_path); // ignore-if-absent
 
     // Run `<cmd> <repo> <out>` through a shell so CMD may carry its own flags.
@@ -347,13 +348,13 @@ fn run_java(
         .arg(&out_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    tracing::info!(%cmd, "running configured Java SCIP command");
+    tracing::info!(%cmd, env = cmd_env, "running configured SCIP command");
     let output = c
         .output()
-        .with_context(|| format!("spawning {CMD_ENV} command"))?;
+        .with_context(|| format!("spawning {cmd_env} command"))?;
     if !output.status.success() {
         return Ok(skip(LangStatus::Failed(format!(
-            "{CMD_ENV} command exited with {}\nstderr (tail):\n{}",
+            "{cmd_env} command exited with {}\nstderr (tail):\n{}",
             output.status,
             tail_lines(&String::from_utf8_lossy(&output.stderr), 25)
         ))));
@@ -371,9 +372,53 @@ fn run_java(
             })
         }
         _ => Ok(skip(LangStatus::Failed(format!(
-            "{CMD_ENV} command succeeded but wrote no SCIP to {}",
+            "{cmd_env} command succeeded but wrote no SCIP to {}",
             out_path.display()
         )))),
+    }
+}
+
+/// Java symbol pass — always delegated (Java has no native fallback). See
+/// `run_delegated`. A ready-made Bazel-aspect driver lives in
+/// `docs/examples/scip-java-bazel-index.sh`.
+fn run_java(
+    spec: &LangSpec,
+    repo: &Path,
+    scip_dir: &Path,
+    parts: &mut Vec<Vec<u8>>,
+) -> Result<LangIndexResult> {
+    run_delegated(
+        spec,
+        repo,
+        scip_dir,
+        parts,
+        "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
+        "index-java.scip",
+    )
+}
+
+/// Go symbol pass. If `ENGRAPH_BAZEL_SCIP_GO_CMD` is set, delegate the whole pass
+/// to it — the only way to reach gazelle-managed `go_library` targets that have no
+/// `go.mod` (scip-go needs a module root *and* Bazel-resolved deps, both
+/// repo-specific). The command owns the Bazel→scip-go glue and emits
+/// repo-root-relative SCIP. Unset → the native multi-module pass
+/// (`run_go_modules`). A ready-made Bazel driver lives in
+/// `docs/examples/scip-go-bazel-index.sh`.
+fn run_go(
+    spec: &LangSpec,
+    repo: &Path,
+    bazel: &Path,
+    scip_dir: &Path,
+    parts: &mut Vec<Vec<u8>>,
+) -> Result<LangIndexResult> {
+    const CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_GO_CMD";
+    let configured = std::env::var(CMD_ENV)
+        .map(|c| !c.trim().is_empty())
+        .unwrap_or(false);
+    if configured {
+        run_delegated(spec, repo, scip_dir, parts, CMD_ENV, "index-go.scip")
+    } else {
+        run_go_modules(spec, repo, bazel, scip_dir, parts)
     }
 }
 
@@ -824,6 +869,38 @@ mod tests {
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_java(spec, tmp.path(), &scip_dir, &mut parts).unwrap();
         unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
+        assert_eq!(r.status, LangStatus::Indexed);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0], scip);
+    }
+
+    #[test]
+    fn run_go_delegates_to_configured_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = LANGS.iter().find(|s| s.language == "go").unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        // run_go only spawns `bazel` on the native (env-unset) branch; the
+        // delegated branch below never touches it, so a bogus path is fine.
+        let bazel = Path::new("/nonexistent/bazel");
+
+        // A fake command that writes a known SCIP to its 2nd arg → delegated and
+        // merged. SAFETY: single-threaded; no other test reads or writes
+        // ENGRAPH_BAZEL_SCIP_GO_CMD.
+        let scip = make_index(&["pkg/widget.go"], &[]);
+        let scip_path = tmp.path().join("fake.scip");
+        std::fs::write(&scip_path, &scip).unwrap();
+        let cmd_path = tmp.path().join("fake-go-cmd.sh");
+        std::fs::write(&cmd_path, format!("cp \"{}\" \"$2\"\n", scip_path.display())).unwrap();
+        unsafe {
+            std::env::set_var(
+                "ENGRAPH_BAZEL_SCIP_GO_CMD",
+                format!("sh \"{}\"", cmd_path.display()),
+            )
+        };
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_go(spec, tmp.path(), bazel, &scip_dir, &mut parts).unwrap();
+        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_GO_CMD") };
         assert_eq!(r.status, LangStatus::Indexed);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], scip);

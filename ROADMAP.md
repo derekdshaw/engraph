@@ -71,11 +71,9 @@ The codegraph (single-repo, cross-repo, and Bazel polyglot) is shipped, now incl
 
 ### Deeper Go support
 
-Phase A indexes `go.mod`-rooted modules, but on gazelle-managed `rules_go` monorepos that's the *minority* of the code — a large gazelle repo can have thousands of `go_library` targets but only a handful of `go.mod` files. `LangStatus::IndexedModules` already surfaces the gap (`indexed N go.mod modules of M go targets`). Closing it:
+The native pass indexes `go.mod`-rooted modules, but on gazelle-managed `rules_go` monorepos that's the *minority* of the code — a large gazelle repo can have thousands of `go_library` targets but only a handful of `go.mod` files. `LangStatus::IndexedModules` surfaces the gap (`indexed N go.mod modules of M go targets`). The **delegate route is shipped**: set `ENGRAPH_BAZEL_SCIP_GO_CMD` and engraph runs it (mirroring Java), letting a repo drive scip-go through its own Bazel / resolved-module-graph glue and feed back merged SCIP (`docs/examples/scip-go-bazel-index.sh`). Remaining follow-ups:
 
-- **Gazelle bulk (no `go.mod`).** scip-go needs a module root; gazelle expresses the module graph in BUILD files + `# gazelle:prefix`, not `go.mod`. Two routes:
-  - *Delegate* (consistent with Java): an `ENGRAPH_BAZEL_SCIP_GO_CMD` hook so a repo drives scip-go through its own `bazel run @rules_go//go` / resolved module graph and feeds engraph the merged SCIP. Lowest coupling, repo owns the build-system glue.
-  - *Synthesize* an ephemeral `go.mod` per gazelle prefix from `go_library` importpaths, run scip-go per synthesized root, clean up. Fully in-engraph but fiddly, and must not mutate the target repo.
+- **Synthesize (alternative to delegation).** Instead of a repo-supplied command, derive an ephemeral `go.mod` per gazelle prefix from `go_library` importpaths, run scip-go per synthesized root, clean up. Fully in-engraph but fiddly, can't resolve hermetic Bazel deps without extra glue, and must not mutate the target repo.
 - **Cross-module resolution.** Verify monikers link across the merged per-module SCIP streams — a call from module A into a type defined in module B should resolve, not dangle — and that vendored copies don't double-count.
 - **Build-tag / `GOOS`·`GOARCH` awareness.** scip-go indexes one build configuration; platform-gated files (`_linux.go`, `//go:build` tags) are missed. Document the limitation; optionally index multiple configs and merge.
 - **Optional test-file coverage.** The pass mirrors Java's `--skip-tests`; add a toggle to index `_test.go` for test→impl edges when wanted.
