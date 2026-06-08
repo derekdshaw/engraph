@@ -958,11 +958,15 @@ wrapped command writes a row.
 
 ### 10.2 Savings semantics
 
-`saved_tokens = input - output` is only meaningful for kinds where the
-input is the pre-compression size and the output is the post-compression
-size: `compress` and `wrapped_cmd`. `retrieve` and `hook` have no
-savings semantic (input is zero or doesn't represent the same thing), so
-`GainRow::saved_tokens = None` for them, rendered as `-` in the table.
+`saved_tokens = input - output` is meaningful where `input` is the
+pre-compression / avoided-read baseline and `output` is what was produced:
+`compress` and `wrapped_cmd` (compression), plus the `subgraph` feature — the
+codegraph neighborhood stands in for reading the symbol's definition file, so
+`input` is that file's token count (`subgraph::avoided_read_tokens`, a
+conservative floor; `0` when the file can't be read) and `output` is the
+subgraph body, clamped at `0`. Other `retrieve` rows (`recall`) and the
+`hook` / `index` rows have no savings semantic (input is zero or not
+comparable), so `GainRow::saved_tokens = None`, rendered as `-` in the table.
 
 This is the contract `engraph gain` is built around. The `TOTAL_SAVED`
 row at the bottom sums only the rows that contributed a numeric

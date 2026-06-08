@@ -38,16 +38,21 @@ pub struct GainRow {
     pub count: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
-    /// Token savings. Defined only for kinds where `input` represents the
-    /// pre-compression size and `output` represents the post-compression size
-    /// (`compress`, `wrapped_cmd`). `None` for kinds where the diff has no
-    /// savings semantic (`retrieve`, `hook`, `index`).
+    /// Token savings. Defined where `input` is the pre-compression / avoided-read
+    /// baseline and `output` is the produced size: `compress` and `wrapped_cmd`
+    /// (compression), plus the `subgraph` feature (the codegraph neighborhood
+    /// stands in for reading the symbol's definition file). `None` for everything
+    /// else (`recall`, other `hook` / `index` rows), where the diff has no savings
+    /// semantic.
     pub saved_tokens: Option<i64>,
 }
 
-fn saved_for(kind: &str, input: i64, output: i64) -> Option<i64> {
-    match kind {
-        "compress" | "wrapped_cmd" => Some(input - output),
+fn saved_for(kind: &str, feature: &str, input: i64, output: i64) -> Option<i64> {
+    match (kind, feature) {
+        ("compress" | "wrapped_cmd", _) => Some(input - output),
+        // The codegraph subgraph replaces reading a symbol's definition file:
+        // `input` is that avoided-read baseline, `output` the subgraph body.
+        (_, "subgraph") => Some((input - output).max(0)),
         _ => None,
     }
 }
@@ -66,7 +71,7 @@ pub fn gain_report(conn: &PooledConn) -> Result<Vec<GainRow>> {
             let count: i64 = r.get(2)?;
             let input_tokens: i64 = r.get(3)?;
             let output_tokens: i64 = r.get(4)?;
-            let saved_tokens = saved_for(&kind, input_tokens, output_tokens);
+            let saved_tokens = saved_for(&kind, &feature, input_tokens, output_tokens);
             Ok(GainRow {
                 kind,
                 feature,
@@ -153,5 +158,51 @@ mod tests {
         .unwrap();
         let rows = gain_report(&conn).unwrap();
         assert_eq!(rows[0].saved_tokens, None);
+    }
+
+    #[test]
+    fn subgraph_feature_is_credited_and_clamped() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        // subgraph stands in for a 1000-token def file, emits a 150-token body.
+        record_event(
+            &conn,
+            EventInput {
+                session_id: None,
+                kind: EventKind::Retrieve,
+                feature: "subgraph",
+                filter_id: Some("subgraph"),
+                input_tokens: 1000,
+                output_tokens: 150,
+                latency_ms: 3,
+            },
+        )
+        .unwrap();
+        let rows = gain_report(&conn).unwrap();
+        assert_eq!(rows[0].saved_tokens, Some(850));
+    }
+
+    #[test]
+    fn subgraph_savings_clamp_at_zero_when_baseline_unmeasurable() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        // input=0 (file unreadable) must not read as a negative saving.
+        record_event(
+            &conn,
+            EventInput {
+                session_id: None,
+                kind: EventKind::Retrieve,
+                feature: "subgraph",
+                filter_id: Some("subgraph"),
+                input_tokens: 0,
+                output_tokens: 150,
+                latency_ms: 3,
+            },
+        )
+        .unwrap();
+        let rows = gain_report(&conn).unwrap();
+        assert_eq!(rows[0].saved_tokens, Some(0));
     }
 }

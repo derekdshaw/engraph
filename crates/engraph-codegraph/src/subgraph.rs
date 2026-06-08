@@ -74,6 +74,27 @@ pub fn subgraph_for(conn: &PooledConn, symbol: &str, max_nodes: usize) -> Result
     })
 }
 
+/// Conservative estimate of the source tokens a caller is spared by reading this
+/// neighborhood instead of grepping the symbol and opening its definition file.
+/// Returns the token count of the matched symbol's definition file (resolved as
+/// `project/file_path`) — the file a grep→Read loop would have pulled in. Returns
+/// 0 when there's no unique match or the file can't be read, so `gain` only ever
+/// credits a baseline it can actually measure, never a fabricated one. This is a
+/// floor (it ignores the neighbor files subgraph also spares you from opening).
+pub fn avoided_read_tokens(n: &Neighborhood) -> usize {
+    if n.matches.len() != 1 {
+        return 0;
+    }
+    let m = &n.matches[0];
+    let (Some(project), Some(file)) = (m.project.as_deref(), m.file_path.as_deref()) else {
+        return 0;
+    };
+    match std::fs::read_to_string(std::path::Path::new(project).join(file)) {
+        Ok(text) => engraph_core::tokens::count(&text) as usize,
+        Err(_) => 0,
+    }
+}
+
 fn resolve_matches(conn: &PooledConn, symbol: &str) -> Result<Vec<EntityRow>> {
     // Match by name first (the common case), then by exact moniker. Limit to
     // 8 — more than that is a sign the user needs a more specific identifier.
@@ -532,5 +553,29 @@ mod tests {
         assert!(md.len() <= 60, "got {} bytes: {md}", md.len());
         // Either truncated mid-section or stopped before adding more.
         assert!(md.contains("foo"));
+    }
+
+    #[test]
+    fn avoided_read_tokens_counts_definition_file() {
+        let dir = tempdir().unwrap();
+        let proj = dir.path();
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::write(proj.join("src/lib.rs"), "fn foo() -> i32 { 1 + 2 + 3 }\n").unwrap();
+        let pool = open_pool(&proj.join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let project = proj.to_string_lossy().into_owned();
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range)
+             VALUES ('e_foo', 'symbol', 'foo', ?1, 'src/lib.rs', '1:1')",
+            [project],
+        )
+        .unwrap();
+
+        let n = subgraph_for(&conn, "foo", 30).unwrap();
+        assert!(avoided_read_tokens(&n) > 0, "should count the def file's tokens");
+
+        // No unique match → nothing measurable to credit.
+        let none = subgraph_for(&conn, "missing", 30).unwrap();
+        assert_eq!(avoided_read_tokens(&none), 0);
     }
 }

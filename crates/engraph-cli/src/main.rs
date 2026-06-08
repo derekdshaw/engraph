@@ -615,7 +615,10 @@ fn main() -> Result<()> {
                     kind: EventKind::Retrieve,
                     feature: "subgraph",
                     filter_id: Some("subgraph"),
-                    input_tokens: 0,
+                    // Baseline = the source the subgraph stands in for (the
+                    // symbol's definition file). saved = baseline - body.
+                    input_tokens: engraph_codegraph::subgraph::avoided_read_tokens(&neighborhood)
+                        as i64,
                     output_tokens: tokens::count(&body) as i64,
                     latency_ms: start.elapsed().as_millis() as i64,
                 },
