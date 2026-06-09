@@ -572,7 +572,10 @@ mod tests {
         .unwrap();
 
         let n = subgraph_for(&conn, "foo", 30).unwrap();
-        assert!(avoided_read_tokens(&n) > 0, "should count the def file's tokens");
+        assert!(
+            avoided_read_tokens(&n) > 0,
+            "should count the def file's tokens"
+        );
 
         // No unique match → nothing measurable to credit.
         let none = subgraph_for(&conn, "missing", 30).unwrap();

@@ -100,13 +100,17 @@ pub enum LangStatus {
         targets: usize,
     },
     SkippedNoTargets,
-    SkippedNoIndexer { binary: &'static str },
+    SkippedNoIndexer {
+        binary: &'static str,
+    },
     /// The language delegates its SCIP build to a user-supplied command that
     /// isn't configured. Java builds are repo-specific (Bazel aspect vs Maven
     /// vs Gradle vs custom toolchains), so engraph stays build-system-agnostic
     /// and runs whatever command this env var names — rather than hard-wiring
     /// any one monorepo's setup.
-    SkippedNotConfigured { env: &'static str },
+    SkippedNotConfigured {
+        env: &'static str,
+    },
     Failed(String),
 }
 
@@ -119,7 +123,10 @@ impl fmt::Display for LangStatus {
                 failed,
                 targets,
             } => {
-                write!(f, "indexed {indexed} go.mod modules of {targets} go targets")?;
+                write!(
+                    f,
+                    "indexed {indexed} go.mod modules of {targets} go targets"
+                )?;
                 if *failed > 0 {
                     write!(f, ", {failed} failed")?;
                 }
@@ -534,9 +541,9 @@ fn run_go_modules(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         tracing::info!(driver = spec.binary, module = %module_root.display(), "running scip-go for module");
-        let output = cmd.output().with_context(|| {
-            format!("spawning {} for {}", spec.binary, module_root.display())
-        })?;
+        let output = cmd
+            .output()
+            .with_context(|| format!("spawning {} for {}", spec.binary, module_root.display()))?;
         if !output.status.success() {
             failed += 1;
             tracing::warn!(
@@ -687,7 +694,9 @@ fn bazel_count_targets(bazel: &Path, repo: &Path, kinds: &[&str]) -> Result<usiz
         );
         return Ok(0);
     }
-    Ok(count_label_kind_lines(&String::from_utf8_lossy(&out.stdout)))
+    Ok(count_label_kind_lines(&String::from_utf8_lossy(
+        &out.stdout,
+    )))
 }
 
 pub(crate) fn count_label_kind_lines(stdout: &str) -> usize {
@@ -836,7 +845,10 @@ mod tests {
         let s = LangStatus::SkippedNotConfigured {
             env: "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
         };
-        assert_eq!(format!("{s}"), "skipped (ENGRAPH_BAZEL_SCIP_JAVA_CMD not set)");
+        assert_eq!(
+            format!("{s}"),
+            "skipped (ENGRAPH_BAZEL_SCIP_JAVA_CMD not set)"
+        );
     }
 
     #[test]
@@ -859,7 +871,11 @@ mod tests {
         let scip_path = tmp.path().join("fake.scip");
         std::fs::write(&scip_path, &scip).unwrap();
         let cmd_path = tmp.path().join("fake-cmd.sh");
-        std::fs::write(&cmd_path, format!("cp \"{}\" \"$2\"\n", scip_path.display())).unwrap();
+        std::fs::write(
+            &cmd_path,
+            format!("cp \"{}\" \"$2\"\n", scip_path.display()),
+        )
+        .unwrap();
         unsafe {
             std::env::set_var(
                 "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
@@ -891,7 +907,11 @@ mod tests {
         let scip_path = tmp.path().join("fake.scip");
         std::fs::write(&scip_path, &scip).unwrap();
         let cmd_path = tmp.path().join("fake-go-cmd.sh");
-        std::fs::write(&cmd_path, format!("cp \"{}\" \"$2\"\n", scip_path.display())).unwrap();
+        std::fs::write(
+            &cmd_path,
+            format!("cp \"{}\" \"$2\"\n", scip_path.display()),
+        )
+        .unwrap();
         unsafe {
             std::env::set_var(
                 "ENGRAPH_BAZEL_SCIP_GO_CMD",
@@ -953,7 +973,10 @@ mod tests {
             failed: 0,
             targets: 1234,
         };
-        assert_eq!(format!("{s}"), "indexed 3 go.mod modules of 1234 go targets");
+        assert_eq!(
+            format!("{s}"),
+            "indexed 3 go.mod modules of 1234 go targets"
+        );
         let s = LangStatus::IndexedModules {
             indexed: 2,
             failed: 1,

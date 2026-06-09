@@ -474,8 +474,11 @@ fn main() -> Result<()> {
             };
             if dry_run {
                 if let Some(root) = &recursive_root {
-                    let plans =
-                        engraph_codegraph::plan_workspace(root, effective_bazel_symbols, recursive)?;
+                    let plans = engraph_codegraph::plan_workspace(
+                        root,
+                        effective_bazel_symbols,
+                        recursive,
+                    )?;
                     print_workspace_plan(root, &plans);
                 } else if let Some(m) = &scip_manifest {
                     let text = std::fs::read_to_string(m)?;

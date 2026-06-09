@@ -295,7 +295,11 @@ fn parse_manifest_line(
         anyhow::bail!("{}:{}: empty SCIP path", manifest.display(), lineno);
     }
     let root = root.trim();
-    let root = if root == "." { String::new() } else { root.to_string() };
+    let root = if root == "." {
+        String::new()
+    } else {
+        root.to_string()
+    };
     let p = Path::new(path);
     let scip_path = if p.is_absolute() {
         p.to_path_buf()
