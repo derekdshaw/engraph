@@ -132,6 +132,13 @@ enum Cmd {
         /// is on by default. No effect outside `--workspace`.
         #[arg(long, conflicts_with = "bazel_symbols")]
         no_bazel_symbols: bool,
+        /// Recurse into subdirectories to discover every project (not just the
+        /// immediate children of --workspace): prunes build/dep dirs
+        /// (node_modules, target, vendor, …), stops at Bazel roots, and
+        /// suppresses same-language workspace members. Implies workspace-style
+        /// indexing rooted at --workspace (or the positional repo).
+        #[arg(long, conflicts_with_all = ["scip", "scip_manifest", "lang"])]
+        recursive: bool,
         /// Preview what would be indexed (chosen path, drivers, symbol-level
         /// languages, discovered repos) without spawning any indexer, running
         /// Bazel, or writing the codegraph. Composes with all other flags.
@@ -441,6 +448,7 @@ fn main() -> Result<()> {
             workspace,
             bazel_symbols,
             no_bazel_symbols,
+            recursive,
             dry_run,
         } => {
             let start = Instant::now();
@@ -455,11 +463,19 @@ fn main() -> Result<()> {
             } else if no_bazel_symbols {
                 false
             } else {
-                workspace.is_some()
+                workspace.is_some() || recursive
+            };
+            // `--recursive` indexes a tree of projects rooted at --workspace, or
+            // the positional repo if --workspace wasn't given.
+            let recursive_root: Option<PathBuf> = if recursive {
+                Some(workspace.clone().unwrap_or_else(|| repo.clone()))
+            } else {
+                workspace.clone()
             };
             if dry_run {
-                if let Some(root) = &workspace {
-                    let plans = engraph_codegraph::plan_workspace(root, effective_bazel_symbols)?;
+                if let Some(root) = &recursive_root {
+                    let plans =
+                        engraph_codegraph::plan_workspace(root, effective_bazel_symbols, recursive)?;
                     print_workspace_plan(root, &plans);
                 } else if let Some(m) = &scip_manifest {
                     let text = std::fs::read_to_string(m)?;
@@ -485,9 +501,13 @@ fn main() -> Result<()> {
                     );
                     print_repo_plan(&repo, &plan);
                 }
-            } else if let Some(root) = workspace {
-                let stats =
-                    engraph_codegraph::index_workspace(&conn, &root, effective_bazel_symbols)?;
+            } else if let Some(root) = recursive_root {
+                let stats = engraph_codegraph::index_workspace(
+                    &conn,
+                    &root,
+                    effective_bazel_symbols,
+                    recursive,
+                )?;
                 let total_bytes: usize = stats
                     .repos
                     .iter()

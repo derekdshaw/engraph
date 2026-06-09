@@ -1,6 +1,7 @@
 use crate::{bazel, bazel_symbols, driver, scip_loader};
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -367,6 +368,99 @@ fn is_indexable_root(path: &Path) -> bool {
     driver::registry().iter().any(|d| d.detect(path))
 }
 
+/// Languages detected at `dir`: "bazel" if it's a Bazel root, plus each driver
+/// (rust-analyzer / scip-go / …) whose probe matches. Empty ⇒ not a project root.
+fn detected_langs(dir: &Path) -> HashSet<&'static str> {
+    let mut langs = HashSet::new();
+    if bazel::detect_bazel(dir) {
+        langs.insert("bazel");
+    }
+    for d in driver::registry() {
+        if d.detect(dir) {
+            langs.insert(d.name());
+        }
+    }
+    langs
+}
+
+/// Directories `--recursive` never descends into: hidden dirs and the usual
+/// build / dependency trees (they hold foreign manifests and would explode the
+/// walk — `node_modules` alone has thousands of `package.json`).
+fn is_pruned_dir(name: &str) -> bool {
+    name.starts_with('.')
+        || matches!(
+            name,
+            "node_modules" | "target" | "vendor" | "__pycache__" | ".venv" | "venv" | "testdata"
+        )
+}
+
+const RECURSIVE_MAX_DEPTH: usize = 16;
+
+/// Recursive project discovery for `index --recursive`. Walks `root`, recording
+/// each project root found at any depth (sorted, deduped). See `walk_recursive`
+/// for the per-directory rules (prune build dirs, stop at Bazel, suppress
+/// same-language descendants so a workspace's members aren't each indexed).
+fn discover_repos_recursive(root: &Path) -> Result<Vec<PathBuf>> {
+    if !root.is_dir() {
+        anyhow::bail!("workspace root is not a directory: {}", root.display());
+    }
+    let mut out = Vec::new();
+    walk_recursive(root, 0, &HashSet::new(), &mut out);
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+fn walk_recursive(
+    dir: &Path,
+    depth: usize,
+    claimed: &HashSet<&'static str>,
+    out: &mut Vec<PathBuf>,
+) {
+    if depth > RECURSIVE_MAX_DEPTH {
+        return;
+    }
+    let detected = detected_langs(dir);
+    let new_langs: HashSet<&'static str> = detected.difference(claimed).copied().collect();
+
+    // A Bazel root is one indexable unit: record it and don't descend — the
+    // target-level `bazel query` pass already covers the whole subtree.
+    if new_langs.contains("bazel") {
+        out.push(dir.to_path_buf());
+        return;
+    }
+
+    // Record this dir only if it introduces a language no ancestor already
+    // covers (else it's a workspace member / sub-package of an ancestor). Either
+    // way keep descending to catch nested modules of *other* languages.
+    let child_claimed = if new_langs.is_empty() {
+        claimed.clone()
+    } else {
+        out.push(dir.to_path_buf());
+        claimed.union(&detected).copied().collect()
+    };
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut children: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let ft = e.file_type().ok()?;
+            // Skip symlinks (e.g. Bazel's bazel-* convenience links), files, and
+            // pruned build/dependency dirs.
+            if ft.is_symlink() || !ft.is_dir() || is_pruned_dir(&e.file_name().to_string_lossy()) {
+                return None;
+            }
+            Some(e.path())
+        })
+        .collect();
+    children.sort();
+    for child in children {
+        walk_recursive(&child, depth + 1, &child_claimed, out);
+    }
+}
+
 /// Index every repo discovered under `workspace_root`. Each repo's
 /// canonical path becomes its `project` key, so the loader's
 /// per-project DELETE doesn't trample others. Failures are captured
@@ -376,13 +470,22 @@ pub fn index_workspace(
     conn: &PooledConn,
     workspace_root: &Path,
     bazel_symbols: bool,
+    recursive: bool,
 ) -> Result<WorkspaceStats> {
-    let repos = discover_workspace_repos(workspace_root)?;
+    let repos = if recursive {
+        discover_repos_recursive(workspace_root)?
+    } else {
+        discover_workspace_repos(workspace_root)?
+    };
     if repos.is_empty() {
         anyhow::bail!(
-            "no indexable repos found under {} (expected a build manifest at the root \
-             or in an immediate child)",
-            workspace_root.display()
+            "no indexable repos found under {} (expected a build manifest at the root{})",
+            workspace_root.display(),
+            if recursive {
+                " or any descendant"
+            } else {
+                " or an immediate child"
+            }
         );
     }
     let mut stats = WorkspaceStats::default();
@@ -459,8 +562,13 @@ pub fn plan_repo(
 pub fn plan_workspace(
     workspace_root: &Path,
     bazel_symbols: bool,
+    recursive: bool,
 ) -> Result<Vec<(PathBuf, IndexPlan)>> {
-    let repos = discover_workspace_repos(workspace_root)?;
+    let repos = if recursive {
+        discover_repos_recursive(workspace_root)?
+    } else {
+        discover_workspace_repos(workspace_root)?
+    };
     Ok(repos
         .into_iter()
         .map(|repo| {
@@ -577,7 +685,7 @@ mod tests {
         let child = root.path().join("crate-a");
         std::fs::create_dir(&child).unwrap();
         touch(&child, "Cargo.toml");
-        let plans = plan_workspace(root.path(), false).unwrap();
+        let plans = plan_workspace(root.path(), false, false).unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].0, child);
         assert!(matches!(plans[0].1, IndexPlan::AutoDrivers(_)));
@@ -587,7 +695,7 @@ mod tests {
     fn plan_workspace_bazel_root_collapses_to_root() {
         let root = tempfile::tempdir().unwrap();
         touch(root.path(), "MODULE.bazel");
-        let plans = plan_workspace(root.path(), true).unwrap();
+        let plans = plan_workspace(root.path(), true, false).unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].0, root.path());
         assert!(matches!(plans[0].1, IndexPlan::Bazel { .. }));
@@ -672,5 +780,69 @@ mod tests {
         let (root, path) = parse_manifest_line(".\tx.scip", base, manifest, 1).unwrap();
         assert_eq!(root, ""); // "." normalized to empty (no rebase)
         assert_eq!(path, Path::new("/tmp/x.scip"));
+    }
+
+    fn dir_with(root: &Path, rel: &str, manifest: &str) -> PathBuf {
+        let d = if rel.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(rel)
+        };
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(manifest), "").unwrap();
+        d
+    }
+
+    fn recursive_roots(root: &Path) -> Vec<PathBuf> {
+        plan_workspace(root, false, true)
+            .unwrap()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect()
+    }
+
+    #[test]
+    fn recursive_finds_nested_cross_language() {
+        let root = tempfile::tempdir().unwrap();
+        let r = dir_with(root.path(), "", "Cargo.toml");
+        let go = dir_with(root.path(), "go", "go.mod");
+
+        // Non-recursive: the root is itself a manifest root → just [root].
+        let nonrec = plan_workspace(root.path(), false, false).unwrap();
+        assert_eq!(nonrec.len(), 1);
+        assert_eq!(nonrec[0].0, r);
+
+        // Recursive: the Rust root AND the nested Go module.
+        let rec = recursive_roots(root.path());
+        assert_eq!(rec.len(), 2, "{rec:?}");
+        assert!(rec.contains(&r) && rec.contains(&go), "{rec:?}");
+    }
+
+    #[test]
+    fn recursive_suppresses_same_language_members() {
+        let root = tempfile::tempdir().unwrap();
+        let r = dir_with(root.path(), "", "Cargo.toml");
+        dir_with(root.path(), "crates/a", "Cargo.toml");
+        dir_with(root.path(), "crates/b", "Cargo.toml");
+        // Members are same-language under the recorded root → not re-recorded.
+        assert_eq!(recursive_roots(root.path()), vec![r]);
+    }
+
+    #[test]
+    fn recursive_prunes_build_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let r = dir_with(root.path(), "", "Cargo.toml");
+        dir_with(root.path(), "target/dep", "Cargo.toml");
+        dir_with(root.path(), "node_modules/x", "package.json");
+        assert_eq!(recursive_roots(root.path()), vec![r]);
+    }
+
+    #[test]
+    fn recursive_stops_at_bazel_root() {
+        let root = tempfile::tempdir().unwrap();
+        let r = dir_with(root.path(), "", "MODULE.bazel");
+        dir_with(root.path(), "sub", "go.mod");
+        // Bazel covers the subtree → the nested go.mod is not a separate project.
+        assert_eq!(recursive_roots(root.path()), vec![r]);
     }
 }

@@ -68,7 +68,7 @@ The pre-bash parser handles common command shapes that would otherwise misroute.
 
 `scripts/install-scip-indexers.sh` is an idempotent installer for all five upstream indexers with per-toolchain prerequisite checks.
 
-**Cross-repo stitching:** `engraph index --workspace <dir>` indexes every sub-repo with a recognized build manifest in one pass. Because `entities.id` is the SCIP moniker, cross-repo references collapse onto the same row automatically. `engraph subgraph app_caller` surfaces calls into a dependency library with a `repo:<name>` annotation on the location:
+**Cross-repo stitching:** `engraph index --workspace <dir>` indexes every sub-repo with a recognized build manifest in one pass — immediate children only, or add **`--recursive`** to discover projects at any depth (nested and mixed-language modules, e.g. a `go/` submodule inside a Rust crate), pruning build/dep dirs (`node_modules`, `target`, …) and stopping at Bazel roots. Because `entities.id` is the SCIP moniker, cross-repo references collapse onto the same row automatically. `engraph subgraph app_caller` surfaces calls into a dependency library with a `repo:<name>` annotation on the location:
 
 ```text
 **Calls**: `lib_foo` (repo:lib_a :: src/lib.rs:1)

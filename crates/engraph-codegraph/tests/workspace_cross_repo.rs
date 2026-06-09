@@ -77,7 +77,7 @@ fn workspace_links_app_b_caller_to_lib_a_foo() {
     let pool = open_pool(&dir.path().join("eg.db")).unwrap();
     let conn = pool.get().unwrap();
 
-    let stats = match index_workspace(&conn, &root, false) {
+    let stats = match index_workspace(&conn, &root, false, false) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("skip: index_workspace failed (likely rust-analyzer env issue): {e:#}");
