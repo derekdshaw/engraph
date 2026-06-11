@@ -196,27 +196,30 @@ ok "Updated $SETTINGS_FILE"
 info "Installing memory-capture guidance"
 
 ENGRAPH_MD="$CLAUDE_DIR/engraph.md"
-cat > "$ENGRAPH_MD" <<'MDEOF'
-# Engraph memory
-Persist durable signals so the next session's SessionStart brief surfaces them.
-These are plain Bash calls; the engraph pre-bash hook passes `engraph …` through
-untouched.
 
-- **User corrects you / states a hard rule** → `engraph remember "<imperative, specific rule>"`
-- **After you fix a bug** → `engraph bug "<one-line summary incl. the error>" --content "<root cause + fix>"`; when a tracked bug is fixed, close it with `engraph bug --resolve <id>`
-- **Architecture / library / design decision** → `engraph save "<decision + one-line rationale>" --kind architecture` (use `--kind convention` for style/naming/workflow rules, `--kind performance` for optimization choices, default `decision` otherwise)
+# Copy the shipped guidance file rather than emitting it inline, so
+# docs/engraph.md stays the single source of truth. Resolve it like the binary:
+# next to this script (release archive layout), else ../docs (source checkout).
+ENGRAPH_MD_SRC=""
+if [ -f "$SCRIPT_DIR/engraph.md" ]; then
+    ENGRAPH_MD_SRC="$SCRIPT_DIR/engraph.md"
+elif [ -f "$SCRIPT_DIR/../docs/engraph.md" ]; then
+    ENGRAPH_MD_SRC="$SCRIPT_DIR/../docs/engraph.md"
+fi
 
-Run these from the project root so the stored project key matches the session
-cwd. From a subdirectory, pass `--project <repo-root-abs-path>`.
-MDEOF
-ok "Wrote $ENGRAPH_MD"
+if [ -n "$ENGRAPH_MD_SRC" ]; then
+    cp "$ENGRAPH_MD_SRC" "$ENGRAPH_MD"
+    ok "Wrote $ENGRAPH_MD (from $ENGRAPH_MD_SRC)"
 
-CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
-if [ ! -f "$CLAUDE_MD" ] || ! grep -q '@engraph.md' "$CLAUDE_MD"; then
-    printf '\n@engraph.md\n' >> "$CLAUDE_MD"
-    ok "Imported @engraph.md in $CLAUDE_MD"
+    CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
+    if [ ! -f "$CLAUDE_MD" ] || ! grep -q '@engraph.md' "$CLAUDE_MD"; then
+        printf '\n@engraph.md\n' >> "$CLAUDE_MD"
+        ok "Imported @engraph.md in $CLAUDE_MD"
+    else
+        info "@engraph.md already imported in $CLAUDE_MD"
+    fi
 else
-    info "@engraph.md already imported in $CLAUDE_MD"
+    warn "Could not find docs/engraph.md next to the installer; skipping memory guidance"
 fi
 
 echo ""

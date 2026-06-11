@@ -181,11 +181,52 @@ foreach ($event in $hooksConfig.Keys) {
 $settings | ConvertTo-Json -Depth 10 | Set-Content $SettingsFile -Encoding UTF8
 Write-Ok "Updated $SettingsFile"
 
+# --- Install memory-capture guidance ---
+# The writer commands (remember/bug/save) only get called if Claude is told
+# when to call them. Ship a guidance file and import it from CLAUDE.md so the
+# guidance loads in every session. engraph becomes the single capture path.
+
+Write-Info "Installing memory-capture guidance"
+
+$EngraphMd = Join-Path $ClaudeDir "engraph.md"
+
+# Copy the shipped guidance file rather than emitting it inline, so
+# docs/engraph.md stays the single source of truth. Resolve it like the binary:
+# next to this script (release archive layout), else ..\docs (source checkout).
+$EngraphMdSrc = $null
+$mdPrimary  = Join-Path $ScriptDir "engraph.md"
+$mdFallback = Join-Path $ScriptDir "..\docs\engraph.md"
+if (Test-Path $mdPrimary) {
+    $EngraphMdSrc = (Resolve-Path $mdPrimary).Path
+}
+elseif (Test-Path $mdFallback) {
+    $EngraphMdSrc = (Resolve-Path $mdFallback).Path
+}
+
+if ($EngraphMdSrc) {
+    Copy-Item $EngraphMdSrc $EngraphMd -Force
+    Write-Ok "Wrote $EngraphMd (from $EngraphMdSrc)"
+
+    $ClaudeMd = Join-Path $ClaudeDir "CLAUDE.md"
+    if (-not (Test-Path $ClaudeMd) -or
+        -not (Select-String -Path $ClaudeMd -Pattern '@engraph.md' -SimpleMatch -Quiet)) {
+        Add-Content -Path $ClaudeMd -Value "`n@engraph.md"
+        Write-Ok "Imported @engraph.md in $ClaudeMd"
+    }
+    else {
+        Write-Info "@engraph.md already imported in $ClaudeMd"
+    }
+}
+else {
+    Write-Warn "Could not find docs/engraph.md next to the installer; skipping memory guidance"
+}
+
 Write-Host ""
 Write-Host "Engraph installed successfully!" -ForegroundColor Green
 Write-Host ""
 Write-Host "Binary:    $Dest"
 Write-Host "Settings:  $SettingsFile"
+Write-Host "Memory:    $EngraphMd (imported via @engraph.md)"
 Write-Host "Database:  `$env:ENGRAPH_DB_PATH (default: %LOCALAPPDATA%\engraph\engraph.db)"
 Write-Host ""
 Write-Host "Sanity check:"
