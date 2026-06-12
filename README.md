@@ -48,7 +48,7 @@ The pre-bash parser handles common command shapes that would otherwise misroute.
 
 ### SessionStart context injection
 
-`engraph hook session-start` reads the project's stored do-not-repeat rules and open bugs from the database and injects them as `additionalContext` at the start of each Claude session. Empty briefs cost zero tokens. The cap is 2KB to keep the per-session opening cost predictable.
+`engraph hook session-start` injects prior project context as `additionalContext` at the start of each Claude session: stored do-not-repeat rules, open bugs, recent decisions, and budget status (each section capped at the 5 most-recent entries). It also performs a best-effort catch-up ingest of the project's transcripts first, so sessions that closed without a clean `SessionEnd` are still captured (incremental and idempotent via `ingestion_log` offsets). Empty briefs cost zero tokens. The cap is 2KB to keep the per-session opening cost predictable.
 
 ### Structure-aware code indexing
 
@@ -142,7 +142,7 @@ cd engraph-<version>-x86_64-pc-windows-msvc
 .\install.ps1
 ```
 
-The install script places the binary under a per-user prefix and merges the `SessionStart`, `PreToolUse(Bash, Grep)`, and `PostToolUse(Read)` hooks into `~/.claude/settings.json`. Re-running replaces existing entries in-place rather than duplicating them.
+The install script places the binary under a per-user prefix and merges the `SessionStart`, `PreToolUse(Bash, Grep)`, `PostToolUse(Read)`, and `SessionEnd` hooks into `~/.claude/settings.json`. It also installs the memory-capture guidance (`docs/engraph.md` → `~/.claude/engraph.md`, imported via `@engraph.md` in your `CLAUDE.md`) and offers to run the SCIP-indexer installer. Re-running replaces existing entries in-place rather than duplicating them.
 
 ### From source
 
@@ -203,7 +203,7 @@ The PreToolUse hook uses Claude Code's `hookSpecificOutput.updatedInput` to sile
 
 Claude Code substitutes the rewritten command before running it. The rewrite is invisible to Claude's reasoning loop — Claude sees the wrapped command in the transcript with compressed output. PostToolUse hooks cannot replace tool results (only append), so this PreToolUse-rewrite pattern is the only path to transparent compression inside Claude Code.
 
-Compound commands (`cd /tmp && git log`, `git log | head`, env-prefixed forms) fall back to a deny+suggest response pointing Claude at the wrappable subcommand. Quoted args with spaces or shell metacharacters are preserved correctly through `shell-words` quoting.
+Display-sink pipelines (`git log | head`, `git diff | less`) are rewritten by wrapping the producer and keeping the pipe intact, so the window command still sees compressed output. Env-prefixed forms (`FOO=bar git log`) are peeled and re-emitted ahead of `engraph run`. Other compound commands (`cd /tmp && git log`, `;`-sequences, and byte-consuming pipes like `git log | grep x`) pass through unmodified. Quoted args with spaces or shell metacharacters are preserved correctly through `shell-words` quoting.
 
 ### How `pre-grep` redirects symbol lookups
 
@@ -256,8 +256,8 @@ engraph subgraph run_migrations --json
 engraph recall "auth flow"
 engraph recall --hybrid "auth flow"    # requires --features embeddings
 
-# Ingest transcript files
-engraph ingest ~/.claude/projects/<project>/*.jsonl
+# Ingest a transcript file (one path, or - for stdin)
+engraph ingest ~/.claude/projects/<project>/<session>.jsonl
 
 # Compress existing stored messages
 engraph compress-existing
@@ -266,9 +266,9 @@ engraph compress-existing
 engraph gain
 engraph gain --json
 
-# Per-session token budget
-engraph budget status
-engraph budget set --soft 80000 --hard 120000
+# Per-session token budget (--session-id is required)
+engraph budget status --session-id <id>
+engraph budget set --session-id <id> --soft 80000 --hard 120000
 
 # Run a command through a filter directly
 engraph run git log -n 20
@@ -360,7 +360,7 @@ One SQLite database, WAL mode. Schema migrations are versioned and applied autom
 
 | Table | Purpose |
 |---|---|
-| `sessions`, `messages`, `tool_calls` | Session-state snapshot from JSONL ingestion |
+| `sessions`, `messages` | Session-state snapshot from JSONL ingestion |
 | `scopes`, `scope_members` | Hierarchical scoping (project / topic / time-window) |
 | `context_items`, `bugs`, `do_not_repeat` | Curated decisions and rules |
 | `entities`, `relations` | Knowledge graph; codegraph stores symbols here with `file_path`, `line_range`, `signature` |

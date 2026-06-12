@@ -48,12 +48,15 @@ crates/
 ├── engraph-compress/      compressor + per-command filters (git, cargo, npm, …)
 ├── engraph-retrieve/      FTS+scoping+KG, hybrid (feature-gated)
 ├── engraph-ingest/        JSONL → SQLite, rotation guard, compress-existing sweep
+├── engraph-codegraph/     SCIP ingest → entities/relations, subgraph formatter, Bazel
 └── engraph-cli/           the `engraph` binary (subcommands + hooks)
 ```
 
-The dependency graph is strictly downward: `engraph-cli` consumes everything,
-`engraph-ingest` and `engraph-retrieve` consume `engraph-core` and
-`engraph-compress`. There are no cycles. `engraph-core` has no
+The dependency graph is strictly downward: `engraph-cli` consumes everything.
+`engraph-retrieve` consumes only `engraph-core`. `engraph-ingest` consumes
+`engraph-core`, `engraph-compress`, and `engraph-retrieve` (the retrieve→ingest
+edge is dev-only, so the build graph stays acyclic). `engraph-codegraph`
+consumes `engraph-core`. There are no cycles. `engraph-core` has no
 dependencies on the other engraph crates — it's where shared types
 (database pool, telemetry, error type, token counter, embedding trait) live.
 
@@ -196,7 +199,7 @@ newline conventions.
 
 | Kind | Preprocessing |
 |---|---|
-| `ToolOutput` | strip ANSI escapes → drop progress lines (carriage-return-overwrite + `[#=>\-_.\d%/|]*$`) → dedupe consecutive identical lines (`a\na\na\n` → `a (x3)\n`) |
+| `ToolOutput` | strip ANSI escapes → drop progress lines (carriage-return-overwrite + `^[\s#=>\-_.\d%/|]*$`) → dedupe consecutive identical lines (`a\na\na\n` → `a\n[engraph: + 2 more identical lines]\n`) |
 | `SessionMessage` | strip `{"type":"tool_use"/...}` envelope lines → truncate long base64/hex blobs to `head…[NB]…tail` |
 | `ProjectNotes` | strip HTML comments → collapse blank-line runs |
 | `Generic` | no-op |
@@ -210,8 +213,8 @@ ranking math behaves well across very different content classes.
 Two reasons. First, "global dedupe" loses structural meaning: a tool-output
 log that repeats `OK` 50 times across different stages is meaningfully
 different from one that repeats `OK` 50 times in a row. Second, consecutive
-dedupe is O(n) without auxiliary state. The `(x3)` annotation preserves
-count for diagnosability.
+dedupe is O(n) without auxiliary state. The `[engraph: + N more identical
+lines]` annotation (N = run length − 1) preserves count for diagnosability.
 
 ### 3.4 Step 4 — extractive sentence ranking
 
@@ -229,7 +232,8 @@ for each sentence s:
     score(s) = sum_{t in ws}(freq[t]) / sqrt(|ws|)
 
 sort sentences by score desc, original-index asc for ties
-greedy-fill until cumulative tokens ≥ target_tokens
+greedy-fill in score order: once ≥1 sentence is kept, skip any sentence that
+  would push cumulative over target_tokens; stop when cumulative ≥ target_tokens
 emit kept sentences in original document order
 ```
 
@@ -252,8 +256,10 @@ Why this exact shape:
   "emit in original document order" final step, this preserves
   narrative flow.
 - **Greedy fill with token check.** `target_tokens` is a soft floor —
-  the algorithm stops once cumulative ≥ target, with a minimum of 32
-  tokens (`lib.rs`) so very short inputs aren't compressed below
+  the algorithm stops once cumulative ≥ target. An over-budget sentence is
+  *skipped* (not stop-the-fill) once anything is already kept, so later
+  smaller high-score sentences can still be packed in. A minimum of 32
+  tokens (`lib.rs`) keeps very short inputs from being compressed below
   intelligibility.
 
 ### 3.5 Step 5 — caveman brevity (opt-in)
@@ -315,7 +321,7 @@ no IO, no global state.
 
 The filter ID returned by the picker and the `filter_id` stamped on the
 `FilterOutput` must agree — a regression test pins every cargo and git
-arm to enforce this (`tests/filter_ratios.rs::picker_and_filter_output_agree_on_filter_id`).
+arm to enforce this (`crates/engraph-compress/tests/filter_ratios.rs::picker_and_filter_output_agree_on_filter_id`).
 The mismatch we paid for once was `cargo check` (picker said
 `cargo_check`, but the underlying `cargo::build` stamped `cargo_build`);
 the v2.1 fix introduced a thin `cargo::check` wrapper.
@@ -337,7 +343,7 @@ Specific noise patterns by family:
 
 | Family | Drop | Keep | Summarize |
 |---|---|---|---|
-| cargo (build/check/clippy/doc) | `^\s*(Compiling\|Checking\|Downloading\|Updating\|Fresh\|Finished\|...)\b` | warnings, errors | counts |
+| cargo (build/check/clippy/doc/bench/audit/tree) | `^\s*(Compiling\|Checking\|Downloading\|Updating\|Fresh\|Finished\|...)\b` | warnings, errors | counts |
 | cargo test (libtest) | `^test \S+ \.\.\. (ok\|ignored)\b` | `---- foo stdout ----` headers, failure panics, `test result:` summary | passed/failed/ignored counts |
 | cargo test (nextest) | `^PASS \[\s*\d+\.\d+s\]` | `^FAIL \[\s*\d+\.\d+s\]` lines, summary | counts |
 | git log | full commit blocks | one line per commit: `<7-char hash> <subject>` | total commit count; `--oneline` passes through |
@@ -346,7 +352,10 @@ Specific noise patterns by family:
 | rg / grep | flat match lists capped | first N matches | `truncated N more matches` |
 | docker / kubectl | annotations / spec blobs | events, container/pod summaries | row caps |
 | npm / pnpm / yarn | per-package "added N" progress | totals, vulnerability count | summary |
-| pytest / pip / go test | pass-progress lines | failed test output, summary | counts |
+| pytest / pip / uv / go test / go mod tidy | pass-progress lines | failed test output, summary | counts |
+| lint (ruff / mypy / eslint / tsc) | info / progress lines | diagnostics (errors, warnings) | `[engraph: <name> N errors, M warnings, exit C]` |
+| make / mvn / gradle (incl. `./gradlew`) | recipe echo, dir-change, download / progress lines | errors, build / test results | dropped-line count + exit |
+| gh (pr / issue / repo, `list`\|`view`) | extra comment bodies (keeps first 3) | rows / item body | `[engraph: hid N comments]` |
 | cat / bat / less (whole-file read) | line comments by extension; runs of blank lines | first 400 lines + last 100 lines if file > 500 lines | `[engraph: omitted N middle lines]` |
 | head / tail (user-windowed read) | line comments by extension; runs of blank lines | every line the user asked for | none — no re-windowing on top of the user's `-n` |
 
@@ -357,7 +366,7 @@ TF-IDF said was salient and lose the structure ("which commits exist in
 what order"). Per-command filters know that `git log` is N commit
 blocks and can collapse each to its subject without losing the count.
 The ratio gains are dramatic: `git_log_under_quarter`
-(`tests/filter_ratios.rs`) demonstrates < 0.3 on 50 commits.
+(`crates/engraph-compress/tests/filter_ratios.rs`) demonstrates < 0.3 on 50 commits.
 
 The unknown-command fallback (`generic::filter`) routes through
 `compress(CompressKind::ToolOutput)`, so users still get *some* savings
@@ -365,7 +374,8 @@ even on tools we haven't written a filter for.
 
 ### 4.4 Golden snapshot pinning
 
-`tests/golden_fixtures.rs` walks `tests/fixtures/<name>.in.txt` →
+`crates/engraph-compress/tests/golden_fixtures.rs` (`golden_fixtures_byte_exact`)
+walks `crates/engraph-compress/tests/fixtures/<name>.in.txt` →
 `<name>.expected.txt` pairs and asserts byte-exact match after running
 the right filter. Three pinned today (`git_log_basic`,
 `cargo_check_basic`, `cargo_test_nextest`). Output-format drift in a
@@ -411,57 +421,68 @@ characters from getting silently corrupted.
 
 ## 5. Tool-use hooks: PreToolUse and PostToolUse
 
-Three Claude Code lifecycle events get engraph handlers, all in
-`engraph-cli`: `PreToolUse(Bash)` rewrites or denies bash commands;
-`PreToolUse(Grep)` redirects symbol lookups to the codegraph;
+Three Claude Code lifecycle events get engraph handlers, in
+`engraph-cli` (hook entrypoints in `hooks.rs`, the bash-rewrite parser in
+`rewrite.rs`, the symbol-redirect logic in `redirect.rs`):
+`PreToolUse(Bash)` rewrites bash commands (and, as a separate gate, can deny
+a symbol grep); `PreToolUse(Grep)` redirects symbol lookups to the codegraph;
 `PostToolUse(Read)` appends an indexed-symbol map to file reads. All
 three read their tool-input JSON from stdin, decide an outcome, emit the
 appropriate JSON on stdout, and exit 0.
 
 ### 5.1 PreToolUse(Bash) decision tree
 
+`run_pre_bash_hook` (`hooks.rs`) runs two independent gates on the raw
+command string. The subgraph-redirect gate comes first and is *not* part of
+the rewrite enum:
+
 ```
-command empty? → Passthrough
+command = tool_input.command;  empty? → Passthrough (no JSON)
+
+# Gate 1 — subgraph redirect (redirect.rs), before any rewrite
+try_subgraph_redirect_for_bash(command, conn):
+    has_heredoc OR has_unquoted_shell_meta? → skip
+    shell_words::split → argv; strip_command_prefix; normalize_argv0
+    argv[0] in {rg, grep} AND first non-flag arg resolves to 1-3 indexed entities
+        → emit_subgraph_deny: permissionDecision "deny" pointing at
+          `engraph subgraph <pattern>`, then return
+
+# Gate 2 — try_auto_rewrite(command) (rewrite.rs) → Rewrite | Passthrough
 command starts with "engraph " or contains " engraph run "? → Passthrough (recursion guard)
 has_heredoc(command)? → Passthrough (rewriting would corrupt the body)
-shell_words::split → argv
-strip_command_prefix(argv):
-    argv[0] in {sudo, env}? → Passthrough (different privilege / non-trivial flag parsing)
-    peel leading `FOO=bar` tokens into `prefix`
-    (whitespace inside a value → Passthrough; re-quoting would be fragile)
-normalize_argv0(argv): /usr/bin/grep → grep
-strip_git_global_opts(argv): drop -C/-c/--git-dir=/--work-tree= when argv[0] == "git"
-try_subgraph_redirect_for_bash(argv, conn):
-    argv[0] in {rg, grep} AND first non-flag arg resolves to 1-3 indexed entities
-        → DenySuggest pointing at `engraph subgraph <pattern>`
-command has unquoted shell meta (|, ;, &, <, >, `, $())?
-    → scan argv for any wrappable token
-    → first match → DenySuggest with engraph run hint
-    → no match    → Passthrough
-otherwise:
-    pick(argv[0], argv[1..])
-    filter_id == "generic"? → Passthrough
-    else → Rewrite: `<prefix...> engraph run <argv...>` with shell-words-quoted
-            args (prefix tokens are emitted verbatim — they were validated
-            shape-safe during peeling, and shell_words::quote would
-            mis-quote `KEY=value` as a literal command name)
+has_unquoted_shell_meta(command)? → rewrite_pipeline(command):
+    split into pipeline stages; bail (Passthrough) on ; && || & redirects $()
+    classify_for_wrap(stage[0]) has a non-generic filter
+        AND every downstream stage is a display sink (head/tail/less/cat/more/bat)?
+            → Rewrite: wrap the producer, keep the pipe intact
+    else → Passthrough
+otherwise (plain command):
+    classify_for_wrap(command):
+        strip_command_prefix(argv): sudo/env → None; peel `FOO=bar` (whitespace value → None)
+        normalize_argv0(argv): /usr/bin/grep → grep
+        strip_git_global_opts(argv): drop -C/-c/--git-dir=/--work-tree= when argv[0] == "git"
+        pick(argv[0], argv[1..]) == "generic"? → None
+    None? → Passthrough
+    Some(prefix, argv, filter_id) → Rewrite: `<prefix...> engraph run <argv...>`
+            with shell-words-quoted args (prefix tokens emitted verbatim —
+            shell_words::quote would mis-quote `KEY=value` as a command name)
 ```
 
-Three outcomes, returned as a `RewriteOutcome` enum
-(`engraph-cli`), each mapping to a Claude Code hook response:
+`try_auto_rewrite` returns a two-variant `RewriteOutcome` enum (`rewrite.rs`):
 
 - **Rewrite**: `permissionDecision: "allow"` + `updatedInput.command =
   "engraph run …"`. Claude Code substitutes the new command before
   executing. The rewrite is invisible to Claude's reasoning loop — Claude
   sees the wrapped command run, with the compressed output, in the
   transcript.
-- **DenySuggest**: `permissionDecision: "deny"` +
-  `permissionDecisionReason` containing the wrappable subcommand or
-  the subgraph hint. Used when the command is too complex to rewrite
-  safely (compound pipelines) or when engraph has a much smaller
-  structured answer available (subgraph redirect).
 - **Passthrough**: no JSON, exit 0. Claude Code treats this as "no
-  decision," runs the original command unchanged.
+  decision," runs the original command unchanged. This is the fate of every
+  compound command the pipeline path doesn't handle (`&&`, `;`, byte-consuming
+  pipes, redirects, command substitution).
+
+The only `deny` the bash hook ever emits is the Gate-1 subgraph redirect
+(`emit_subgraph_deny`, `redirect.rs`) — there is no "deny+suggest the
+subcommand" path; unwrappable commands simply pass through.
 
 ### 5.2 Why PreToolUse to rewrite, PostToolUse only to augment
 
@@ -477,12 +498,12 @@ content.
 
 ### 5.3 Quote-aware shell-meta detection
 
-`has_unquoted_shell_meta` (`engraph-cli`) tracks single quotes, double
+`has_unquoted_shell_meta` (`rewrite.rs`) tracks single quotes, double
 quotes, backslash escapes, and `$(...)` substitutions while scanning for
 meta characters. False positives are tolerated (the fallback is the safe
-DenySuggest); false negatives would be catastrophic (rewriting a
-compound pipeline that the wrapper doesn't actually handle), so the
-detection errs conservative.
+Passthrough, or the pipeline path which only wraps display-sink pipes);
+false negatives would be catastrophic (rewriting a compound pipeline that
+the wrapper doesn't actually handle), so the detection errs conservative.
 
 `has_heredoc` reuses the same quote-tracking loop to spot
 `<<TAG` outside quotes. Heredoc detection short-circuits the rest of
@@ -491,14 +512,15 @@ command would terminate the heredoc body at the wrong place or pull
 the body lines into argv.
 
 `is_env_assignment` is a tight identifier-equals-anything
-check matching POSIX variable-name rules. It's used both by the
-prefix-peeling logic and (legacy) directly in the compound scan.
+check matching POSIX variable-name rules. Its only caller is the
+prefix-peeling logic in `strip_command_prefix`.
 
 ### 5.4 Parser-shape normalizers
 
 The rewrite pass would misroute several common command shapes without
-explicit normalization. Each is a single helper called from the head
-of `try_auto_rewrite` :
+explicit normalization. Each is a single helper called from
+`classify_for_wrap` (which both `try_auto_rewrite` and `rewrite_pipeline`
+invoke, per command or per pipeline stage):
 
 - `strip_command_prefix` peels `sudo` / `env` (by bailing
   out — different privilege boundary or non-trivial flag parsing)
@@ -515,15 +537,19 @@ of `try_auto_rewrite` :
   and drops the global options `-C path`, `-c key=value`,
   `--git-dir=…`, `--work-tree=…`. Without this, `git -C /tmp status`
   classifies as `generic` (because `pick("git", ["-C", ...])` falls
-  through), losing all of the git-specific filter savings.
+  through), losing all of the git-specific filter savings. The
+  option-length count is delegated to `filters::git_global_opt_len`
+  (engraph-compress), shared with `pick` so both agree on where the
+  subcommand starts.
 
 ### 5.5 Subgraph redirect on `rg` / `grep`
 
-`try_subgraph_redirect_for_bash` runs after the parser
-normalizers but before the compound-shell and filter-pick branches.
-It uses the same normalized argv: argv[0] must be `rg` or `grep`
-(so `/usr/bin/rg` is in scope thanks to `normalize_argv0`), and the
-first non-flag arg is the candidate pattern.
+`try_subgraph_redirect_for_bash` (`redirect.rs`) runs as a separate gate
+in `run_pre_bash_hook`, before `try_auto_rewrite` is called at all. It
+does its own normalization (`shell_words::split` → `strip_command_prefix`
+→ `normalize_argv0`): argv[0] must be `rg` or `grep` (so `/usr/bin/rg` is
+in scope thanks to `normalize_argv0`), and the first non-flag arg is the
+candidate pattern. Heredocs and unquoted shell-meta commands skip the gate.
 
 Shared with the native `PreToolUse(Grep)` path:
 
@@ -532,7 +558,7 @@ Shared with the native `PreToolUse(Grep)` path:
   short tokens (`if`, `id`) skip the redirect.
 - `try_subgraph_redirect` does a
   `SELECT COUNT(*) FROM (SELECT 1 FROM entities WHERE name = ?1
-  OR id = ?1 LIMIT 4)`. Only counts 1–3 trigger DenySuggest; 0 is a
+  OR id = ?1 LIMIT 4)`. Only counts 1–3 trigger the deny; 0 is a
   non-indexed name, 4+ would resolve as Ambiguous in
   `subgraph_for` (`subgraph.rs`) and force a retry anyway.
 
@@ -624,9 +650,9 @@ that line on the next ingest.
 ### 6.2 Sidechain filtering
 
 Claude Code's sub-agent feature emits transcript events with
-`isSidechain: true`. `RawEvent::is_sidechain` (`engraph-ingest`)
-catches them at parse time and skips them — those events would otherwise
-pollute the main session memory with sub-agent chatter.
+`isSidechain: true`. `RawEvent` deserializes this into an `is_sidechain`
+field (`ingest.rs`); the ingest loop checks it and skips those events —
+they would otherwise pollute the main session memory with sub-agent chatter.
 
 ### 6.3 Per-file transactional commit
 
@@ -719,9 +745,10 @@ This means user-supplied text like `auth: token?` is rendered as
 ### 7.3 Scoping
 
 `ScopeFilter::All` runs unfiltered. `ScopeFilter::Project(name)`
-resolves to the set of `scope_members` whose scope has
-`kind = 'project' AND name = ?`. `ScopeFilter::Scope(id)` is a single
-scope. Resolution happens once per query (`scope::resolve`,
+resolves to the `scopes` IDs where
+`kind = 'project' AND name = ? AND archived = 0`; the `scope_members` join
+is then applied per-target during search. `ScopeFilter::Scope(id)` is a
+single scope. Resolution happens once per query (`scope::resolve`,
 `engraph-retrieve::scope`).
 
 The SQL is built dynamically because the placeholder count varies with
@@ -847,9 +874,23 @@ implementing the same trait. No call site changes needed.
 
 ## 8. SessionStart brief hook
 
-`run_session_start_hook` (`engraph-cli`). Reads Claude's
-SessionStart JSON from stdin, produces a markdown brief, emits it as
-`hookSpecificOutput.additionalContext`.
+`run_session_start_hook` (`hooks.rs`). Reads Claude's
+SessionStart JSON from stdin, runs a catch-up ingest (below), produces a
+markdown brief, and emits it as `hookSpecificOutput.additionalContext`.
+
+### 8.0 Catch-up ingest
+
+Before building the brief, the hook calls `ingest_project_transcripts`
+(`hooks.rs`). `SessionEnd` ingest only fires on a *clean* session exit, so a
+killed or abruptly-closed session is never captured. SessionStart fires
+reliably, so it sweeps the project's transcript directory — the parent of the
+payload's `transcript_path`, else the reconstructed
+`~/.claude/projects/<cwd-with-slashes-as-dashes>` layout — and `ingest_file`s
+every top-level `.jsonl`. It is incremental and idempotent via `ingestion_log`
+offsets (re-runs only read appended bytes), `read_dir` is non-recursive so
+per-session `subagents/` sidechains are skipped, per-file errors are logged and
+skipped, and a `session_ingest` telemetry event is recorded when anything was
+inserted. This recovers sessions a missed `SessionEnd` dropped, on the next start.
 
 ### 8.1 What goes in
 
@@ -871,7 +912,7 @@ For the resolved `session_id`:
 Empty briefs are emitted as the empty string. A truly fresh project
 costs zero injected tokens. The cap is `MAX_BRIEF_BYTES = 2048`;
 overflow is truncated with a `…[truncated]` marker preserving UTF-8
-boundaries (`truncate_to_bytes`, `engraph-cli`).
+boundaries (`truncate_to_bytes`, `hooks.rs`).
 
 ### 8.2 Why this exact set
 
@@ -946,7 +987,7 @@ report.
 ```
 events(seq INT PK, id UUIDv7, session_id, kind, feature, filter_id,
        input_tokens, output_tokens, latency_ms, ts)
-kind ∈ {compress, retrieve, hook, wrapped_cmd}
+kind ∈ {compress, retrieve, hook, wrapped_cmd, index}
 ```
 
 UUIDv7 IDs are time-ordered for natural chronological indexing without
@@ -978,7 +1019,8 @@ row at the bottom sums only the rows that contributed a numeric
 
 ### 11.1 Unix-only code paths
 
-Exactly two places.
+Exactly two production code paths (a third `#[cfg(unix)]` gates a
+symlink-handling test in `bazel_symbols.rs`).
 
 - **File inode** (`engraph-ingest`): used in the rotation
   fingerprint. On non-Unix the function returns `None`, and the rotation
@@ -1044,6 +1086,10 @@ but logs a warning if it ever happens.
 | 4 | `ingestion_log` rotation fingerprint columns (`last_inode`, `last_size`). |
 | 5 | Drop `messages_au` / `context_items_au` triggers so `compress-existing` doesn't overwrite the FTS index (§6.4). |
 | 6 | Codegraph: add `file_path`, `line_range`, `signature` columns to `entities` plus `idx_entities_file_path`. `relations.kind` is validated in Rust (`RelationKind` enum) rather than via DB CHECK; SQLite can't `ALTER ADD CHECK` and rebuilding the FK-referenced table risked dropping rows. |
+| 7 | Widen the `events.kind` CHECK constraint to admit `'index'` (codegraph-build telemetry). |
+| 8 | Add `context_items.project` column + `idx_context_items_project` so saved decisions scope to a project and surface in the SessionStart brief. |
+
+(`SCHEMA_VERSION = 8`; the `MIGRATIONS` array has 8 entries.)
 
 ---
 
@@ -1082,15 +1128,17 @@ grep loop Claude would otherwise run.
 
 ### 14.1 Crate boundary
 
-`crates/engraph-codegraph/` is its own workspace member. Five modules:
+`crates/engraph-codegraph/` is its own workspace member. Seven modules:
 
 | Module | Role |
 |---|---|
 | `driver.rs` | `trait Driver { name, detect, command, output_path }` + five impls (`RustAnalyzer`, `ScipPython`, `ScipGo`, `ScipTypescript`, `ScipJava`) + `registry()` |
 | `relation_kind.rs` | `enum RelationKind { Defines, References, Calls, Implements, Extends, Imports }` — the in-Rust validator that replaces a DB-level CHECK on `relations.kind` |
 | `scip_loader.rs` | SCIP protobuf bytes → entity/relation rows, two-pass (§14.3) |
-| `index.rs` | `index_repo()` orchestrator: run every matching driver, merge SCIP, load (see §14.2 for the multi-driver pipeline) |
+| `index.rs` | `index_repo()` / `index_workspace()` orchestrator: run every matching driver, merge SCIP, load; workspace + recursive discovery (§14.2, §14.7) |
 | `subgraph.rs` | `subgraph_for()` + `format_markdown()` (§14.4) |
+| `bazel.rs` | target-level Bazel indexing via `bazel query` (§14.8) |
+| `bazel_symbols.rs` | symbol-level Bazel indexing via per-language SCIP indexers (§14.9) |
 
 The crate depends on `scip = "0.7"` and `protobuf = "3.7"` (rust-protobuf;
 scip ships pre-generated message code so no `protoc` is needed at build
@@ -1110,7 +1158,7 @@ crate that does cross-file `who-calls` across Rust/Python/Go/TS/Java.
 | Driver | `detect()` trigger | `command()` |
 |---|---|---|
 | `RustAnalyzer` | `Cargo.toml` | `rust-analyzer scip <repo> --output <repo>/index.scip` (chdir into repo) |
-| `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <repo>/index.scip --project-name <basename>` |
+| `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <repo>/index.scip --project-name <basename> --project-version 0.0.0` |
 | `ScipGo` | `go.mod` | `scip-go --module-root <repo>` (chdir into repo) |
 | `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index` (chdir into repo) |
 | `ScipJava` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java index --output <repo>/index.scip` (chdir into repo) |
@@ -1257,15 +1305,18 @@ emits the raw `Neighborhood` struct for programmatic callers.
 
 ### 14.5 Telemetry
 
-`Index` events: `kind = WrappedCmd, feature = "codegraph_index", filter_id =
-<driver name>, input_tokens = scip_bytes, output_tokens = 0`. The
-driver name (`"rust-analyzer"`, `"scip-go"`, …) lets `engraph gain`
-slice per-language indexer cost.
+`Index` events: `kind = Index, feature = "codegraph_index", filter_id =
+<driver name>, input_tokens = scip_bytes, output_tokens = 0`. The dedicated
+`index` kind (migration v7) keeps `input_tokens` (= SCIP bytes, not tokens) out
+of the savings math — `saved_for` returns `None` for it. The driver name
+(`"rust-analyzer"`, `"scip-go"`, …) lets `engraph gain` slice per-language
+indexer cost.
 
 `Subgraph` events: `kind = Retrieve, feature = "subgraph", filter_id =
-"subgraph", output_tokens = tokens::count(&markdown)`. Token cost is
-the bytes-out into Claude's context — comparable to a `recall`
-event for savings accounting.
+"subgraph", input_tokens = subgraph::avoided_read_tokens(&neighborhood),
+output_tokens = tokens::count(&markdown)`. Unlike `recall`, subgraph IS a
+savings feature: `saved_for` credits it `max(input − output, 0)` — the symbol's
+definition-file read it stands in for, minus the markdown emitted (§10.2).
 
 ### 14.6 Coverage on this machine
 
@@ -1568,10 +1619,6 @@ the largest remaining items are:
   Claude session re-indexes the workspace automatically — with
   stale-detection so cold scip-java doesn't fire every session — is
   the most user-visible follow-up.
-- **Deep workspace discovery.** `discover_workspace_repos` walks
-  immediate children only; nested polyrepo layouts need explicit
-  per-repo invocations. Recursion + a depth-limit / `.gitignore`
-  respect would close this.
 - **Codegraph polish items**: per-driver moniker
   normalization rules (the rewrite hook in
   `scip_loader::normalize_moniker` is a no-op today) and the
