@@ -683,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "engraph-cli"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "engraph-codegraph"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "engraph-compress"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "engraph-core",
  "regex",
@@ -732,7 +732,7 @@ dependencies = [
 
 [[package]]
 name = "engraph-core"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "engraph-ingest"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -770,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "engraph-retrieve"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "engraph-core",
  "engraph-ingest",
@@ -2388,9 +2388,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.12.3"
+version = "1.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e10754a14b9137dd7b1e3e5b0493cc9171fdd105e0ab477f51b72e7f3ac0e276"
+checksum = "f1292b7759ae1cb9ec195452d1390a074f0cd8541ab7a5a8c31cd6db45d4a6ba"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -2411,9 +2411,9 @@ dependencies = [
 
 [[package]]
 name = "regex-syntax"
-version = "0.8.10"
+version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reqwest"
@@ -2505,9 +2505,9 @@ dependencies = [
 
 [[package]]
 name = "rustc-hash"
-version = "1.1.0"
+version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
+checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
 
 [[package]]
 name = "rustix"
@@ -2976,9 +2976,9 @@ dependencies = [
 
 [[package]]
 name = "tiktoken-rs"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fac4a168cfc1d8ed65bf17a6ee0843ad9a68f863c63c0fb2fa7eab67838782ee"
+checksum = "027853bbf8c7763b77c5c595f1c271c7d536ced7d6f83452911b944621e57fc2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
