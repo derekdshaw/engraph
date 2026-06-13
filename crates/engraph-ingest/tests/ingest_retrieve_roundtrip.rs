@@ -1,7 +1,13 @@
-//! End-to-end retrieval gates from the Phase 3 plan:
-//! - Ingest a known JSONL file; recall <known phrase> returns the message
-//! - Scoped query returns only in-scope hits
-//! - KG: insert one relation; recall --kind entity <name> returns it
+//! Ingest → retrieve roundtrip across both crates: engraph-ingest writes
+//! session messages and KG rows, engraph-retrieve reads them back. This test
+//! lives in engraph-ingest (which already depends on engraph-retrieve) rather
+//! than in engraph-retrieve, so the two crates don't form a dev-dependency
+//! cycle.
+//!
+//! Gates (from the Phase 3 plan):
+//! - Ingest a known JSONL file; search for a rare phrase returns the message.
+//! - Scoped query returns only in-scope hits.
+//! - KG: insert one relation; entity search returns the endpoint by name.
 
 use engraph_core::db::open_pool;
 use engraph_ingest::ingest_file;

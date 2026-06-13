@@ -312,11 +312,27 @@ fn parse_manifest_line(
 fn run_driver_to_scip(repo: &Path, drv: &dyn driver::Driver) -> Result<Vec<u8>> {
     let mut cmd = drv.command(repo);
     tracing::info!(driver = drv.name(), ?cmd, "running SCIP indexer");
-    let status = cmd
-        .status()
+    // Capture rather than inherit: rust-analyzer is noisy on stderr (load
+    // progress, known SCIP-emitter warnings, duplicate-symbol reports) yet
+    // writes the index to --output, not stdout. Keep its chatter out of
+    // engraph's output on success; surface a tail only on failure.
+    let output = cmd
+        .output()
         .with_context(|| format!("spawning {}", drv.name()))?;
-    if !status.success() {
-        anyhow::bail!("{} exited with {}", drv.name(), status);
+    if !output.status.success() {
+        anyhow::bail!(
+            "{} exited with {}\nstderr (tail):\n{}",
+            drv.name(),
+            output.status,
+            bazel::tail_lines(&String::from_utf8_lossy(&output.stderr), 25)
+        );
+    }
+    if !output.stderr.is_empty() {
+        tracing::debug!(
+            driver = drv.name(),
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "indexer stderr"
+        );
     }
     let scip_path = drv.output_path(repo);
     let bytes = std::fs::read(&scip_path)

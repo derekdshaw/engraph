@@ -773,7 +773,6 @@ name = "engraph-retrieve"
 version = "0.2.0"
 dependencies = [
  "engraph-core",
- "engraph-ingest",
  "rusqlite",
  "serde",
  "tempfile",
