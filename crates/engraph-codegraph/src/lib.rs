@@ -1,6 +1,7 @@
 pub mod bazel;
 pub mod bazel_symbols;
 pub mod driver;
+pub mod gc;
 pub mod index;
 pub mod relation_kind;
 pub mod scip_loader;
@@ -12,6 +13,7 @@ pub use bazel_symbols::{
     plan_symbol_langs,
 };
 pub use driver::{Driver, registry};
+pub use gc::collect_orphans;
 pub use index::{
     IndexPlan, IndexStats, SymbolLangSummary, WorkspaceRepoResult, WorkspaceStats,
     discover_workspace_repos, index_repo, index_scip_manifest, index_workspace, plan_repo,

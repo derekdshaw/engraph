@@ -191,6 +191,8 @@ fn main() -> Result<()> {
             workspace,
             bazel_symbols,
             no_bazel_symbols,
+            gc,
+            no_gc,
             recursive,
             dry_run,
         } => {
@@ -208,6 +210,10 @@ fn main() -> Result<()> {
             } else {
                 workspace.is_some() || recursive
             };
+            // Pre-index orphan GC: on by default, --no-gc opts out. (clap makes
+            // --gc / --no-gc mutually exclusive, so this is just `!no_gc` with
+            // an explicit --gc also forcing it on.)
+            let effective_gc = gc || !no_gc;
             // `--recursive` indexes a tree of projects rooted at --workspace, or
             // the positional repo if --workspace wasn't given.
             let recursive_root: Option<PathBuf> = if recursive {
@@ -253,6 +259,7 @@ fn main() -> Result<()> {
                     &root,
                     effective_bazel_symbols,
                     recursive,
+                    effective_gc,
                 )?;
                 let total_bytes: usize = stats
                     .repos
@@ -272,15 +279,22 @@ fn main() -> Result<()> {
                         Err(e) => println!("  err {} :: {e:#}", r.project),
                     }
                 }
+                let pruned = stats.pruned_total();
+                let pruned_note = if pruned > 0 {
+                    format!(", {pruned} pruned")
+                } else {
+                    String::new()
+                };
                 println!(
-                    "workspace {}: {} repo(s) ok, {} failed; {} entities, {} relations total ({} SCIP bytes, {}ms)",
+                    "workspace {}: {} repo(s) ok, {} failed; {} entities, {} relations total ({} SCIP bytes, {}ms){}",
                     root.display(),
                     stats.ok_count(),
                     stats.err_count(),
                     stats.entities_total(),
                     stats.relations_total(),
                     total_bytes,
-                    start.elapsed().as_millis()
+                    start.elapsed().as_millis(),
+                    pruned_note
                 );
                 telemetry::record_event(
                     &conn,
@@ -301,7 +315,8 @@ fn main() -> Result<()> {
                 let canonical = repo.canonicalize().unwrap_or_else(|_| repo.clone());
                 let project_key =
                     project.unwrap_or_else(|| canonical.to_string_lossy().into_owned());
-                let stats = engraph_codegraph::index_scip_manifest(&conn, m, &project_key)?;
+                let stats =
+                    engraph_codegraph::index_scip_manifest(&conn, m, &project_key, effective_gc)?;
                 telemetry::record_event(
                     &conn,
                     EventInput {
@@ -314,14 +329,20 @@ fn main() -> Result<()> {
                         latency_ms: start.elapsed().as_millis() as i64,
                     },
                 )?;
+                let pruned_note = if stats.entities_pruned > 0 {
+                    format!(", {} pruned", stats.entities_pruned)
+                } else {
+                    String::new()
+                };
                 println!(
-                    "indexed {} ({} entities, {} relations, {} SCIP bytes, {}ms, driver={})",
+                    "indexed {} ({} entities, {} relations, {} SCIP bytes, {}ms, driver={}){}",
                     project_key,
                     stats.entities_inserted,
                     stats.relations_inserted,
                     stats.scip_bytes,
                     stats.elapsed_ms,
-                    stats.driver_name
+                    stats.driver_name,
+                    pruned_note
                 );
             } else {
                 let canonical = repo.canonicalize().unwrap_or_else(|_| repo.clone());
@@ -334,6 +355,7 @@ fn main() -> Result<()> {
                     lang.as_deref(),
                     &project_key,
                     effective_bazel_symbols,
+                    effective_gc,
                 )?;
                 telemetry::record_event(
                     &conn,
@@ -347,14 +369,20 @@ fn main() -> Result<()> {
                         latency_ms: start.elapsed().as_millis() as i64,
                     },
                 )?;
+                let pruned_note = if stats.entities_pruned > 0 {
+                    format!(", {} pruned", stats.entities_pruned)
+                } else {
+                    String::new()
+                };
                 println!(
-                    "indexed {} ({} entities, {} relations, {} SCIP bytes, {}ms, driver={})",
+                    "indexed {} ({} entities, {} relations, {} SCIP bytes, {}ms, driver={}){}",
                     project_key,
                     stats.entities_inserted,
                     stats.relations_inserted,
                     stats.scip_bytes,
                     stats.elapsed_ms,
-                    stats.driver_name
+                    stats.driver_name,
+                    pruned_note
                 );
                 print_symbol_langs(&stats.symbol_langs, "  ");
             }

@@ -17,6 +17,8 @@ pub struct IndexStats {
     /// `--bazel-symbols` pass ran; lets the CLI report why symbols were (or
     /// were not) produced instead of silently degrading to target-level.
     pub symbol_langs: Vec<SymbolLangSummary>,
+    /// Orphan entities pruned by the pre-index GC pass (0 when GC is disabled).
+    pub entities_pruned: usize,
 }
 
 /// One language's result from the Bazel symbol-level pass, flattened for
@@ -58,6 +60,13 @@ impl WorkspaceStats {
             .map(|s| s.relations_inserted)
             .sum()
     }
+    pub fn pruned_total(&self) -> usize {
+        self.repos
+            .iter()
+            .filter_map(|r| r.outcome.as_ref().ok())
+            .map(|s| s.entities_pruned)
+            .sum()
+    }
     pub fn ok_count(&self) -> usize {
         self.repos.iter().filter(|r| r.outcome.is_ok()).count()
     }
@@ -66,9 +75,24 @@ impl WorkspaceStats {
     }
 }
 
+/// Run the pre-index orphan GC for `project` when `gc` is set, logging and
+/// returning the pruned count (0 when disabled). Called at the top of each
+/// indexing entry point, before any load re-populates the project.
+fn gc_pass(conn: &PooledConn, project: &str, gc: bool) -> Result<usize> {
+    if !gc {
+        return Ok(0);
+    }
+    let n = crate::gc::collect_orphans(conn, project)?;
+    if n > 0 {
+        tracing::info!(project, pruned = n, "GC: pruned orphan entities");
+    }
+    Ok(n)
+}
+
 /// Drive a SCIP indexer (or accept a prebuilt index.scip) and load its output
 /// into the codegraph tables. `project` is the entity scope key (typically the
-/// canonical repo path).
+/// canonical repo path). When `gc` is set, orphan entities for `project` are
+/// pruned before the load (see [`crate::gc`]).
 pub fn index_repo(
     conn: &PooledConn,
     repo: &Path,
@@ -76,8 +100,10 @@ pub fn index_repo(
     lang_override: Option<&str>,
     project: &str,
     bazel_symbols: bool,
+    gc: bool,
 ) -> Result<IndexStats> {
     let start = Instant::now();
+    let entities_pruned = gc_pass(conn, project, gc)?;
 
     // Phase 2.3: a Bazel workspace takes the bazel-query path unless the
     // caller explicitly passed --scip <path> (which says "load this SCIP
@@ -116,6 +142,7 @@ pub fn index_repo(
             elapsed_ms: start.elapsed().as_millis() as i64,
             driver_name,
             symbol_langs,
+            entities_pruned,
         });
     }
 
@@ -130,6 +157,7 @@ pub fn index_repo(
             elapsed_ms: start.elapsed().as_millis() as i64,
             driver_name: "prebuilt",
             symbol_langs: Vec::new(),
+            entities_pruned,
         });
     }
 
@@ -145,6 +173,7 @@ pub fn index_repo(
             elapsed_ms: start.elapsed().as_millis() as i64,
             driver_name: driver_static_name(drv.name()),
             symbol_langs: Vec::new(),
+            entities_pruned,
         });
     }
 
@@ -209,6 +238,7 @@ pub fn index_repo(
         elapsed_ms: start.elapsed().as_millis() as i64,
         driver_name,
         symbol_langs: Vec::new(),
+        entities_pruned,
     })
 }
 
@@ -226,8 +256,10 @@ pub fn index_scip_manifest(
     conn: &PooledConn,
     manifest: &Path,
     project: &str,
+    gc: bool,
 ) -> Result<IndexStats> {
     let start = Instant::now();
+    let entities_pruned = gc_pass(conn, project, gc)?;
     let (merged, scip_bytes_in) = build_manifest_scip(manifest)?;
     let load_stats = scip_loader::load(conn, project, &merged)?;
     Ok(IndexStats {
@@ -237,6 +269,7 @@ pub fn index_scip_manifest(
         elapsed_ms: start.elapsed().as_millis() as i64,
         driver_name: "scip-manifest",
         symbol_langs: Vec::new(),
+        entities_pruned,
     })
 }
 
@@ -491,6 +524,7 @@ pub fn index_workspace(
     workspace_root: &Path,
     bazel_symbols: bool,
     recursive: bool,
+    gc: bool,
 ) -> Result<WorkspaceStats> {
     let repos = if recursive {
         discover_repos_recursive(workspace_root)?
@@ -512,7 +546,7 @@ pub fn index_workspace(
     for repo in repos {
         let canonical = repo.canonicalize().unwrap_or_else(|_| repo.clone());
         let project = canonical.to_string_lossy().into_owned();
-        let outcome = index_repo(conn, &repo, None, None, &project, bazel_symbols);
+        let outcome = index_repo(conn, &repo, None, None, &project, bazel_symbols, gc);
         stats.repos.push(WorkspaceRepoResult {
             repo,
             project,

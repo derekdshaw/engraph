@@ -141,7 +141,7 @@ fn bazel_symbols_pass_runs_with_java_delegated() {
     let pool = open_pool(&dir.path().join("eg.db")).unwrap();
     let conn = pool.get().unwrap();
 
-    let stats = match index_repo(&conn, &root, None, None, "/proj/ws", true) {
+    let stats = match index_repo(&conn, &root, None, None, "/proj/ws", true, false) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("skip: index_repo failed (cold toolchain / network?): {e:#}");
@@ -220,7 +220,7 @@ fn bazel_symbols_pass_runs_with_go_delegated() {
     let pool = open_pool(&dir.path().join("eg.db")).unwrap();
     let conn = pool.get().unwrap();
 
-    let stats = match index_repo(&conn, &root, None, None, "/proj/ws", true) {
+    let stats = match index_repo(&conn, &root, None, None, "/proj/ws", true, false) {
         Ok(s) => s,
         Err(e) => {
             unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_GO_CMD") };
