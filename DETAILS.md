@@ -1132,7 +1132,7 @@ grep loop Claude would otherwise run.
 
 | Module | Role |
 |---|---|
-| `driver.rs` | `trait Driver { name, detect, command, output_path }` + five impls (`RustAnalyzer`, `ScipPython`, `ScipGo`, `ScipTypescript`, `ScipJava`) + `registry()` |
+| `driver.rs` | `trait Driver { name, detect, command }` + five impls (`RustAnalyzer`, `ScipPython`, `ScipGo`, `ScipTypescript`, `ScipJava`) + `registry()` |
 | `relation_kind.rs` | `enum RelationKind { Defines, References, Calls, Implements, Extends, Imports }` — the in-Rust validator that replaces a DB-level CHECK on `relations.kind` |
 | `scip_loader.rs` | SCIP protobuf bytes → entity/relation rows, two-pass (§14.3) |
 | `index.rs` | `index_repo()` / `index_workspace()` orchestrator: run every matching driver, merge SCIP, load; workspace + recursive discovery (§14.2, §14.7) |
@@ -1157,11 +1157,20 @@ crate that does cross-file `who-calls` across Rust/Python/Go/TS/Java.
 
 | Driver | `detect()` trigger | `command()` |
 |---|---|---|
-| `RustAnalyzer` | `Cargo.toml` | `rust-analyzer scip <repo> --output <repo>/index.scip` (chdir into repo) |
-| `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <repo>/index.scip --project-name <basename> --project-version 0.0.0` |
-| `ScipGo` | `go.mod` | `scip-go --module-root <repo>` (chdir into repo) |
-| `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index` (chdir into repo) |
-| `ScipJava` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java index --output <repo>/index.scip` (chdir into repo) |
+| `RustAnalyzer` | `Cargo.toml` | `rust-analyzer scip <repo> --output <out>` (chdir into repo) |
+| `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <out> --project-name <basename> --project-version 0.0.0` |
+| `ScipGo` | `go.mod` | `scip-go --module-root <repo> --output <out>` (chdir into repo) |
+| `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index --output <out>` (chdir into repo) |
+| `ScipJava` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java index --output <out>` (chdir into repo) |
+
+`<out>` is `index.scip` inside a per-repo scratch directory `index.rs`
+picks — never the repo itself, so indexing leaves no artifact in the
+working tree. The default base is `~/.local/share/engraph/scip/` (next to
+the DB); `ENGRAPH_SCIP_OUTPUT_DIR` overrides the base. Either way a
+`<sha256(canonical-repo-path)[..16]>` subdir is appended so concurrent
+indexes of different repos don't clobber each other. The file is read back
+into memory immediately after the indexer exits and never reused — it is
+pure scratch, kept only as a re-index cache.
 
 scip-java's `index` subcommand auto-detects `{Maven, Gradle, sbt, mill}`
 when invoked standalone (the path covered by `drivers_live.rs`).

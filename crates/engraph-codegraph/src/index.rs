@@ -1,6 +1,7 @@
 use crate::{bazel, bazel_symbols, driver, scip_loader};
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -342,8 +343,37 @@ fn parse_manifest_line(
     Ok((root, scip_path))
 }
 
+/// Directory the external indexer writes its `index.scip` into. Deliberately
+/// OUTSIDE the repo so indexing never pollutes the working tree. Default base is
+/// `~/.local/share/engraph/scip/` (alongside the DB); `ENGRAPH_SCIP_OUTPUT_DIR`
+/// overrides the base. Either way a per-repo `<hash>` subdir is appended so
+/// concurrent indexes of different repos don't clobber each other's file.
+fn scip_output_dir(repo: &Path) -> PathBuf {
+    let base = std::env::var("ENGRAPH_SCIP_OUTPUT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::data_local_dir()
+                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".local/share"))
+                .join("engraph")
+                .join("scip")
+        });
+    let canonical = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    base.join(&hex[..16])
+}
+
 fn run_driver_to_scip(repo: &Path, drv: &dyn driver::Driver) -> Result<Vec<u8>> {
-    let mut cmd = drv.command(repo);
+    let out_dir = scip_output_dir(repo);
+    std::fs::create_dir_all(&out_dir)
+        .with_context(|| format!("creating SCIP output dir {}", out_dir.display()))?;
+    let scip_path = out_dir.join("index.scip");
+    let mut cmd = drv.command(repo, &scip_path);
     tracing::info!(driver = drv.name(), ?cmd, "running SCIP indexer");
     // Capture rather than inherit: rust-analyzer is noisy on stderr (load
     // progress, known SCIP-emitter warnings, duplicate-symbol reports) yet
@@ -367,7 +397,6 @@ fn run_driver_to_scip(repo: &Path, drv: &dyn driver::Driver) -> Result<Vec<u8>> 
             "indexer stderr"
         );
     }
-    let scip_path = drv.output_path(repo);
     let bytes = std::fs::read(&scip_path)
         .with_context(|| format!("reading SCIP at {}", scip_path.display()))?;
     Ok(bytes)
