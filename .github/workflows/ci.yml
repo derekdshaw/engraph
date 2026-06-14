@@ -55,9 +55,10 @@ jobs:
     # indexer binary is absent, so the main `test` matrix only covers them where
     # a runner happens to ship the tool. Here we install the indexers and then
     # HARD-verify each is runnable, so a silent install failure fails CI instead
-    # of letting the tests skip green. scip-java is intentionally omitted — its
-    # Coursier + Maven build is slow and network-flaky; the other four cover the
-    # driver argv/output-path contract this job exists to protect.
+    # of letting the tests skip green. 
+    # NOTE: scip-java is intentionally omitted — its Coursier + Maven build is
+    # slow and network-flaky; the other four cover the driver argv/output-path
+    # contract this job exists to protect.
     name: Codegraph live drivers (linux)
     runs-on: ubuntu-latest
     steps:
