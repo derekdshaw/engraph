@@ -1,15 +1,17 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 /// One adapter per (build system, language). Engraph shells out to the external
 /// SCIP indexer; the driver is a thin file-probe + argv builder.
+///
+/// `out` is the absolute path the indexer must write its SCIP file to. The
+/// caller (`index::run_driver_to_scip`) picks it — deliberately OUTSIDE the
+/// repo, so indexing never pollutes the working tree — and reads it back. Every
+/// driver pins `--output` (or the indexer's equivalent) to `out`.
 pub trait Driver: Send + Sync {
     fn name(&self) -> &'static str;
     fn detect(&self, repo: &Path) -> bool;
-    fn command(&self, repo: &Path) -> Command;
-    fn output_path(&self, repo: &Path) -> PathBuf {
-        repo.join("index.scip")
-    }
+    fn command(&self, repo: &Path, out: &Path) -> Command;
 }
 
 pub fn registry() -> Vec<Box<dyn Driver>> {
@@ -34,15 +36,15 @@ impl Driver for RustAnalyzer {
     fn detect(&self, repo: &Path) -> bool {
         repo.join("Cargo.toml").is_file()
     }
-    fn command(&self, repo: &Path) -> Command {
+    fn command(&self, repo: &Path, out: &Path) -> Command {
         // rust-analyzer's `scip` defaults `--output` to `index.scip` in the
-        // process's CWD, not the repo. Pin both: pass --output explicitly and
-        // also chdir into the repo so any auxiliary files land alongside it.
+        // process's CWD; pin it explicitly to `out`. Still chdir into the repo
+        // so any auxiliary files it writes land there, not in engraph's cwd.
         let mut c = Command::new("rust-analyzer");
         c.arg("scip")
             .arg(repo)
             .arg("--output")
-            .arg(self.output_path(repo))
+            .arg(out)
             .current_dir(repo);
         c
     }
@@ -62,20 +64,21 @@ impl Driver for ScipPython {
     fn detect(&self, repo: &Path) -> bool {
         repo.join("pyproject.toml").is_file() || repo.join("setup.py").is_file()
     }
-    fn command(&self, repo: &Path) -> Command {
+    fn command(&self, repo: &Path, out: &Path) -> Command {
         let project_name = repo
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "project".to_string());
         // scip-python's --cwd defaults to the spawning process's CWD, and
-        // --output is resolved relative to --cwd. Pin both so the SCIP file
-        // lands at <repo>/index.scip regardless of where engraph was invoked.
+        // --output is resolved relative to --cwd. Pin --cwd to the repo (so it
+        // indexes the right tree) and --output to `out` (an absolute path
+        // outside the repo), regardless of where engraph was invoked.
         let mut c = Command::new("scip-python");
         c.arg("index")
             .arg("--cwd")
             .arg(repo)
             .arg("--output")
-            .arg(self.output_path(repo))
+            .arg(out)
             .arg("--project-name")
             .arg(project_name)
             // Pin a fixed --project-version, deliberately OVERRIDING scip-python's
@@ -111,9 +114,16 @@ impl Driver for ScipGo {
     fn detect(&self, repo: &Path) -> bool {
         repo.join("go.mod").is_file()
     }
-    fn command(&self, repo: &Path) -> Command {
+    fn command(&self, repo: &Path, out: &Path) -> Command {
+        // scip-go defaults --output to `index.scip` in the cwd; pin it to `out`
+        // so nothing lands in the repo. Still chdir into the repo for module
+        // resolution.
         let mut c = Command::new("scip-go");
-        c.arg("--module-root").arg(repo).current_dir(repo);
+        c.arg("--module-root")
+            .arg(repo)
+            .arg("--output")
+            .arg(out)
+            .current_dir(repo);
         c
     }
 }
@@ -126,9 +136,11 @@ impl Driver for ScipTypescript {
     fn detect(&self, repo: &Path) -> bool {
         repo.join("package.json").is_file() && repo.join("tsconfig.json").is_file()
     }
-    fn command(&self, repo: &Path) -> Command {
+    fn command(&self, repo: &Path, out: &Path) -> Command {
+        // scip-typescript defaults --output to `index.scip` in the cwd; pin it
+        // to `out`. Still chdir into the repo so it picks up tsconfig.json.
         let mut c = Command::new("scip-typescript");
-        c.arg("index").current_dir(repo);
+        c.arg("index").arg("--output").arg(out).current_dir(repo);
         c
     }
 }
@@ -149,14 +161,11 @@ impl Driver for ScipJava {
             || repo.join("build.sbt").is_file()
             || repo.join("build.sc").is_file() // mill
     }
-    fn command(&self, repo: &Path) -> Command {
+    fn command(&self, repo: &Path, out: &Path) -> Command {
         // scip-java auto-detects Maven vs Gradle; let it. We just chdir into
-        // the repo and pin --output so the SCIP file lands at <repo>/index.scip.
+        // the repo and pin --output to `out` (outside the repo).
         let mut c = Command::new("scip-java");
-        c.arg("index")
-            .arg("--output")
-            .arg(self.output_path(repo))
-            .current_dir(repo);
+        c.arg("index").arg("--output").arg(out).current_dir(repo);
         c
     }
 }
@@ -167,7 +176,10 @@ mod tests {
 
     #[test]
     fn scip_python_command_pins_project_version() {
-        let cmd = ScipPython.command(Path::new("/tmp/some-repo"));
+        let cmd = ScipPython.command(
+            Path::new("/tmp/some-repo"),
+            Path::new("/tmp/out/index.scip"),
+        );
         let args: Vec<String> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -176,5 +188,8 @@ mod tests {
         assert!(args.contains(&"--project-version".to_string()));
         assert!(args.contains(&SCIP_PYTHON_VERSION.to_string()));
         assert!(args.contains(&"--project-name".to_string()));
+        // The caller-chosen output path must reach scip-python's --output.
+        assert!(args.contains(&"--output".to_string()));
+        assert!(args.contains(&"/tmp/out/index.scip".to_string()));
     }
 }

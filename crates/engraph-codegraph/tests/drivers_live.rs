@@ -23,6 +23,28 @@ fn binary_present(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Redirect the SCIP scratch file off the user's real data dir
+/// (`~/.local/share/engraph/scip`) and into OS temp, so running this suite
+/// doesn't accumulate `index.scip` files there. Set exactly once via `Once`:
+/// these tests run in parallel and `index_repo` reads the env var with
+/// `getenv`, which is not safe against a concurrent `set_var` — so the write
+/// must complete before any test proceeds. All tests share one base; the
+/// per-repo hash subdir inside it keeps each test's output separate.
+fn isolate_scip_output() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // SAFETY: `Once` serializes this write and runs it before any test
+        // body reaches `index_repo`, so no concurrent `getenv` overlaps it.
+        unsafe {
+            std::env::set_var(
+                "ENGRAPH_SCIP_OUTPUT_DIR",
+                std::env::temp_dir().join("engraph-test-scip"),
+            );
+        }
+    });
+}
+
 fn db_for_test(dir: &Path) -> engraph_core::db::Pool {
     open_pool(&dir.join("eg.db")).unwrap()
 }
@@ -44,6 +66,7 @@ fn rust_analyzer_indexes_tiny_crate() {
         eprintln!("skip: rust-analyzer not installed");
         return;
     }
+    isolate_scip_output();
     let dir = tempdir().unwrap();
     let repo = dir.path().join("tiny");
     std::fs::create_dir_all(repo.join("src")).unwrap();
@@ -81,6 +104,7 @@ fn scip_python_indexes_tiny_package() {
         eprintln!("skip: scip-python not installed");
         return;
     }
+    isolate_scip_output();
     let dir = tempdir().unwrap();
     let repo = dir.path().join("tiny");
     std::fs::create_dir_all(&repo).unwrap();
@@ -127,6 +151,7 @@ fn scip_go_indexes_tiny_module() {
         eprintln!("skip: scip-go not installed");
         return;
     }
+    isolate_scip_output();
     let dir = tempdir().unwrap();
     let repo = dir.path().join("tiny");
     std::fs::create_dir_all(&repo).unwrap();
@@ -153,6 +178,7 @@ fn scip_typescript_indexes_tiny_package() {
         eprintln!("skip: scip-typescript not installed");
         return;
     }
+    isolate_scip_output();
     let dir = tempdir().unwrap();
     let repo = dir.path().join("tiny");
     std::fs::create_dir_all(&repo).unwrap();
@@ -211,6 +237,7 @@ fn scip_java_indexes_tiny_module() {
         return;
     };
 
+    isolate_scip_output();
     let dir = tempdir().unwrap();
     let repo = dir.path().join("tiny");
     std::fs::create_dir_all(repo.join("src/main/java/tiny")).unwrap();

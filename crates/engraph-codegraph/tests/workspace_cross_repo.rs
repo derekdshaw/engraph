@@ -22,6 +22,23 @@ fn rust_analyzer_present() -> bool {
         .unwrap_or(false)
 }
 
+/// Redirect the SCIP scratch file off the user's real data dir and into OS
+/// temp so the suite doesn't accumulate `index.scip` files there. Set once via
+/// `Once` (see drivers_live.rs for the thread-safety rationale).
+fn isolate_scip_output() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // SAFETY: `Once` serializes the write before any indexing test runs.
+        unsafe {
+            std::env::set_var(
+                "ENGRAPH_SCIP_OUTPUT_DIR",
+                std::env::temp_dir().join("engraph-test-scip"),
+            );
+        }
+    });
+}
+
 fn write_fixture(root: &std::path::Path) {
     let lib_a = root.join("lib_a");
     std::fs::create_dir_all(lib_a.join("src")).unwrap();
@@ -69,6 +86,7 @@ fn workspace_links_app_b_caller_to_lib_a_foo() {
         eprintln!("skip: rust-analyzer not installed");
         return;
     }
+    isolate_scip_output();
     let dir = tempdir().unwrap();
     let root = dir.path().join("workspace");
     std::fs::create_dir_all(&root).unwrap();
