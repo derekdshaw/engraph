@@ -683,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "engraph-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "engraph-codegraph"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "engraph-compress"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "engraph-core",
  "regex",
@@ -732,7 +732,7 @@ dependencies = [
 
 [[package]]
 name = "engraph-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "engraph-ingest"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -770,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "engraph-retrieve"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "engraph-core",
  "rusqlite",
