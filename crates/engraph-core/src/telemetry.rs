@@ -28,8 +28,55 @@ pub fn record_event(conn: &PooledConn, ev: EventInput<'_>) -> Result<String> {
             ev.latency_ms,
         ],
     )?;
+    emit_metrics(&ev);
     Ok(id)
 }
+
+/// Mirror the event into OpenTelemetry counters/histograms. No-op unless built
+/// with `--features otel` AND `ENGRAPH_OTEL` enabled the global meter provider
+/// (otherwise this records against the default no-op meter, which is cheap).
+/// Attributes are deliberately low-cardinality (`kind`, `feature`); `session_id`
+/// and `filter_id` stay only in the SQLite row to avoid metric series explosion.
+#[cfg(feature = "otel")]
+fn emit_metrics(ev: &EventInput<'_>) {
+    use opentelemetry::{KeyValue, global};
+
+    let meter = global::meter("engraph");
+    let attrs = [
+        KeyValue::new("kind", ev.kind.as_str()),
+        KeyValue::new("feature", ev.feature.to_string()),
+    ];
+
+    meter.u64_counter("engraph.events").build().add(1, &attrs);
+    meter
+        .u64_counter("engraph.tokens.input")
+        .build()
+        .add(ev.input_tokens.max(0) as u64, &attrs);
+    meter
+        .u64_counter("engraph.tokens.output")
+        .build()
+        .add(ev.output_tokens.max(0) as u64, &attrs);
+    if let Some(saved) = saved_for(
+        ev.kind.as_str(),
+        ev.feature,
+        ev.input_tokens,
+        ev.output_tokens,
+    ) && saved > 0
+    {
+        meter
+            .u64_counter("engraph.tokens.saved")
+            .build()
+            .add(saved as u64, &attrs);
+    }
+    meter
+        .u64_histogram("engraph.latency.ms")
+        .build()
+        .record(ev.latency_ms.max(0) as u64, &attrs);
+}
+
+#[cfg(not(feature = "otel"))]
+#[inline]
+fn emit_metrics(_ev: &EventInput<'_>) {}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GainRow {
@@ -47,7 +94,7 @@ pub struct GainRow {
     pub saved_tokens: Option<i64>,
 }
 
-fn saved_for(kind: &str, feature: &str, input: i64, output: i64) -> Option<i64> {
+pub(crate) fn saved_for(kind: &str, feature: &str, input: i64, output: i64) -> Option<i64> {
     match (kind, feature) {
         ("compress" | "wrapped_cmd", _) => Some(input - output),
         // The codegraph subgraph replaces reading a symbol's definition file:

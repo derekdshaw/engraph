@@ -106,10 +106,41 @@ jobs:
       - name: Run codegraph tests (live drivers)
         run: cargo test -p engraph-codegraph --verbose
 
+  otel-build:
+    # The `otel` feature (OpenTelemetry metrics export) is off by default, so the
+    # main `test` matrix never compiles otel.rs, the emit_metrics cfg branch, or
+    # the multi-thread `#[tokio::main]` variant. Build + lint + test it on one leg
+    # so the otel path can't rot silently.
+    name: Otel feature build (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-otel-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Clippy (otel)
+        run: cargo clippy -p engraph-core -p engraph-cli --features engraph-cli/otel --all-targets -- -D warnings
+
+      - name: Test (otel)
+        run: cargo test -p engraph-core -p engraph-cli --features engraph-cli/otel --verbose
+
   tag-and-release:
     name: Tag and release
     runs-on: ubuntu-latest
-    needs: [test, codegraph-live]
+    needs: [test, codegraph-live, otel-build]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: write

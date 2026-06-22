@@ -9,6 +9,7 @@ authors.workspace = true
 [features]
 default = []
 embeddings = ["dep:fastembed"]
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
 
 [dependencies]
 anyhow.workspace = true
@@ -23,6 +24,9 @@ tiktoken-rs.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 fastembed = { version = "4", optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

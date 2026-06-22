@@ -29,7 +29,18 @@ use output::{
     print_gain_table, print_hits, print_repo_plan, print_symbol_langs, print_workspace_plan,
 };
 
-fn main() -> Result<()> {
+// `main` is async because the OTLP/gRPC metrics exporter (the `otel` feature)
+// needs a tokio runtime, and `run_wrapped_command` awaits tokio::process. With
+// `otel` on we use a single worker thread so the worker keeps driving the gRPC
+// export while the main task blocks on the meter provider's shutdown — a
+// current-thread runtime would deadlock there. Without `otel`, the lean default
+// build runs current-thread (no worker threads on the hook hot path).
+#[cfg_attr(
+    feature = "otel",
+    tokio::main(flavor = "multi_thread", worker_threads = 1)
+)]
+#[cfg_attr(not(feature = "otel"), tokio::main(flavor = "current_thread"))]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("ENGRAPH_LOG")
@@ -37,6 +48,12 @@ fn main() -> Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
+
+    // Best-effort metrics export; None (no-op) unless built with `--features otel`
+    // and `ENGRAPH_OTEL` is set. Held for the whole of `main`: dropped on normal
+    // return (flush + shutdown), and shut down explicitly before the process::exit
+    // below (which skips Drop).
+    let otel_guard = engraph_core::otel::init_from_env();
 
     let cli = Cli::parse();
     let pool = db::open_default_pool()?;
@@ -54,6 +71,7 @@ fn main() -> Result<()> {
         Cmd::Run { command, args } => {
             let start = Instant::now();
             let output = run_wrapped_command(&command, &args)
+                .await
                 .map_err(|e| anyhow::anyhow!("exec {command} failed: {e}"))?;
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -92,6 +110,10 @@ fn main() -> Result<()> {
             }
 
             print!("{}", result.text);
+            // process::exit skips Drop, so flush/shutdown the meter provider here.
+            if let Some(g) = otel_guard {
+                g.shutdown();
+            }
             std::process::exit(exit_code);
         }
         Cmd::Hook { cmd } => match cmd {
@@ -602,35 +624,28 @@ fn resolve_project(over: Option<String>) -> Result<String> {
 /// while we wait on the other. Terminal SIGINT/SIGTERM still reach the child
 /// directly via the shared process group; the parent ignores them so it stays
 /// alive long enough to drain the child's last output and record telemetry.
-fn run_wrapped_command(command: &str, args: &[String]) -> Result<std::process::Output> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async move {
-        // Best-effort: install no-op handlers so the parent doesn't die on
-        // Ctrl-C before the child finishes draining. On platforms where signal
-        // registration fails (or isn't supported), proceed without it — terminal
-        // signals still reach the child either way.
-        #[cfg(unix)]
-        let _signal_swallower = {
-            use tokio::signal::unix::{SignalKind, signal};
-            (
-                signal(SignalKind::interrupt()).ok(),
-                signal(SignalKind::terminate()).ok(),
-            )
-        };
+async fn run_wrapped_command(command: &str, args: &[String]) -> Result<std::process::Output> {
+    // Best-effort: install no-op handlers so the parent doesn't die on Ctrl-C
+    // before the child finishes draining. On platforms where signal registration
+    // fails (or isn't supported), proceed without it — terminal signals still
+    // reach the child either way.
+    #[cfg(unix)]
+    let _signal_swallower = {
+        use tokio::signal::unix::{SignalKind, signal};
+        (
+            signal(SignalKind::interrupt()).ok(),
+            signal(SignalKind::terminate()).ok(),
+        )
+    };
 
-        let child = tokio::process::Command::new(command)
-            .args(args)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+    let child = tokio::process::Command::new(command)
+        .args(args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
 
-        // wait_with_output drains stdout and stderr concurrently while it
-        // waits on the child — no pipe-buffer deadlock under large output.
-        let output = child.wait_with_output().await?;
-        Ok::<_, std::io::Error>(output)
-    })
-    .map_err(|e: std::io::Error| anyhow::anyhow!(e))
+    // wait_with_output drains stdout and stderr concurrently while it waits on
+    // the child — no pipe-buffer deadlock under large output.
+    Ok(child.wait_with_output().await?)
 }

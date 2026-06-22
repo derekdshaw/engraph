@@ -4,6 +4,7 @@ pub mod embedding;
 pub mod error;
 pub mod memory;
 pub mod models;
+pub mod otel;
 pub mod schema;
 pub mod telemetry;
 pub mod tokens;

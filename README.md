@@ -116,6 +116,11 @@ retrieve     recall               8          0        842          -
 TOTAL_SAVED                                                   14930
 ```
 
+The same telemetry can be exported to an OpenTelemetry collector (OTLP/gRPC) for
+dashboards — off by default, behind the `otel` build feature and `ENGRAPH_OTEL`.
+See [docs/opentelemetry.md](docs/opentelemetry.md), which covers enabling it and
+the required collector `deltatocumulative` config.
+
 ---
 
 ## Install
@@ -151,6 +156,7 @@ git clone <repo>
 cd engraph
 cargo build --release                       # default: lexical retrieval only
 cargo build --release --features embeddings # opt-in: semantic retrieval (~150MB ONNX runtime + model)
+cargo build --release --features otel       # opt-in: OTLP/gRPC metrics export (see docs/opentelemetry.md)
 
 # Install the binary:
 install -m 0755 target/release/engraph ~/.local/bin/engraph
@@ -305,6 +311,11 @@ cargo fmt --all --check
 cargo build --release --features embeddings
 cargo test --features embeddings
 cargo clippy --all-targets --features embeddings -- -D warnings
+
+# With OTel export
+cargo build --release --features otel
+cargo test --features otel
+cargo clippy --all-targets --features otel -- -D warnings
 ```
 
 GitHub Actions (`.github/workflows/ci.yml`) runs `cargo build`, `cargo test`, `cargo clippy`, and `cargo fmt --check` on `ubuntu-latest`, `macos-latest`, and `windows-latest` for every push and pull request. On pushes to `main`, a separate job detects a workspace version bump, pushes the tag, fans out a build matrix across the five release targets, and publishes the archives to a GitHub Release.
@@ -398,6 +409,7 @@ GROUP BY filter_id ORDER BY avg_ratio ASC;
 |---|---|
 | (default) | Lexical retrieval only; no ONNX dependency |
 | `embeddings` | Adds fastembed-rs (~150MB transitive), enables `engraph init-embeddings`, `engraph reindex-embeddings`, and `engraph recall --hybrid` |
+| `otel` | Adds OpenTelemetry OTLP/gRPC export of the `events` telemetry. Off at runtime unless `ENGRAPH_OTEL=1`; see [docs/opentelemetry.md](docs/opentelemetry.md). Required when building the binary the Claude Code hooks invoke. |
 
 ---
 

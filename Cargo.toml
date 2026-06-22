@@ -41,8 +41,13 @@ regex = "1.12.4"
 shell-words = "1"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "process", "io-util", "signal"] }
 scip = "0.7.1"
-# 4.* releases are not yet stable. scip 0.7.1 requires 3.* anyway. 
+# 4.* releases are not yet stable. scip 0.7.1 requires 3.* anyway.
 protobuf = "3.7.2"
+# OpenTelemetry metrics export (optional, gated by the `otel` feature). Keep the
+# three crates on one matching minor line — they are tightly co-versioned.
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["metrics", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["metrics", "grpc-tonic"] }
 
 [profile.release]
 lto = "thin"
