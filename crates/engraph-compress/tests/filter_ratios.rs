@@ -490,6 +490,72 @@ To github.com:user/repo.git
 }
 
 #[test]
+fn bazel_build_drops_progress() {
+    let mut stderr = String::from(
+        "Starting local Bazel server and connecting to it...\nINFO: Analyzed 42 targets (118 packages loaded).\nINFO: Found 42 targets...\n",
+    );
+    for i in 0..150 {
+        stderr.push_str(&format!(
+            "[{i},234 / 5,678] Compiling src/file{i}.cc; {i}s linux-sandbox\n"
+        ));
+    }
+    stderr.push_str("ERROR: /w/pkg/BUILD.bazel:1:1: Compiling failed: (Exit 1)\nsrc/foo.cc:5:10: error: 'x' was not declared\nERROR: Build did NOT complete successfully\n");
+    let args = vec!["build".to_string()];
+    let (filter, id) = filters::pick("bazel", &args);
+    assert_eq!(id, "bazel_build");
+    let out = filter(&FilterCtx {
+        args: &args,
+        stdout: "",
+        stderr: &stderr,
+        exit_code: 1,
+    });
+    let r = ratio(&stderr, &out.text);
+    assert!(r < 0.3, "bazel_build ratio {r:.3} >= 0.3");
+    assert!(out.text.contains("error: 'x' was not declared"));
+    assert!(!out.text.contains("Compiling src/file0.cc"));
+}
+
+#[test]
+fn bazel_test_drops_passed_targets() {
+    let mut stdout = String::new();
+    for i in 0..150 {
+        stdout.push_str(&format!("//pkg:target_{i}              PASSED in 0.{i}s\n"));
+    }
+    stdout.push_str(
+        "//pkg:broken                  FAILED in 1.2s\n  /home/u/.cache/bazel/test.log\n",
+    );
+    stdout.push_str("Executed 151 out of 151 tests: 150 tests pass and 1 fails locally.\n");
+    let args = vec!["test".to_string()];
+    let (filter, id) = filters::pick("bazel", &args);
+    assert_eq!(id, "bazel_test");
+    let out = filter(&ctx(&args, &stdout));
+    let r = ratio(&stdout, &out.text);
+    assert!(r < 0.2, "bazel_test ratio {r:.3} >= 0.2");
+    assert!(out.text.contains("//pkg:broken"));
+    assert!(out.text.contains("Executed 151 out of 151"));
+    assert!(!out.text.contains("//pkg:target_0 "));
+}
+
+#[test]
+fn go_test_strips_goroutine_dumps() {
+    let mut stdout =
+        String::from("=== RUN   TestPanics\n--- FAIL: TestPanics (0.00s)\npanic: boom\n\n");
+    stdout.push_str("goroutine 19 [running]:\n");
+    for f in 0..30 {
+        stdout.push_str(&format!("example.com/m.frame_{f}(0x{f:x})\n"));
+        stdout.push_str("\t/usr/local/go/src/runtime/panic.go:1545 +0x3e6\n");
+    }
+    stdout.push_str("exit status 2\nFAIL\texample.com/m\t0.012s\n");
+    let args = vec!["test".to_string()];
+    let (filter, _) = filters::pick("go", &args);
+    let out = filter(&ctx(&args, &stdout));
+    let r = ratio(&stdout, &out.text);
+    assert!(r < 0.3, "go_test goroutine-dump ratio {r:.3} >= 0.3");
+    assert!(out.text.contains("panic: boom"));
+    assert!(!out.text.contains("goroutine 19"));
+}
+
+#[test]
 fn unknown_command_falls_back_to_generic() {
     let args = vec!["something".to_string()];
     let (_, id) = filters::pick("totally-made-up", &args);
@@ -520,6 +586,12 @@ fn picker_and_filter_output_agree_on_filter_id() {
         ("git", &["commit"], "git_commit"),
         ("find", &["."], "find"),
         ("fd", &["foo"], "fd"),
+        ("go", &["test"], "go_test"),
+        ("go", &["mod", "download"], "go_mod_download"),
+        ("bazel", &["build"], "bazel_build"),
+        ("bazel", &["test"], "bazel_test"),
+        ("bazel", &["query"], "bazel_query"),
+        ("bazelisk", &["build"], "bazel_build"),
     ];
     for (cmd, args, expected) in cases {
         let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();

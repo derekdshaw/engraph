@@ -1,6 +1,7 @@
 //! Per-command output filters. Each filter knows the format of a specific
 //! command's output and produces a structured summary.
 
+pub mod bazel;
 pub mod cargo;
 pub mod docker;
 pub mod generic;
@@ -93,6 +94,12 @@ pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
         ("go", "build") => (go::build, "go_build"),
         ("go", "vet") => (go::vet, "go_vet"),
         ("go", "mod") if second == "tidy" => (go::mod_tidy, "go_mod_tidy"),
+        ("go", "mod") if second == "download" => (go::mod_download, "go_mod_download"),
+
+        // Bazel (`bazelisk` is the common version-pinning wrapper)
+        ("bazel" | "bazelisk", "build") => (bazel::build, "bazel_build"),
+        ("bazel" | "bazelisk", "test") => (bazel::test, "bazel_test"),
+        ("bazel" | "bazelisk", "query" | "cquery" | "aquery") => (bazel::query, "bazel_query"),
 
         // JS/TS extras
         ("yarn", "install" | "add") => (js::yarn_install, "yarn_install"),
