@@ -380,6 +380,67 @@ fn git_status_strips_boilerplate() {
 }
 
 #[test]
+fn cargo_test_strips_backtraces_on_failures() {
+    // A failing run used to be ~no-op (only `... ok` lines were dropped). The
+    // backtrace frames are the bulk; strip them, keep panic header + message.
+    let mut stdout = String::from("running 3 tests\n");
+    for t in 0..3 {
+        stdout.push_str(&format!("test mod::case_{t} ... FAILED\n"));
+    }
+    stdout.push_str("\nfailures:\n\n");
+    for t in 0..3 {
+        stdout.push_str(&format!("---- mod::case_{t} stdout ----\n\n"));
+        stdout.push_str(&format!(
+            "thread 'mod::case_{t}' panicked at src/x.rs:{t}:9:\n"
+        ));
+        stdout.push_str("assertion failed: something\n");
+        stdout.push_str("stack backtrace:\n");
+        for f in 0..12 {
+            stdout.push_str(&format!("  {f}: core::some::deep::frame_{f}\n"));
+            stdout.push_str("             at /rustc/abc/library/core/src/panicking.rs:80:14\n");
+        }
+        stdout.push_str("note: Some details are omitted, run with `RUST_BACKTRACE=full`.\n\n");
+    }
+    stdout.push_str("test result: FAILED. 0 passed; 3 failed; 0 ignored\n");
+    let args = vec!["test".to_string()];
+    let (filter, _) = filters::pick("cargo", &args);
+    let out = filter(&ctx(&args, &stdout));
+    let r = ratio(&stdout, &out.text);
+    assert!(r < 0.4, "cargo_test failing-run ratio {r:.3} >= 0.4");
+    assert!(out.text.contains("panicked at src/x.rs:0:9"));
+    assert!(!out.text.contains("stack backtrace"));
+}
+
+#[test]
+fn cargo_build_collapses_warnings() {
+    let mut stderr = String::new();
+    for i in 0..20 {
+        stderr.push_str(&format!("warning: unused variable: `v{i}`\n"));
+        stderr.push_str(&format!(" --> src/lib.rs:{i}:9\n"));
+        stderr.push_str("  |\n");
+        stderr.push_str(&format!(
+            "{i} | pub fn f() {{ let v{i} = compute_something(); }}\n"
+        ));
+        stderr.push_str("  |                   ^ help: prefix with underscore\n");
+        stderr.push_str("  |\n");
+        stderr.push_str("  = note: `#[warn(unused_variables)]` on by default\n\n");
+    }
+    stderr.push_str("    Finished `dev` profile in 2.0s\n");
+    let args = vec!["build".to_string()];
+    let (filter, _) = filters::pick("cargo", &args);
+    let out = filter(&FilterCtx {
+        args: &args,
+        stdout: "",
+        stderr: &stderr,
+        exit_code: 0,
+    });
+    let r = ratio(&stderr, &out.text);
+    assert!(r < 0.4, "cargo_build warning-heavy ratio {r:.3} >= 0.4");
+    assert!(out.text.contains("warning: unused variable: `v0`"));
+    assert!(!out.text.contains("= note"));
+}
+
+#[test]
 fn find_groups_by_directory() {
     // Many files sharing deep prefixes: the repeated dir is the redundancy.
     let mut input = String::new();
