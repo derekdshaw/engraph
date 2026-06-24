@@ -141,9 +141,25 @@ fn bareword_with_no_matches_passes_through() {
 }
 
 #[test]
-fn ambiguous_bareword_passes_through() {
+fn bareword_within_widened_window_is_denied() {
+    // The redirect window is 1..=8; a symbol with 6 matches now redirects
+    // (it was passthrough under the old 1..=3 window).
     let (_t, db) = db_dir();
-    insert_entities(&db, "foo_bar", 5);
+    insert_entities(&db, "mid_pop_symbol", 6);
+    let out = run_hook(&db, "mid_pop_symbol");
+    let v = parse(&out).expect("expected deny JSON");
+    assert_eq!(
+        v.pointer("/hookSpecificOutput/permissionDecision")
+            .and_then(|s| s.as_str()),
+        Some("deny")
+    );
+}
+
+#[test]
+fn ambiguous_bareword_passes_through() {
+    // 9+ matches is too ambiguous to be a useful neighborhood — keep grepping.
+    let (_t, db) = db_dir();
+    insert_entities(&db, "foo_bar", 9);
     let out = run_hook(&db, "foo_bar");
     assert!(
         out.trim().is_empty(),

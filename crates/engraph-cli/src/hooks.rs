@@ -438,7 +438,12 @@ fn build_read_context(
     file_path: &str,
     entities: &[engraph_codegraph::subgraph::EntityRow],
 ) -> String {
-    let mut out = format!("Indexed symbols in {file_path}:\n");
+    let mut out = format!(
+        "This file is indexed in the engraph code graph. To trace how any symbol \
+         below connects — its callers, callees, and siblings — run \
+         `engraph subgraph <name>` instead of grepping or reading more files; \
+         it's the fast path for code context.\n\nIndexed symbols in {file_path}:\n"
+    );
     for e in entities {
         let line = e.line_range.as_deref().unwrap_or("?");
         match e.signature.as_deref() {
@@ -450,6 +455,5 @@ fn build_read_context(
             }
         }
     }
-    out.push_str("\n(Use `engraph subgraph <name>` for calls/callers.)\n");
     out
 }

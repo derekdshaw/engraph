@@ -11,15 +11,22 @@ SessionEnd). Changes here affect the live session you're in.
 
 ## Use engraph for search before broad grep/read
 
-When orienting in this codebase, prefer engraph's own retrieval over a cold
-grep/read sweep:
+When you need context on a code symbol — what it is, what calls it, what it
+calls, what lives beside it — **`engraph subgraph <symbol>` is the default, not
+grep/read.** It returns a 2-hop neighborhood in one call; grepping a symbol then
+reading each hit is the slow path. Reach for it whenever you catch yourself about
+to grep for a function/type/method name or open a file just to see what's around
+a definition.
 
+- **Code symbol + its callers/callees/siblings** → `engraph subgraph <symbol>` (the first move for code context)
 - **Prior context / decisions / conversation history** → `engraph recall "<topic>" --project "$(pwd)"`
-- **Code symbol + its callers/callees/siblings** → `engraph subgraph <symbol>`
-- Fall back to grep/read when those come up empty or you need exact text.
+- Fall back to grep/read only when subgraph comes up empty, the target isn't a
+  symbol, or you need exact text/line content.
 
-(The pre-grep / post-read hooks already nudge this when the codegraph is
-populated — keep it built with `engraph index .`.)
+The pre-grep / pre-bash hooks enforce this: a `grep`/`rg` for an indexed symbol
+(including `fn x`, `x(`, `Foo::bar` shapes) is denied and redirected to
+`engraph subgraph`. Add a regex metachar (`x\b`) to bypass when you truly need
+raw text. Keep the graph fresh with `engraph index .`.
 
 ## Crate map
 
