@@ -160,20 +160,32 @@ pub fn diff(ctx: &FilterCtx<'_>) -> FilterOutput {
     }
 }
 
-/// `git status` — pass through (already terse). Truncate if untracked list is huge.
+/// `git status` (long form) — drop the boilerplate the model never acts on: the
+/// `(use "git ...")` hint lines, the `no changes added to commit` trailer, the
+/// `Your branch is up to date` line, and blank separators. Keep the branch line,
+/// the section headers, and the actual file entries. `--porcelain`/`--short`
+/// output has none of this and passes through (only ANSI strip + cap).
 pub fn status(ctx: &FilterCtx<'_>) -> FilterOutput {
     const MAX_LINES: usize = 200;
-    let lines: Vec<&str> = ctx.stdout.lines().collect();
-    let text = if lines.len() > MAX_LINES {
-        let kept = &lines[..MAX_LINES];
-        format!(
-            "{}\n[engraph: truncated {} more lines]\n",
-            kept.join("\n"),
-            lines.len() - MAX_LINES
-        )
-    } else {
-        ctx.stdout.to_string()
-    };
+    let clean = super::util::strip_ansi(ctx.stdout);
+    let mut out = String::with_capacity(clean.len());
+    for line in clean.lines() {
+        let t = line.trim_start();
+        if t.is_empty()
+            || t.starts_with("(use \"")
+            || t.starts_with("no changes added to commit")
+            || t.starts_with("Your branch is up to date")
+        {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    // Safety: a porcelain/empty-after-strip case falls back to the raw output.
+    if out.trim().is_empty() && !clean.trim().is_empty() {
+        out = clean.into_owned();
+    }
+    let text = super::util::truncate_lines(&out, MAX_LINES, "lines");
     FilterOutput {
         text,
         filter_id: "git_status",
@@ -186,6 +198,91 @@ pub fn show(ctx: &FilterCtx<'_>) -> FilterOutput {
     FilterOutput {
         text: r.text,
         filter_id: "git_show",
+    }
+}
+
+/// Object-transfer progress chatter that `push`/`pull`/`fetch` spray onto stderr.
+/// Matched after stripping a leading `remote:` so the server-side copies go too.
+const TRANSFER_DROP: &[&str] = &[
+    "Enumerating objects:",
+    "Counting objects:",
+    "Compressing objects:",
+    "Writing objects:",
+    "Receiving objects:",
+    "Resolving deltas:",
+    "Unpacking objects:",
+    "Delta compression using",
+    "Total ",
+];
+
+fn drop_transfer_progress(text: &str, out: &mut String) {
+    for line in text.lines() {
+        let body = line.trim_start();
+        let is_remote = body.starts_with("remote:");
+        let body = body.strip_prefix("remote:").unwrap_or(body).trim_start();
+        // Bare `remote:` separators and the progress counters are pure noise.
+        if (is_remote && body.is_empty()) || TRANSFER_DROP.iter().any(|p| body.starts_with(p)) {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+}
+
+/// `git push` / `pull` / `fetch` — drop the object-transfer progress, keep the
+/// `To`/`From` line, the ref updates, and (for pull) the merge result + diffstat.
+/// Most of this lands on stderr; the merge summary is on stdout, emitted after.
+fn transfer(ctx: &FilterCtx<'_>, filter_id: &'static str) -> FilterOutput {
+    let stderr = super::util::strip_ansi(ctx.stderr);
+    let stdout = super::util::strip_ansi(ctx.stdout);
+    let mut out = String::with_capacity((stderr.len() + stdout.len()) / 2);
+    drop_transfer_progress(&stderr, &mut out);
+    drop_transfer_progress(&stdout, &mut out);
+    FilterOutput {
+        text: out,
+        filter_id,
+    }
+}
+
+pub fn push(ctx: &FilterCtx<'_>) -> FilterOutput {
+    transfer(ctx, "git_push")
+}
+
+pub fn pull(ctx: &FilterCtx<'_>) -> FilterOutput {
+    transfer(ctx, "git_pull")
+}
+
+pub fn fetch(ctx: &FilterCtx<'_>) -> FilterOutput {
+    transfer(ctx, "git_fetch")
+}
+
+/// `git commit` — keep the `[branch hash] subject` header and the
+/// `N files changed …` summary; drop the per-file `create/delete mode`, `rename`
+/// and `mode change` lines that bloat a large commit's output.
+pub fn commit(ctx: &FilterCtx<'_>) -> FilterOutput {
+    let clean = super::util::strip_ansi(ctx.stdout);
+    let mut out = String::with_capacity(clean.len());
+    let mut dropped = 0_u32;
+    for line in clean.lines() {
+        let t = line.trim_start();
+        if t.starts_with("create mode ")
+            || t.starts_with("delete mode ")
+            || t.starts_with("rename ")
+            || t.starts_with("mode change ")
+            || t.starts_with("copy ")
+        {
+            dropped += 1;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if dropped > 0 {
+        out.push_str(&format!("[engraph: {dropped} file-mode lines hidden]\n"));
+    }
+    FilterOutput {
+        text: out,
+        filter_id: "git_commit",
     }
 }
 
@@ -239,6 +336,48 @@ Date: Mon Jan 1 12:00:00 2026 -0700
         assert!(o.text.contains("bbbbbbb Add tests"));
         assert!(!o.text.contains("extra body line"));
         assert!(o.text.contains("2 commits"));
+    }
+
+    #[test]
+    fn status_strips_hint_boilerplate() {
+        let input = "\
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use \"git add <file>...\" to update what will be committed)
+  (use \"git restore <file>...\" to discard changes in working directory)
+	modified:   a.txt
+
+Untracked files:
+  (use \"git add <file>...\" to include in what will be committed)
+	b.txt
+
+no changes added to commit (use \"git add\" and/or \"git commit -a\")
+";
+        let args = vec!["status".to_string()];
+        let o = status(&ctx(&args, input));
+        assert!(o.text.contains("On branch main"));
+        assert!(o.text.contains("Changes not staged for commit:"));
+        assert!(o.text.contains("modified:   a.txt"));
+        assert!(o.text.contains("b.txt"));
+        assert!(!o.text.contains("(use \""));
+        assert!(!o.text.contains("no changes added"));
+        assert!(!o.text.contains("Your branch is up to date"));
+    }
+
+    #[test]
+    fn status_porcelain_passes_through() {
+        let input = "## main...origin/main\n M a.txt\n?? b.txt\n";
+        let args = vec![
+            "status".to_string(),
+            "--porcelain".to_string(),
+            "-b".to_string(),
+        ];
+        let o = status(&ctx(&args, input));
+        assert!(o.text.contains("## main...origin/main"));
+        assert!(o.text.contains(" M a.txt"));
+        assert!(o.text.contains("?? b.txt"));
     }
 
     #[test]

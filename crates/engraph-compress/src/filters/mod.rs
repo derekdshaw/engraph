@@ -56,6 +56,11 @@ pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
         ("git", "diff") => (git::diff, "git_diff"),
         ("git", "status") => (git::status, "git_status"),
         ("git", "show") => (git::show, "git_show"),
+        ("git", "push") => (git::push, "git_push"),
+        ("git", "pull") => (git::pull, "git_pull"),
+        ("git", "fetch") => (git::fetch, "git_fetch"),
+        ("git", "commit") => (git::commit, "git_commit"),
+        // (`git add` is silent on success — wrapping it only adds latency.)
 
         // cargo / rust
         ("cargo", "test") => (cargo::test, "cargo_test"),
@@ -119,6 +124,7 @@ pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
         // Listings / trees
         ("tree", _) => (tree::tree, "tree"),
         ("fd", _) => (tree::fd, "fd"),
+        ("find", _) => (tree::find_cmd, "find"),
         ("ls", _) => (tree::ls, "ls"),
 
         // File reads: whole-file (cat/bat/less) and user-windowed (head/tail).

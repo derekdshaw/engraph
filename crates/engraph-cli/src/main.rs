@@ -26,7 +26,8 @@ use hooks::{
     run_session_start_hook,
 };
 use output::{
-    print_gain_table, print_hits, print_repo_plan, print_symbol_langs, print_workspace_plan,
+    print_filter_gain_table, print_gain_table, print_hits, print_repo_plan, print_symbol_langs,
+    print_workspace_plan,
 };
 
 // `main` is async because the OTLP/gRPC metrics exporter (the `otel` feature)
@@ -60,12 +61,21 @@ async fn main() -> Result<()> {
     let conn = pool.get()?;
 
     match cli.cmd {
-        Cmd::Gain { json } => {
-            let rows = telemetry::gain_report(&conn)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&rows)?);
+        Cmd::Gain { json, by_filter } => {
+            if by_filter {
+                let rows = telemetry::gain_report_by_filter(&conn)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                } else {
+                    print_filter_gain_table(&rows);
+                }
             } else {
-                print_gain_table(&rows);
+                let rows = telemetry::gain_report(&conn)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                } else {
+                    print_gain_table(&rows);
+                }
             }
         }
         Cmd::Run { command, args } => {
@@ -638,12 +648,31 @@ async fn run_wrapped_command(command: &str, args: &[String]) -> Result<std::proc
         )
     };
 
-    let child = tokio::process::Command::new(command)
-        .args(args)
+    let mut cmd = tokio::process::Command::new(command);
+    cmd.args(args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+
+    // We buffer the child's stderr to filter it, which hides git's HTTPS
+    // credential prompt — a wrapped `git push`/`pull`/`fetch` that needs one
+    // would block on input no one can see. The wrapper only ever runs for
+    // agent-initiated commands (the hook never rewrites a human's own shell), so
+    // no one is there to answer anyway: disable the prompt so git fails fast with
+    // a captured error instead of hanging. (SSH passphrase prompts use /dev/tty
+    // directly and are unaffected.)
+    // Matching the subcommand anywhere is robust to global options
+    // (`git -C /repo push`); a false hit on a ref literally named `push` only
+    // sets an env var that's a no-op for non-network git commands.
+    if command == "git"
+        && args
+            .iter()
+            .any(|a| matches!(a.as_str(), "push" | "pull" | "fetch"))
+    {
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+    }
+
+    let child = cmd.spawn()?;
 
     // wait_with_output drains stdout and stderr concurrently while it waits on
     // the child — no pipe-buffer deadlock under large output.

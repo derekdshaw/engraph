@@ -125,3 +125,42 @@ pub(crate) fn print_gain_table(rows: &[telemetry::GainRow]) {
         );
     }
 }
+
+pub(crate) fn print_filter_gain_table(rows: &[telemetry::FilterGainRow]) {
+    if rows.is_empty() {
+        println!("(no output_filter events)");
+        return;
+    }
+    println!(
+        "{:<18} {:>6} {:>10} {:>10} {:>10} {:>6}",
+        "filter_id", "count", "input_tk", "output_tk", "saved_tk", "ratio"
+    );
+    let (mut tot_in, mut tot_out) = (0_i64, 0_i64);
+    for r in rows {
+        tot_in += r.input_tokens;
+        tot_out += r.output_tokens;
+        let ratio = if r.input_tokens > 0 {
+            r.output_tokens as f64 / r.input_tokens as f64
+        } else {
+            1.0
+        };
+        println!(
+            "{:<18} {:>6} {:>10} {:>10} {:>10} {:>6.2}",
+            r.filter_id, r.count, r.input_tokens, r.output_tokens, r.saved_tokens, ratio
+        );
+    }
+    let tot_ratio = if tot_in > 0 {
+        tot_out as f64 / tot_in as f64
+    } else {
+        1.0
+    };
+    println!(
+        "{:<18} {:>6} {:>10} {:>10} {:>10} {:>6.2}",
+        "TOTAL",
+        "",
+        tot_in,
+        tot_out,
+        tot_in - tot_out,
+        tot_ratio
+    );
+}

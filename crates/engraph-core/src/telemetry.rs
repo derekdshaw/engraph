@@ -132,6 +132,45 @@ pub fn gain_report(conn: &PooledConn) -> Result<Vec<GainRow>> {
     Ok(rows)
 }
 
+/// One row of the per-filter breakdown: the `output_filter` events grouped by
+/// `filter_id` instead of collapsed into a single `wrapped_cmd` row. This is the
+/// per-command view that makes a weak filter visible (e.g. `rg` carrying most of
+/// the token volume at a poor ratio).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FilterGainRow {
+    pub filter_id: String,
+    pub count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub saved_tokens: i64,
+}
+
+pub fn gain_report_by_filter(conn: &PooledConn) -> Result<Vec<FilterGainRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(filter_id, '?') AS fid, COUNT(*) AS cnt, \
+                COALESCE(SUM(input_tokens),0) AS itk, \
+                COALESCE(SUM(output_tokens),0) AS otk \
+         FROM events WHERE feature = 'output_filter' \
+         GROUP BY fid ORDER BY itk DESC, fid",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            let filter_id: String = r.get(0)?;
+            let count: i64 = r.get(1)?;
+            let input_tokens: i64 = r.get(2)?;
+            let output_tokens: i64 = r.get(3)?;
+            Ok(FilterGainRow {
+                filter_id,
+                count,
+                input_tokens,
+                output_tokens,
+                saved_tokens: input_tokens - output_tokens,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

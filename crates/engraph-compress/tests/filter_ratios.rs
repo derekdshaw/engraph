@@ -339,6 +339,96 @@ fn rg_truncates_long_match_lists() {
 }
 
 #[test]
+fn rg_groups_multi_match_files() {
+    // Many matches per file: the repeated path prefix is the redundancy the
+    // group-by-file heading removes. 10 files * 15 hits = 150 (< the 200 cap).
+    let mut input = String::new();
+    for f in 0..10 {
+        for m in 0..15 {
+            input.push_str(&format!(
+                "crates/engraph-compress/src/filters/file{f:02}.rs:{m}:    handler_call_site_{m}();\n"
+            ));
+        }
+    }
+    let args = vec!["handler".to_string()];
+    let (filter, _) = filters::pick("rg", &args);
+    let out = filter(&ctx(&args, &input));
+    let r = ratio(&input, &out.text);
+    assert!(r < 0.6, "rg grouped ratio {r:.3} >= 0.6");
+    // Each path heading appears exactly once despite 15 matches.
+    assert_eq!(out.text.matches("file00.rs").count(), 1);
+}
+
+#[test]
+fn git_status_strips_boilerplate() {
+    let mut input = String::from(
+        "On branch main\nYour branch is up to date with 'origin/main'.\n\nChanges not staged for commit:\n  (use \"git add <file>...\" to update what will be committed)\n  (use \"git restore <file>...\" to discard changes in working directory)\n",
+    );
+    // A realistic working set is a handful of files, where the hint/branch
+    // boilerplate is a large fraction of the output.
+    for i in 0..4 {
+        input.push_str(&format!("\tmodified:   src/file_{i}.rs\n"));
+    }
+    input.push_str("\nUntracked files:\n  (use \"git add <file>...\" to include in what will be committed)\n\tnew_thing.rs\n\nno changes added to commit (use \"git add\" and/or \"git commit -a\")\n");
+    let args = vec!["status".to_string()];
+    let (filter, _) = filters::pick("git", &args);
+    let out = filter(&ctx(&args, &input));
+    let r = ratio(&input, &out.text);
+    assert!(r < 0.65, "git_status ratio {r:.3} >= 0.65");
+    assert!(!out.text.contains("(use \""));
+    assert!(out.text.contains("modified:   src/file_0.rs"));
+}
+
+#[test]
+fn find_groups_by_directory() {
+    // Many files sharing deep prefixes: the repeated dir is the redundancy.
+    let mut input = String::new();
+    for d in 0..8 {
+        for f in 0..12 {
+            input.push_str(&format!(
+                "./crates/engraph-compress/src/dir{d}/file_{f}.rs\n"
+            ));
+        }
+    }
+    let args = vec![".".to_string()];
+    let (filter, id) = filters::pick("find", &args);
+    assert_eq!(id, "find");
+    let out = filter(&ctx(&args, &input));
+    let r = ratio(&input, &out.text);
+    assert!(r < 0.5, "find ratio {r:.3} >= 0.5");
+}
+
+#[test]
+fn git_push_drops_transfer_progress() {
+    let stderr = "\
+Enumerating objects: 12, done.
+Counting objects: 100% (12/12), done.
+Delta compression using up to 8 threads
+Compressing objects: 100% (6/6), done.
+Writing objects: 100% (7/7), 1.2 KiB | 1.2 MiB/s, done.
+Total 7 (delta 3), reused 0 (delta 0), pack-reused 0
+remote: Resolving deltas: 100% (3/3), completed with 2 local objects.
+To github.com:user/repo.git
+   abc1234..def5678  main -> main
+";
+    let args = vec!["push".to_string()];
+    let (filter, id) = filters::pick("git", &args);
+    assert_eq!(id, "git_push");
+    let out = filter(&FilterCtx {
+        args: &args,
+        stdout: "",
+        stderr,
+        exit_code: 0,
+    });
+    let r = ratio(stderr, &out.text);
+    assert!(r < 0.4, "git_push ratio {r:.3} >= 0.4");
+    assert!(out.text.contains("To github.com:user/repo.git"));
+    assert!(out.text.contains("abc1234..def5678  main -> main"));
+    assert!(!out.text.contains("Writing objects"));
+    assert!(!out.text.contains("Resolving deltas"));
+}
+
+#[test]
 fn unknown_command_falls_back_to_generic() {
     let args = vec!["something".to_string()];
     let (_, id) = filters::pick("totally-made-up", &args);
@@ -363,6 +453,12 @@ fn picker_and_filter_output_agree_on_filter_id() {
         ("git", &["diff"], "git_diff"),
         ("git", &["status"], "git_status"),
         ("git", &["show"], "git_show"),
+        ("git", &["push"], "git_push"),
+        ("git", &["pull"], "git_pull"),
+        ("git", &["fetch"], "git_fetch"),
+        ("git", &["commit"], "git_commit"),
+        ("find", &["."], "find"),
+        ("fd", &["foo"], "fd"),
     ];
     for (cmd, args, expected) in cases {
         let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();

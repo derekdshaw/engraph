@@ -17,6 +17,10 @@ pub(crate) enum Cmd {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Break the `wrapped_cmd`/`output_filter` savings down per filter,
+        /// ordered by token volume — the per-command view (like `rtk gain`).
+        #[arg(long)]
+        by_filter: bool,
     },
     /// Manage per-session token budget
     Budget {
