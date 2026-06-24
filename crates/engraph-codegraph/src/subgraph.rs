@@ -81,7 +81,7 @@ pub fn subgraph_for(conn: &PooledConn, symbol: &str, max_nodes: usize) -> Result
 /// 0 when there's no unique match or the file can't be read, so `gain` only ever
 /// credits a baseline it can actually measure, never a fabricated one. This is a
 /// floor (it ignores the neighbor files subgraph also spares you from opening).
-pub fn avoided_read_tokens(n: &Neighborhood) -> usize {
+pub fn avoided_read_tokens(n: &Neighborhood, current_root: Option<&std::path::Path>) -> usize {
     if n.matches.len() != 1 {
         return 0;
     }
@@ -89,7 +89,14 @@ pub fn avoided_read_tokens(n: &Neighborhood) -> usize {
     let (Some(project), Some(file)) = (m.project.as_deref(), m.file_path.as_deref()) else {
         return 0;
     };
-    match std::fs::read_to_string(std::path::Path::new(project).join(file)) {
+    // Prefer the current worktree's copy of the file (the branch you're on);
+    // fall back to the indexed checkout. Reading from the worktree means a
+    // symbol indexed elsewhere still measures against live source.
+    let path = current_root
+        .map(|r| r.join(file))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| std::path::Path::new(project).join(file));
+    match std::fs::read_to_string(&path) {
         Ok(text) => engraph_core::tokens::count(&text) as usize,
         Err(_) => 0,
     }
@@ -572,13 +579,36 @@ mod tests {
         .unwrap();
 
         let n = subgraph_for(&conn, "foo", 30).unwrap();
+        // No current-root override → resolves against the stored project path.
         assert!(
-            avoided_read_tokens(&n) > 0,
+            avoided_read_tokens(&n, None) > 0,
             "should count the def file's tokens"
         );
 
         // No unique match → nothing measurable to credit.
         let none = subgraph_for(&conn, "missing", 30).unwrap();
-        assert_eq!(avoided_read_tokens(&none), 0);
+        assert_eq!(avoided_read_tokens(&none, None), 0);
+    }
+
+    #[test]
+    fn avoided_read_tokens_prefers_current_root() {
+        // A symbol indexed under a now-absent project still measures against the
+        // current worktree's copy of the same relative path.
+        let dir = tempdir().unwrap();
+        let worktree = dir.path();
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::write(worktree.join("src/lib.rs"), "fn foo() -> i32 { 42 }\n").unwrap();
+        let pool = open_pool(&worktree.join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range)
+             VALUES ('e_foo', 'symbol', 'foo', '/gone/indexed/checkout', 'src/lib.rs', '1:1')",
+            [],
+        )
+        .unwrap();
+        let n = subgraph_for(&conn, "foo", 30).unwrap();
+        // Stored project doesn't exist; current_root resolves to live source.
+        assert_eq!(avoided_read_tokens(&n, None), 0);
+        assert!(avoided_read_tokens(&n, Some(worktree)) > 0);
     }
 }

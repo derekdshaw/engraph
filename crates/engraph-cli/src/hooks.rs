@@ -45,21 +45,26 @@ pub(crate) fn run_session_start_hook(conn: &db::PooledConn) -> Result<()> {
 
     let mut signal_sections: Vec<String> = Vec::new();
     if let Some(cwd) = cwd.as_deref() {
-        let dnr = recent_do_not_repeat(conn, cwd, 5)?;
+        // Memory is keyed by the canonical repo identity (the main worktree), so
+        // a brief shown in any worktree of a repo surfaces the same signals that
+        // `engraph save/remember/bug` stored via `resolve_project`.
+        let project = crate::canonical_repo_key(std::path::Path::new(cwd));
+        let project = project.as_str();
+        let dnr = recent_do_not_repeat(conn, project, 5)?;
         if !dnr.is_empty() {
             signal_sections.push("## do-not-repeat".to_string());
             for r in dnr {
                 signal_sections.push(format!("- {r}"));
             }
         }
-        let bugs = open_bugs(conn, cwd, 5)?;
+        let bugs = open_bugs(conn, project, 5)?;
         if !bugs.is_empty() {
             signal_sections.push("## open bugs".to_string());
             for b in bugs {
                 signal_sections.push(format!("- {b}"));
             }
         }
-        let decisions = recent_decisions(conn, cwd, 5)?;
+        let decisions = recent_decisions(conn, project, 5)?;
         if !decisions.is_empty() {
             signal_sections.push("## decisions".to_string());
             for d in decisions {

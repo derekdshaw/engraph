@@ -344,9 +344,9 @@ async fn main() -> Result<()> {
                     anyhow::bail!("every repo in the workspace failed to index");
                 }
             } else if let Some(m) = &scip_manifest {
-                let canonical = repo.canonicalize().unwrap_or_else(|_| repo.clone());
-                let project_key =
-                    project.unwrap_or_else(|| canonical.to_string_lossy().into_owned());
+                // Key by the repo's canonical identity (main worktree) so
+                // indexing from any git worktree updates one shared project.
+                let project_key = project.unwrap_or_else(|| canonical_repo_key(&repo));
                 let stats =
                     engraph_codegraph::index_scip_manifest(&conn, m, &project_key, effective_gc)?;
                 telemetry::record_event(
@@ -377,9 +377,9 @@ async fn main() -> Result<()> {
                     pruned_note
                 );
             } else {
-                let canonical = repo.canonicalize().unwrap_or_else(|_| repo.clone());
-                let project_key =
-                    project.unwrap_or_else(|| canonical.to_string_lossy().into_owned());
+                // Key by the repo's canonical identity (main worktree) so
+                // indexing from any git worktree updates one shared project.
+                let project_key = project.unwrap_or_else(|| canonical_repo_key(&repo));
                 let stats = engraph_codegraph::index_repo(
                     &conn,
                     &repo,
@@ -426,6 +426,11 @@ async fn main() -> Result<()> {
         } => {
             let start = Instant::now();
             let neighborhood = engraph_codegraph::subgraph_for(&conn, &symbol, max_nodes)?;
+            // Resolve source against the current worktree first, so a symbol
+            // indexed from another checkout still reads from where you're working.
+            let cur_root = std::env::current_dir()
+                .ok()
+                .and_then(|c| git_current_toplevel(&c));
             let body = if json {
                 serde_json::to_string_pretty(&neighborhood)?
             } else {
@@ -443,8 +448,10 @@ async fn main() -> Result<()> {
                     filter_id: Some("subgraph"),
                     // Baseline = the source the subgraph stands in for (the
                     // symbol's definition file). saved = baseline - body.
-                    input_tokens: engraph_codegraph::subgraph::avoided_read_tokens(&neighborhood)
-                        as i64,
+                    input_tokens: engraph_codegraph::subgraph::avoided_read_tokens(
+                        &neighborhood,
+                        cur_root.as_deref(),
+                    ) as i64,
                     output_tokens: tokens::count(&body) as i64,
                     latency_ms: start.elapsed().as_millis() as i64,
                 },
@@ -620,11 +627,74 @@ fn resolve_project(over: Option<String>) -> Result<String> {
         return Ok(p);
     }
     let cwd = std::env::current_dir()?;
-    Ok(cwd
+    Ok(canonical_repo_key(&cwd))
+}
+
+/// Stable identity for the repo containing `start`, used as the `project` scope
+/// key. For a git repo this is the **main worktree** path — shared across every
+/// linked worktree — so all worktrees of a repo map to one logical index instead
+/// of each worktree's distinct path spawning a duplicate. Falls back to the
+/// canonicalized path when `start` isn't in a git repo (or git is unavailable),
+/// which also collapses symlinked checkouts to one key.
+pub(crate) fn canonical_repo_key(start: &std::path::Path) -> String {
+    if let Some(root) = git_main_worktree(start) {
+        return root;
+    }
+    start
         .canonicalize()
-        .unwrap_or(cwd)
+        .unwrap_or_else(|_| start.to_path_buf())
         .to_string_lossy()
-        .into_owned())
+        .into_owned()
+}
+
+/// The repo's main worktree path via `git worktree list --porcelain`, whose
+/// first entry is always the main worktree. `None` when `start` isn't a git
+/// working tree or git can't be run.
+fn git_main_worktree(start: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(start)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(out.stdout).ok()?;
+    let path = stdout.lines().next()?.strip_prefix("worktree ")?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let p = std::path::Path::new(path);
+    Some(
+        p.canonicalize()
+            .unwrap_or_else(|_| p.to_path_buf())
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// The *current* worktree's root (`git rev-parse --show-toplevel` of `start`) —
+/// the checkout you're actually working in, on its branch. Used to resolve a
+/// stored relative `file_path` to live source, so subgraph reads the worktree
+/// copy, not the (possibly stale or absent) indexed checkout. `None` outside a
+/// git working tree.
+pub(crate) fn git_current_toplevel(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(start)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let top = String::from_utf8(out.stdout).ok()?;
+    let top = top.trim();
+    if top.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(top))
 }
 
 /// Spawn a wrapped command through `tokio::process` and return its combined
