@@ -136,17 +136,18 @@ pub(crate) fn print_gain_table(rows: &[telemetry::GainRow]) {
 
 pub(crate) fn print_filter_gain_table(rows: &[telemetry::FilterGainRow]) {
     if rows.is_empty() {
-        println!("(no output_filter events)");
+        println!("(no savings events)");
         return;
     }
     println!(
         "{:<18} {:>6} {:>10} {:>10} {:>10} {:>6} {:>6}",
-        "filter_id", "count", "input_tk", "output_tk", "saved_tk", "ratio", "save%"
+        "item", "count", "input_tk", "output_tk", "saved_tk", "ratio", "save%"
     );
-    let (mut tot_in, mut tot_out) = (0_i64, 0_i64);
+    let (mut tot_in, mut tot_out, mut tot_saved) = (0_i64, 0_i64, 0_i64);
     for r in rows {
         tot_in += r.input_tokens;
         tot_out += r.output_tokens;
+        tot_saved += r.saved_tokens;
         let ratio = if r.input_tokens > 0 {
             r.output_tokens as f64 / r.input_tokens as f64
         } else {
@@ -174,9 +175,9 @@ pub(crate) fn print_filter_gain_table(rows: &[telemetry::FilterGainRow]) {
         "",
         tot_in,
         tot_out,
-        tot_in - tot_out,
+        tot_saved,
         tot_ratio,
-        pct(tot_in - tot_out, tot_in)
+        pct(tot_saved, tot_in)
     );
 }
 
@@ -187,6 +188,28 @@ pub(crate) fn print_gain_summary(s: &telemetry::GainSummary) {
     println!("output_tk: {}", s.output_tokens);
     println!("saved_tk : {}", s.saved_tokens);
     println!("save%    : {:.1}", s.save_pct);
+}
+
+/// The three-bucket savings breakdown (command / codegraph / memory) plus each
+/// bucket's share of total saved tokens. Surfaces non-command savings that the
+/// per-item table would otherwise bury.
+pub(crate) fn print_source_table(rows: &[telemetry::SourceRow]) {
+    if rows.is_empty() {
+        return;
+    }
+    let total: i64 = rows.iter().map(|r| r.saved_tokens).sum::<i64>().max(1);
+    println!("\nby source");
+    println!(
+        "{:<12} {:>6} {:>10} {:>10} {:>10} {:>7} {:>6}",
+        "source", "count", "input_tk", "output_tk", "saved_tk", "share", "save%"
+    );
+    for r in rows {
+        let share = r.saved_tokens as f64 / total as f64 * 100.0;
+        println!(
+            "{:<12} {:>6} {:>10} {:>10} {:>10} {:>6.1}% {:>6.1}",
+            r.source, r.count, r.input_tokens, r.output_tokens, r.saved_tokens, share, r.save_pct
+        );
+    }
 }
 
 pub(crate) fn print_time_table(rows: &[telemetry::TimeRow], label: &str) {

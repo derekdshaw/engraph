@@ -27,8 +27,8 @@ use hooks::{
 };
 use output::{
     csv_line, print_filter_gain_table, print_gain_summary, print_gain_table, print_graph,
-    print_history, print_hits, print_repo_plan, print_scope_table, print_symbol_langs,
-    print_time_table, print_workspace_plan,
+    print_history, print_hits, print_repo_plan, print_scope_table, print_source_table,
+    print_symbol_langs, print_time_table, print_workspace_plan,
 };
 
 // `main` is async because the OTLP/gRPC metrics exporter (the `otel` feature)
@@ -665,6 +665,8 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
     use engraph_core::telemetry::{Scope, TimeBucket};
 
     let summary = telemetry::gain_summary(conn)?;
+    // Always computed: the headline answer to "where do the savings come from".
+    let by_source = telemetry::gain_by_source(conn)?;
     let kind_feature = opts
         .is_default()
         .then(|| telemetry::gain_report(conn))
@@ -706,6 +708,7 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
         GainFormat::Json => {
             let mut obj = serde_json::Map::new();
             obj.insert("summary".into(), serde_json::to_value(&summary)?);
+            obj.insert("by_source".into(), serde_json::to_value(&by_source)?);
             if let Some(r) = &kind_feature {
                 obj.insert("by_kind_feature".into(), serde_json::to_value(r)?);
             }
@@ -765,6 +768,20 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
                     &p(summary.save_pct),
                 ])
             );
+            for r in &by_source {
+                println!(
+                    "{}",
+                    csv_line(&[
+                        "by_source",
+                        &r.source,
+                        &n(r.count),
+                        &n(r.input_tokens),
+                        &n(r.output_tokens),
+                        &n(r.saved_tokens),
+                        &p(r.save_pct),
+                    ])
+                );
+            }
             if let Some(rows) = &by_filter {
                 for r in rows {
                     let pct = if r.input_tokens > 0 {
@@ -829,6 +846,7 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
         }
         GainFormat::Text => {
             print_gain_summary(&summary);
+            print_source_table(&by_source);
             if let Some(rows) = &kind_feature {
                 print_gain_table(rows);
             }

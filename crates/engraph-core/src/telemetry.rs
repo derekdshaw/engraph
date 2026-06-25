@@ -154,10 +154,12 @@ pub fn gain_report(conn: &PooledConn) -> Result<Vec<GainRow>> {
     Ok(rows)
 }
 
-/// One row of the per-filter breakdown: the `output_filter` events grouped by
-/// `filter_id` instead of collapsed into a single `wrapped_cmd` row. This is the
-/// per-command view that makes a weak filter visible (e.g. `rg` carrying most of
-/// the token volume at a poor ratio).
+/// One row of the itemized savings breakdown across **all** credited sources,
+/// not just command output. The `item` is the command name for `output_filter`
+/// events (`rg`, `git_log`, …) and the feature name otherwise (`subgraph`,
+/// `compress_ingest`, …), so subgraph and message-compression get their own rows
+/// and the table's total matches the summary. Field kept as `filter_id` for
+/// serialization stability.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FilterGainRow {
     pub filter_id: String,
@@ -168,25 +170,71 @@ pub struct FilterGainRow {
 }
 
 pub fn gain_report_by_filter(conn: &PooledConn) -> Result<Vec<FilterGainRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT COALESCE(filter_id, '?') AS fid, COUNT(*) AS cnt, \
+    // Group command output by filter_id; everything else by feature, so a weak
+    // command (`rg`) and a strong source (`subgraph`) are both visible as rows.
+    let sql = format!(
+        "SELECT (CASE WHEN feature='output_filter' THEN COALESCE(filter_id,'?') \
+                      ELSE feature END) AS item, \
+                COUNT(*) AS cnt, \
                 COALESCE(SUM(input_tokens),0) AS itk, \
-                COALESCE(SUM(output_tokens),0) AS otk \
-         FROM events WHERE feature = 'output_filter' \
-         GROUP BY fid ORDER BY itk DESC, fid",
-    )?;
+                COALESCE(SUM(output_tokens),0) AS otk, \
+                {SAVED_EXPR} AS saved \
+         FROM events WHERE {SAVINGS_WHERE} \
+         GROUP BY item ORDER BY saved DESC, item"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map([], |r| {
-            let filter_id: String = r.get(0)?;
+            Ok(FilterGainRow {
+                filter_id: r.get(0)?,
+                count: r.get(1)?,
+                input_tokens: r.get(2)?,
+                output_tokens: r.get(3)?,
+                saved_tokens: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// One row of the three-bucket savings breakdown: `command` (wrapped commands),
+/// `codegraph` (subgraph neighborhoods replacing reads), `memory` (message
+/// compression). Together these partition every credited (`SAVINGS_WHERE`) row.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceRow {
+    pub source: String,
+    pub count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub saved_tokens: i64,
+    pub save_pct: f64,
+}
+
+pub fn gain_by_source(conn: &PooledConn) -> Result<Vec<SourceRow>> {
+    let sql = format!(
+        "SELECT CASE WHEN feature='subgraph' THEN 'codegraph' \
+                     WHEN kind='wrapped_cmd' THEN 'command' \
+                     WHEN kind='compress' THEN 'memory' \
+                     ELSE 'other' END AS source, \
+                COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), \
+                {SAVED_EXPR} AS saved \
+         FROM events WHERE {SAVINGS_WHERE} GROUP BY source ORDER BY saved DESC, source"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map([], |r| {
+            let source: String = r.get(0)?;
             let count: i64 = r.get(1)?;
             let input_tokens: i64 = r.get(2)?;
             let output_tokens: i64 = r.get(3)?;
-            Ok(FilterGainRow {
-                filter_id,
+            let saved_tokens: i64 = r.get(4)?;
+            Ok(SourceRow {
+                source,
                 count,
                 input_tokens,
                 output_tokens,
-                saved_tokens: input_tokens - output_tokens,
+                saved_tokens,
+                save_pct: save_pct(saved_tokens, input_tokens),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -529,6 +577,27 @@ mod tests {
         assert_eq!(s.input_tokens, 1800);
         assert_eq!(s.output_tokens, 550);
         assert_eq!(s.saved_tokens, 1250);
+    }
+
+    #[test]
+    fn by_source_buckets_partition_savings() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        record_event(&conn, ev(EventKind::WrappedCmd, "output_filter", 1000, 300)).unwrap();
+        record_event(&conn, ev(EventKind::Retrieve, "subgraph", 800, 150)).unwrap();
+        record_event(&conn, ev(EventKind::Compress, "compress_sweep", 500, 100)).unwrap();
+        // Non-savings rows must not appear in any bucket.
+        record_event(&conn, ev(EventKind::Index, "codegraph_index", 9_000, 0)).unwrap();
+
+        let rows = gain_by_source(&conn).unwrap();
+        let by = |s: &str| rows.iter().find(|r| r.source == s).map(|r| r.saved_tokens);
+        assert_eq!(by("command"), Some(700));
+        assert_eq!(by("codegraph"), Some(650));
+        assert_eq!(by("memory"), Some(400));
+        assert!(rows.iter().all(|r| r.source != "other"));
+        let total: i64 = rows.iter().map(|r| r.saved_tokens).sum();
+        assert_eq!(total, 1750);
     }
 
     #[test]

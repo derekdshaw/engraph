@@ -108,7 +108,7 @@ To make Claude actually reach for `--hybrid`, import the embeddings variant of t
 
 ### Token savings telemetry
 
-Every compression, retrieval, and wrapped-command invocation writes a row to `events`. `engraph gain` prints a savings summary followed by a per-feature table (with a Save% column):
+Every compression, retrieval, and wrapped-command invocation writes a row to `events`. `engraph gain` prints a savings summary, a three-bucket "by source" breakdown, and a per-feature table (all with a Save% column):
 
 ```
 == engraph gain ==
@@ -117,17 +117,22 @@ input_tk : 37323
 output_tk: 22570
 saved_tk : 14753
 save%    : 39.5
+
+by source
+source        count   input_tk  output_tk   saved_tk   share  save%
+command          91      31444      22073       9371   63.5%   29.8
+codegraph         2       5879        497       5382   36.5%   91.5
 kind         feature         count   input_tk  output_tk   saved_tk  save%
 retrieve     subgraph            2       5879        497       5382   91.5
 wrapped_cmd  output_filter      90      31090      22073       9017   29.0
 TOTAL_SAVED                                                   14753
 ```
 
-Save% is computed only over savings-bearing rows (`compress`/`wrapped_cmd` and the `subgraph` feature); rows where input/output carry no savings semantic — `recall`, `hook`, and `index` (which records millions of input tokens against 0 output) — show `-` and never inflate the totals. Flags add detail without changing the underlying numbers:
+Savings come from three sources, partitioned by the `by source` table: **command** output compression (`wrapped_cmd`), **codegraph** retrieval (`subgraph` replacing a file-read+grep loop), and **memory** (message compression at ingest/sweep). Save% is computed only over these savings-bearing rows; rows where input/output carry no savings semantic — `recall`, `hook`, and `index` (which records millions of input tokens against 0 output) — show `-` and never inflate the totals. Flags add detail without changing the underlying numbers:
 
 | Flag | Report |
 |---|---|
-| `--by-filter` | per-command breakdown (e.g. `rg`, `git`, `cargo_test`), ordered by token volume |
+| `--by-filter` | itemized breakdown across **all** sources — commands by name (`rg`, `git_log`), plus `subgraph` and `compress_*` rows; its TOTAL matches the summary |
 | `--by-project` / `--by-session` | savings scoped via the `sessions` join |
 | `--daily` / `--weekly` / `--monthly` / `--all` | time-bucketed breakdowns |
 | `--graph` | horizontal bar chart of saved tokens/day over the last 30 days |
