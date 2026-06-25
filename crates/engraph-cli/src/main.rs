@@ -20,14 +20,15 @@ mod hooks;
 mod output;
 mod redirect;
 mod rewrite;
-use cli::{BudgetCmd, Cli, Cmd, HookCmd};
+use cli::{BudgetCmd, Cli, Cmd, GainFormat, HookCmd};
 use hooks::{
     run_post_read_hook, run_pre_bash_hook, run_pre_grep_hook, run_session_end_hook,
     run_session_start_hook,
 };
 use output::{
-    print_filter_gain_table, print_gain_table, print_hits, print_repo_plan, print_symbol_langs,
-    print_workspace_plan,
+    csv_line, print_filter_gain_table, print_gain_summary, print_gain_table, print_graph,
+    print_history, print_hits, print_repo_plan, print_scope_table, print_symbol_langs,
+    print_time_table, print_workspace_plan,
 };
 
 // `main` is async because the OTLP/gRPC metrics exporter (the `otel` feature)
@@ -61,22 +62,34 @@ async fn main() -> Result<()> {
     let conn = pool.get()?;
 
     match cli.cmd {
-        Cmd::Gain { json, by_filter } => {
-            if by_filter {
-                let rows = telemetry::gain_report_by_filter(&conn)?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&rows)?);
-                } else {
-                    print_filter_gain_table(&rows);
-                }
-            } else {
-                let rows = telemetry::gain_report(&conn)?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&rows)?);
-                } else {
-                    print_gain_table(&rows);
-                }
-            }
+        Cmd::Gain {
+            json,
+            format,
+            by_filter,
+            by_project,
+            by_session,
+            daily,
+            weekly,
+            monthly,
+            all,
+            graph,
+            history,
+        } => {
+            let fmt = if json { GainFormat::Json } else { format };
+            run_gain(
+                &conn,
+                fmt,
+                GainOpts {
+                    by_filter: by_filter || all,
+                    by_project: by_project || all,
+                    by_session,
+                    daily: daily || all,
+                    weekly: weekly || all,
+                    monthly: monthly || all,
+                    graph,
+                    history,
+                },
+            )?;
         }
         Cmd::Run { command, args } => {
             let start = Instant::now();
@@ -613,6 +626,237 @@ async fn main() -> Result<()> {
             let scope_id = engraph_retrieve::scope::ensure_project_scope(&conn, &project)?;
             engraph_retrieve::scope::add_member(&conn, &scope_id, "context_item", &id)?;
             println!("saved {} {id} for {project}", kind.as_str());
+        }
+    }
+    Ok(())
+}
+
+/// Which breakdown sections `engraph gain` should emit. `--all` is expanded into
+/// the relevant flags by the caller; the default (every field false / None) is a
+/// summary plus the per-`(kind, feature)` table.
+struct GainOpts {
+    by_filter: bool,
+    by_project: bool,
+    by_session: bool,
+    daily: bool,
+    weekly: bool,
+    monthly: bool,
+    graph: bool,
+    history: Option<usize>,
+}
+
+impl GainOpts {
+    /// No breakdown requested → render the default `(kind, feature)` table.
+    fn is_default(&self) -> bool {
+        !self.by_filter
+            && !self.by_project
+            && !self.by_session
+            && !self.daily
+            && !self.weekly
+            && !self.monthly
+            && !self.graph
+            && self.history.is_none()
+    }
+}
+
+const GRAPH_DAYS: i64 = 30;
+
+fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()> {
+    use engraph_core::telemetry::{Scope, TimeBucket};
+
+    let summary = telemetry::gain_summary(conn)?;
+    let kind_feature = opts
+        .is_default()
+        .then(|| telemetry::gain_report(conn))
+        .transpose()?;
+    let by_filter = opts
+        .by_filter
+        .then(|| telemetry::gain_report_by_filter(conn))
+        .transpose()?;
+    let by_project = opts
+        .by_project
+        .then(|| telemetry::gain_by_scope(conn, Scope::Project))
+        .transpose()?;
+    let by_session = opts
+        .by_session
+        .then(|| telemetry::gain_by_scope(conn, Scope::Session))
+        .transpose()?;
+    let daily = opts
+        .daily
+        .then(|| telemetry::gain_by_time(conn, TimeBucket::Daily))
+        .transpose()?;
+    let weekly = opts
+        .weekly
+        .then(|| telemetry::gain_by_time(conn, TimeBucket::Weekly))
+        .transpose()?;
+    let monthly = opts
+        .monthly
+        .then(|| telemetry::gain_by_time(conn, TimeBucket::Monthly))
+        .transpose()?;
+    let history = opts
+        .history
+        .map(|n| telemetry::gain_history(conn, n.max(1)))
+        .transpose()?;
+    let graph = opts
+        .graph
+        .then(|| telemetry::gain_daily_series(conn, GRAPH_DAYS))
+        .transpose()?;
+
+    match fmt {
+        GainFormat::Json => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("summary".into(), serde_json::to_value(&summary)?);
+            if let Some(r) = &kind_feature {
+                obj.insert("by_kind_feature".into(), serde_json::to_value(r)?);
+            }
+            if let Some(r) = &by_filter {
+                obj.insert("by_filter".into(), serde_json::to_value(r)?);
+            }
+            if let Some(r) = &by_project {
+                obj.insert("by_project".into(), serde_json::to_value(r)?);
+            }
+            if let Some(r) = &by_session {
+                obj.insert("by_session".into(), serde_json::to_value(r)?);
+            }
+            if let Some(r) = &daily {
+                obj.insert("daily".into(), serde_json::to_value(r)?);
+            }
+            if let Some(r) = &weekly {
+                obj.insert("weekly".into(), serde_json::to_value(r)?);
+            }
+            if let Some(r) = &monthly {
+                obj.insert("monthly".into(), serde_json::to_value(r)?);
+            }
+            if let Some(r) = &history {
+                obj.insert("history".into(), serde_json::to_value(r)?);
+            }
+            if let Some(r) = &graph {
+                obj.insert("graph".into(), serde_json::to_value(r)?);
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::Value::Object(obj))?
+            );
+        }
+        GainFormat::Csv => {
+            println!(
+                "{}",
+                csv_line(&[
+                    "section",
+                    "key",
+                    "count",
+                    "input_tk",
+                    "output_tk",
+                    "saved_tk",
+                    "save%"
+                ])
+            );
+            let p = |v: f64| format!("{v:.1}");
+            let n = |v: i64| v.to_string();
+            println!(
+                "{}",
+                csv_line(&[
+                    "summary",
+                    "",
+                    &n(summary.commands),
+                    &n(summary.input_tokens),
+                    &n(summary.output_tokens),
+                    &n(summary.saved_tokens),
+                    &p(summary.save_pct),
+                ])
+            );
+            if let Some(rows) = &by_filter {
+                for r in rows {
+                    let pct = if r.input_tokens > 0 {
+                        r.saved_tokens as f64 / r.input_tokens as f64 * 100.0
+                    } else {
+                        0.0
+                    };
+                    println!(
+                        "{}",
+                        csv_line(&[
+                            "by_filter",
+                            &r.filter_id,
+                            &n(r.count),
+                            &n(r.input_tokens),
+                            &n(r.output_tokens),
+                            &n(r.saved_tokens),
+                            &p(pct),
+                        ])
+                    );
+                }
+            }
+            for (section, rows) in [("by_project", &by_project), ("by_session", &by_session)] {
+                if let Some(rows) = rows {
+                    for r in rows {
+                        println!(
+                            "{}",
+                            csv_line(&[
+                                section,
+                                &r.scope,
+                                &n(r.count),
+                                &n(r.input_tokens),
+                                &n(r.output_tokens),
+                                &n(r.saved_tokens),
+                                &p(r.save_pct),
+                            ])
+                        );
+                    }
+                }
+            }
+            for (section, rows) in [
+                ("daily", &daily),
+                ("weekly", &weekly),
+                ("monthly", &monthly),
+            ] {
+                if let Some(rows) = rows {
+                    for r in rows {
+                        println!(
+                            "{}",
+                            csv_line(&[
+                                section,
+                                &r.bucket,
+                                &n(r.count),
+                                &n(r.input_tokens),
+                                &n(r.output_tokens),
+                                &n(r.saved_tokens),
+                                &p(r.save_pct),
+                            ])
+                        );
+                    }
+                }
+            }
+        }
+        GainFormat::Text => {
+            print_gain_summary(&summary);
+            if let Some(rows) = &kind_feature {
+                print_gain_table(rows);
+            }
+            if let Some(rows) = &by_filter {
+                println!("\nby filter");
+                print_filter_gain_table(rows);
+            }
+            if let Some(rows) = &by_project {
+                print_scope_table(rows, "project");
+            }
+            if let Some(rows) = &by_session {
+                print_scope_table(rows, "session");
+            }
+            if let Some(rows) = &daily {
+                print_time_table(rows, TimeBucket::Daily.label());
+            }
+            if let Some(rows) = &weekly {
+                print_time_table(rows, TimeBucket::Weekly.label());
+            }
+            if let Some(rows) = &monthly {
+                print_time_table(rows, TimeBucket::Monthly.label());
+            }
+            if let Some(rows) = &graph {
+                print_graph(rows, GRAPH_DAYS);
+            }
+            if let Some(rows) = &history {
+                print_history(rows);
+            }
         }
     }
     Ok(())

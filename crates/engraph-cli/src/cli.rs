@@ -14,13 +14,40 @@ pub(crate) struct Cli {
 pub(crate) enum Cmd {
     /// Show a telemetry report of token savings
     Gain {
-        /// Output as JSON
+        /// Output as JSON (alias for `--format json`)
         #[arg(long)]
         json: bool,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = GainFormat::Text)]
+        format: GainFormat,
         /// Break the `wrapped_cmd`/`output_filter` savings down per filter,
         /// ordered by token volume — the per-command view (like `rtk gain`).
         #[arg(long)]
         by_filter: bool,
+        /// Break savings down per project (joins sessions.project).
+        #[arg(long)]
+        by_project: bool,
+        /// Break savings down per session id.
+        #[arg(long)]
+        by_session: bool,
+        /// Day-by-day savings breakdown.
+        #[arg(long)]
+        daily: bool,
+        /// Week-by-week (Sun–Sat) savings breakdown.
+        #[arg(long)]
+        weekly: bool,
+        /// Month-by-month savings breakdown.
+        #[arg(long)]
+        monthly: bool,
+        /// Show the summary plus every breakdown at once.
+        #[arg(long)]
+        all: bool,
+        /// ASCII sparkline of saved tokens over the last 30 days.
+        #[arg(long)]
+        graph: bool,
+        /// Show the most recent N savings events (`--history` alone = 10).
+        #[arg(long, num_args = 0..=1, default_missing_value = "10")]
+        history: Option<usize>,
     },
     /// Manage per-session token budget
     Budget {
@@ -269,6 +296,13 @@ impl SaveKind {
             SaveKind::Performance => "performance",
         }
     }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum GainFormat {
+    Text,
+    Json,
+    Csv,
 }
 
 #[derive(Subcommand)]

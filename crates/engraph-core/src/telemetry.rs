@@ -104,6 +104,28 @@ pub(crate) fn saved_for(kind: &str, feature: &str, input: i64, output: i64) -> O
     }
 }
 
+/// SQL mirror of `saved_for`: the rows where input/output carries a savings
+/// semantic. Every aggregate report (summary, temporal, scope, graph) filters
+/// through this so non-savings rows — `recall`, `hook`, and especially `index`
+/// (millions of input tokens, 0 output) — never inflate the numbers. Keep in
+/// lockstep with `saved_for`.
+pub(crate) const SAVINGS_WHERE: &str =
+    "(kind IN ('compress','wrapped_cmd') OR feature = 'subgraph')";
+
+/// Per-group saved expression, matching `saved_for` (subgraph clamps at 0).
+/// Used inside aggregate queries already scoped by `SAVINGS_WHERE`.
+pub(crate) const SAVED_EXPR: &str = "COALESCE(SUM(CASE WHEN feature='subgraph' \
+          THEN MAX(input_tokens - output_tokens, 0) \
+          ELSE input_tokens - output_tokens END),0)";
+
+fn save_pct(saved: i64, input: i64) -> f64 {
+    if input > 0 {
+        saved as f64 / input as f64 * 100.0
+    } else {
+        0.0
+    }
+}
+
 pub fn gain_report(conn: &PooledConn) -> Result<Vec<GainRow>> {
     let mut stmt = conn.prepare(
         "SELECT kind, feature, COUNT(*) AS cnt, \
@@ -166,6 +188,216 @@ pub fn gain_report_by_filter(conn: &PooledConn) -> Result<Vec<FilterGainRow>> {
                 output_tokens,
                 saved_tokens: input_tokens - output_tokens,
             })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Top-line totals over savings-bearing rows only (the rtk-style header).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GainSummary {
+    pub commands: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub saved_tokens: i64,
+    pub save_pct: f64,
+}
+
+pub fn gain_summary(conn: &PooledConn) -> Result<GainSummary> {
+    let sql = format!(
+        "SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), {SAVED_EXPR} \
+         FROM events WHERE {SAVINGS_WHERE}"
+    );
+    let s = conn.query_row(&sql, [], |r| {
+        let commands: i64 = r.get(0)?;
+        let input_tokens: i64 = r.get(1)?;
+        let output_tokens: i64 = r.get(2)?;
+        let saved_tokens: i64 = r.get(3)?;
+        Ok(GainSummary {
+            commands,
+            input_tokens,
+            output_tokens,
+            saved_tokens,
+            save_pct: save_pct(saved_tokens, input_tokens),
+        })
+    })?;
+    Ok(s)
+}
+
+/// Calendar granularity for `gain_by_time`.
+#[derive(Debug, Clone, Copy)]
+pub enum TimeBucket {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+impl TimeBucket {
+    /// SQLite expression that maps `ts` to a bucket label. Weekly is
+    /// Sunday-aligned (the start-of-week date) to match rtk's Sun–Sat week.
+    fn expr(self) -> &'static str {
+        match self {
+            TimeBucket::Daily => "date(ts)",
+            TimeBucket::Weekly => "date(ts, '-' || strftime('%w', ts) || ' days')",
+            TimeBucket::Monthly => "strftime('%Y-%m', ts)",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TimeBucket::Daily => "Daily",
+            TimeBucket::Weekly => "Weekly",
+            TimeBucket::Monthly => "Monthly",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TimeRow {
+    pub bucket: String,
+    pub count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub saved_tokens: i64,
+    pub save_pct: f64,
+}
+
+pub fn gain_by_time(conn: &PooledConn, bucket: TimeBucket) -> Result<Vec<TimeRow>> {
+    let b = bucket.expr();
+    let sql = format!(
+        "SELECT {b} AS bkt, COUNT(*), COALESCE(SUM(input_tokens),0), \
+                COALESCE(SUM(output_tokens),0), {SAVED_EXPR} \
+         FROM events WHERE {SAVINGS_WHERE} GROUP BY bkt ORDER BY bkt"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map([], |r| {
+            let bucket: String = r.get(0)?;
+            let count: i64 = r.get(1)?;
+            let input_tokens: i64 = r.get(2)?;
+            let output_tokens: i64 = r.get(3)?;
+            let saved_tokens: i64 = r.get(4)?;
+            Ok(TimeRow {
+                bucket,
+                count,
+                input_tokens,
+                output_tokens,
+                saved_tokens,
+                save_pct: save_pct(saved_tokens, input_tokens),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Aggregation axis for `gain_by_scope`: by project (joined from `sessions`) or
+/// by raw session id.
+#[derive(Debug, Clone, Copy)]
+pub enum Scope {
+    Project,
+    Session,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScopeRow {
+    pub scope: String,
+    pub count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub saved_tokens: i64,
+    pub save_pct: f64,
+}
+
+pub fn gain_by_scope(conn: &PooledConn, scope: Scope) -> Result<Vec<ScopeRow>> {
+    // Project needs the sessions join; session keys directly off the event.
+    let key = match scope {
+        Scope::Project => "COALESCE(s.project, '?')",
+        Scope::Session => "COALESCE(e.session_id, '?')",
+    };
+    let sql = format!(
+        "SELECT {key} AS scope, COUNT(*), COALESCE(SUM(e.input_tokens),0), \
+                COALESCE(SUM(e.output_tokens),0), \
+                COALESCE(SUM(CASE WHEN e.feature='subgraph' \
+                    THEN MAX(e.input_tokens - e.output_tokens, 0) \
+                    ELSE e.input_tokens - e.output_tokens END),0) AS saved \
+         FROM events e LEFT JOIN sessions s ON e.session_id = s.id \
+         WHERE (e.kind IN ('compress','wrapped_cmd') OR e.feature = 'subgraph') \
+         GROUP BY scope ORDER BY saved DESC, scope"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map([], |r| {
+            let scope: String = r.get(0)?;
+            let count: i64 = r.get(1)?;
+            let input_tokens: i64 = r.get(2)?;
+            let output_tokens: i64 = r.get(3)?;
+            let saved_tokens: i64 = r.get(4)?;
+            Ok(ScopeRow {
+                scope,
+                count,
+                input_tokens,
+                output_tokens,
+                saved_tokens,
+                save_pct: save_pct(saved_tokens, input_tokens),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HistoryRow {
+    pub ts: String,
+    pub kind: String,
+    pub feature: String,
+    pub filter_id: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub saved_tokens: i64,
+}
+
+/// The `n` most recent savings-bearing events, newest first.
+pub fn gain_history(conn: &PooledConn, n: usize) -> Result<Vec<HistoryRow>> {
+    let sql = format!(
+        "SELECT ts, kind, feature, COALESCE(filter_id,'-'), input_tokens, output_tokens \
+         FROM events WHERE {SAVINGS_WHERE} ORDER BY seq DESC LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map([n as i64], |r| {
+            let ts: String = r.get(0)?;
+            let kind: String = r.get(1)?;
+            let feature: String = r.get(2)?;
+            let filter_id: String = r.get(3)?;
+            let input_tokens: i64 = r.get(4)?;
+            let output_tokens: i64 = r.get(5)?;
+            let saved_tokens = saved_for(&kind, &feature, input_tokens, output_tokens).unwrap_or(0);
+            Ok(HistoryRow {
+                ts,
+                kind,
+                feature,
+                filter_id,
+                input_tokens,
+                output_tokens,
+                saved_tokens,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Saved tokens per day over the last `days`, oldest first. Days with no events
+/// are absent here; the renderer fills the gaps so the graph spans a full window.
+pub fn gain_daily_series(conn: &PooledConn, days: i64) -> Result<Vec<(String, i64)>> {
+    let sql = format!(
+        "SELECT date(ts) AS d, {SAVED_EXPR} \
+         FROM events WHERE {SAVINGS_WHERE} AND date(ts) >= date('now', ?1) \
+         GROUP BY d ORDER BY d"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map([format!("-{} days", days - 1)], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
@@ -267,6 +499,89 @@ mod tests {
         .unwrap();
         let rows = gain_report(&conn).unwrap();
         assert_eq!(rows[0].saved_tokens, Some(850));
+    }
+
+    fn ev(kind: EventKind, feature: &str, input: i64, output: i64) -> EventInput<'_> {
+        EventInput {
+            session_id: None,
+            kind,
+            feature,
+            filter_id: None,
+            input_tokens: input,
+            output_tokens: output,
+            latency_ms: 0,
+        }
+    }
+
+    #[test]
+    fn summary_excludes_non_savings_rows() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        record_event(&conn, ev(EventKind::Compress, "compress", 1000, 400)).unwrap();
+        record_event(&conn, ev(EventKind::Retrieve, "subgraph", 800, 150)).unwrap();
+        // These two must NOT count toward the summary.
+        record_event(&conn, ev(EventKind::Index, "codegraph_index", 5_000_000, 0)).unwrap();
+        record_event(&conn, ev(EventKind::Retrieve, "recall", 0, 200)).unwrap();
+
+        let s = gain_summary(&conn).unwrap();
+        assert_eq!(s.commands, 2);
+        assert_eq!(s.input_tokens, 1800);
+        assert_eq!(s.output_tokens, 550);
+        assert_eq!(s.saved_tokens, 1250);
+    }
+
+    #[test]
+    fn time_bucketing_groups_by_day() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        // Insert with explicit ts so the buckets are deterministic.
+        for (ts, input, output) in [
+            ("2026-06-01 10:00:00", 1000, 300),
+            ("2026-06-01 12:00:00", 500, 200),
+            ("2026-06-02 09:00:00", 800, 100),
+        ] {
+            conn.execute(
+                "INSERT INTO events (id, kind, feature, input_tokens, output_tokens, ts) \
+                 VALUES (?1, 'compress', 'compress', ?2, ?3, ?4)",
+                rusqlite::params![Uuid::now_v7().to_string(), input, output, ts],
+            )
+            .unwrap();
+        }
+        let rows = gain_by_time(&conn, TimeBucket::Daily).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].bucket, "2026-06-01");
+        assert_eq!(rows[0].saved_tokens, 1000); // (1000-300)+(500-200)
+        assert_eq!(rows[1].bucket, "2026-06-02");
+        assert_eq!(rows[1].saved_tokens, 700);
+    }
+
+    #[test]
+    fn by_project_joins_sessions() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, project, started_at) VALUES ('s1', '/repo/a', '2026-06-01')",
+            [],
+        )
+        .unwrap();
+        record_event(
+            &conn,
+            EventInput {
+                session_id: Some("s1"),
+                ..ev(EventKind::WrappedCmd, "output_filter", 1000, 250)
+            },
+        )
+        .unwrap();
+        // An event with no session falls into the '?' bucket, not '/repo/a'.
+        record_event(&conn, ev(EventKind::Compress, "compress", 400, 100)).unwrap();
+
+        let rows = gain_by_scope(&conn, Scope::Project).unwrap();
+        let a = rows.iter().find(|r| r.scope == "/repo/a").unwrap();
+        assert_eq!(a.saved_tokens, 750);
+        assert!(rows.iter().any(|r| r.scope == "?"));
     }
 
     #[test]
