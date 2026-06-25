@@ -104,17 +104,35 @@ rrf_score(d) = w_lex / (k + lex_rank(d))
 
 Constants: `K_RRF = 60.0` (standard RRF paper value), `W_LEXICAL = W_SEMANTIC = 1.0`, `W_RECENCY = 0.5` (freshness as tiebreaker, not primary signal).
 
+To make Claude actually reach for `--hybrid`, import the embeddings variant of the memory-guidance file (`docs/engraph-embeddings.md`) instead of `docs/engraph.md` — see [Install](#from-a-release-archive-recommended). Keep embeddings fresh with `engraph reindex-embeddings` (new transcripts are ingested at `SessionEnd` but not auto-embedded); the bundled [`engraph-refresh` skill](#claude-code-skill-engraph-refresh) wraps this.
+
 ### Token savings telemetry
 
-Every compression, retrieval, and wrapped-command invocation writes a row to `events`. `engraph gain` prints a per-feature table:
+Every compression, retrieval, and wrapped-command invocation writes a row to `events`. `engraph gain` prints a savings summary followed by a per-feature table (with a Save% column):
 
 ```
-kind         feature          count   input_tk  output_tk   saved_tk
-wrapped_cmd  git                  5       8200        980       7220
-compress     session-memory       3      12440       4730       7710
-retrieve     recall               8          0        842          -
-TOTAL_SAVED                                                   14930
+== engraph gain ==
+commands : 93
+input_tk : 37323
+output_tk: 22570
+saved_tk : 14753
+save%    : 39.5
+kind         feature         count   input_tk  output_tk   saved_tk  save%
+retrieve     subgraph            2       5879        497       5382   91.5
+wrapped_cmd  output_filter      90      31090      22073       9017   29.0
+TOTAL_SAVED                                                   14753
 ```
+
+Save% is computed only over savings-bearing rows (`compress`/`wrapped_cmd` and the `subgraph` feature); rows where input/output carry no savings semantic — `recall`, `hook`, and `index` (which records millions of input tokens against 0 output) — show `-` and never inflate the totals. Flags add detail without changing the underlying numbers:
+
+| Flag | Report |
+|---|---|
+| `--by-filter` | per-command breakdown (e.g. `rg`, `git`, `cargo_test`), ordered by token volume |
+| `--by-project` / `--by-session` | savings scoped via the `sessions` join |
+| `--daily` / `--weekly` / `--monthly` / `--all` | time-bucketed breakdowns |
+| `--graph` | horizontal bar chart of saved tokens/day over the last 30 days |
+| `--history [N]` | the most recent N savings events |
+| `--format text\|json\|csv` (or `--json`) | machine-readable export |
 
 The same telemetry can be exported to an OpenTelemetry collector (OTLP/gRPC) for
 dashboards — off by default, behind the `otel` build feature and `ENGRAPH_OTEL`.
@@ -147,7 +165,9 @@ cd engraph-<version>-x86_64-pc-windows-msvc
 .\install.ps1
 ```
 
-The install script places the binary under a per-user prefix and merges the `SessionStart`, `PreToolUse(Bash, Grep)`, `PostToolUse(Read)`, and `SessionEnd` hooks into `~/.claude/settings.json`. It also installs the memory-capture guidance (`docs/engraph.md` → `~/.claude/engraph.md`, imported via `@engraph.md` in your `CLAUDE.md`) and offers to run the SCIP-indexer installer. Re-running replaces existing entries in-place rather than duplicating them.
+The install script places the binary under a per-user prefix and merges the `SessionStart`, `PreToolUse(Bash, Grep)`, `PostToolUse(Read)`, and `SessionEnd` hooks into `~/.claude/settings.json`. It also installs the memory-capture guidance (`docs/engraph.md` → `~/.claude/engraph.md`, imported via `@engraph.md` in your `CLAUDE.md`), offers to install the [`engraph-refresh` skill](#claude-code-skill-engraph-refresh), and offers to run the SCIP-indexer installer. Re-running replaces existing entries in-place rather than duplicating them.
+
+If you build with `--features embeddings`, swap the memory-guidance import to the embeddings variant — `docs/engraph-embeddings.md`, a superset of `docs/engraph.md` that adds a *Semantic recall* section steering Claude to prefer `engraph recall --hybrid` for conversation memory. Copy it to `~/.claude/engraph-embeddings.md` and import `@engraph-embeddings.md` (instead of `@engraph.md`) in your `CLAUDE.md`. Use exactly one of the two.
 
 ### From source
 
@@ -235,6 +255,19 @@ PostToolUse(Read) appends a brief listing of indexed symbols in the just-read fi
 
 ---
 
+## Claude Code skill: `engraph-refresh`
+
+A bundled skill that brings engraph's local indexes up to date after a work session. The source lives at [`skills/engraph-refresh/SKILL.md`](skills/engraph-refresh/SKILL.md); the installer offers (opt-in, like the SCIP installer) to copy it to `~/.claude/skills/engraph-refresh/`. Invoke it from Claude Code:
+
+| Invocation | What it does |
+|---|---|
+| `/engraph-refresh` | Re-embeds new conversation messages (`engraph reindex-embeddings`; incremental + idempotent). This is how semantic recall stays current — transcripts are ingested at `SessionEnd` but not auto-embedded. |
+| `/engraph-refresh index` (or `all` / `code` / `scip`) | Additionally rebuilds the code graph for the current repo (`engraph index .`). |
+
+The code-graph step is opt-in: a bare invocation only touches embeddings. The reindex step needs an embeddings build (see [Feature flags](#feature-flags)); on a lean binary the skill reports that and stops rather than failing silently.
+
+---
+
 ## Usage
 
 ```bash
@@ -269,8 +302,11 @@ engraph ingest ~/.claude/projects/<project>/<session>.jsonl
 engraph compress-existing
 
 # Token savings report
-engraph gain
-engraph gain --json
+engraph gain                       # summary + per-feature table
+engraph gain --by-filter           # per-command breakdown
+engraph gain --daily               # (or --weekly / --monthly / --all)
+engraph gain --graph               # ASCII saved-tokens/day chart
+engraph gain --all --format json   # machine-readable export (--json still works)
 
 # Per-session token budget (--session-id is required)
 engraph budget status --session-id <id>

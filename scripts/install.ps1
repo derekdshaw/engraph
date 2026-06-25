@@ -221,6 +221,40 @@ else {
     Write-Warn "Could not find docs/engraph.md next to the installer; skipping memory guidance"
 }
 
+# --- Install optional Claude Code skill(s) ---
+# Ship the `engraph-refresh` skill (reindex embeddings + opt-in code-graph
+# rebuild) into the user's skill directory, opt-in. Resolve the source like the
+# binary/md: next to this script (release archive layout), else ..\skills.
+Write-Info "Optional Claude Code skill"
+
+$SkillSrc = $null
+$skillPrimary  = Join-Path $ScriptDir "skills\engraph-refresh\SKILL.md"
+$skillFallback = Join-Path $ScriptDir "..\skills\engraph-refresh\SKILL.md"
+if (Test-Path $skillPrimary) {
+    $SkillSrc = (Resolve-Path $skillPrimary).Path
+}
+elseif (Test-Path $skillFallback) {
+    $SkillSrc = (Resolve-Path $skillFallback).Path
+}
+
+if ($SkillSrc) {
+    $runSkill = Read-Host "Install the 'engraph-refresh' skill (reindex embeddings + optional code-graph rebuild)? [y/N]"
+    if ($runSkill -eq "y" -or $runSkill -eq "Y" -or $runSkill -eq "yes") {
+        $SkillDest = Join-Path $ClaudeDir "skills\engraph-refresh"
+        if (-not (Test-Path $SkillDest)) {
+            New-Item -ItemType Directory -Path $SkillDest -Force | Out-Null
+        }
+        Copy-Item $SkillSrc (Join-Path $SkillDest "SKILL.md") -Force
+        Write-Ok "Installed skill to $SkillDest"
+    }
+    else {
+        Write-Host "Skipped. Install later by copying $SkillSrc to $ClaudeDir\skills\"
+    }
+}
+else {
+    Write-Warn "Could not find skills\engraph-refresh next to the installer; skipping skill"
+}
+
 Write-Host ""
 Write-Host "Engraph installed successfully!" -ForegroundColor Green
 Write-Host ""

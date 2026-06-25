@@ -222,6 +222,37 @@ else
     warn "Could not find docs/engraph.md next to the installer; skipping memory guidance"
 fi
 
+# --- Install optional Claude Code skill(s) ---
+# Ship the `engraph-refresh` skill (reindex embeddings + opt-in code-graph
+# rebuild) into the user's skill directory, opt-in. Resolve the source like the
+# binary/md: next to this script (release archive layout), else ../skills
+# (source checkout).
+info "Optional Claude Code skill"
+
+SKILL_SRC=""
+if [ -f "$SCRIPT_DIR/skills/engraph-refresh/SKILL.md" ]; then
+    SKILL_SRC="$SCRIPT_DIR/skills/engraph-refresh"
+elif [ -f "$SCRIPT_DIR/../skills/engraph-refresh/SKILL.md" ]; then
+    SKILL_SRC="$SCRIPT_DIR/../skills/engraph-refresh"
+fi
+
+if [ -n "$SKILL_SRC" ]; then
+    read -rp "Install the 'engraph-refresh' skill (reindex embeddings + optional code-graph rebuild)? [y/N]: " run_skill
+    case "$run_skill" in
+        [yY] | [yY][eE][sS])
+            SKILL_DEST="$CLAUDE_DIR/skills/engraph-refresh"
+            mkdir -p "$SKILL_DEST"
+            cp "$SKILL_SRC/SKILL.md" "$SKILL_DEST/SKILL.md"
+            ok "Installed skill to $SKILL_DEST"
+            ;;
+        *)
+            echo "Skipped. Install later by copying $SKILL_SRC to $CLAUDE_DIR/skills/"
+            ;;
+    esac
+else
+    warn "Could not find skills/engraph-refresh next to the installer; skipping skill"
+fi
+
 echo ""
 printf "${GREEN}${BOLD}Engraph installed successfully!${RESET}\n"
 echo ""
