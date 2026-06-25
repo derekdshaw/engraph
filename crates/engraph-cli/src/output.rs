@@ -207,20 +207,49 @@ pub(crate) fn print_time_table(rows: &[telemetry::TimeRow], label: &str) {
     }
 }
 
+/// Upper bound on the scope column so a single long project path can't blow out
+/// the table on a narrow terminal.
+const MAX_SCOPE_W: usize = 50;
+
+/// Fit `s` into `w` chars, keeping the **tail** when it's too long (a project
+/// path's identifying part — the repo name — is at the end) and marking the cut
+/// with a leading `…`.
+fn fit_left(s: &str, w: usize) -> String {
+    let n = s.chars().count();
+    if n <= w {
+        return s.to_string();
+    }
+    let tail: String = s.chars().skip(n - w.saturating_sub(1)).collect();
+    format!("…{tail}")
+}
+
 pub(crate) fn print_scope_table(rows: &[telemetry::ScopeRow], header: &str) {
     println!("\nby {header}");
     if rows.is_empty() {
         println!("(no events)");
         return;
     }
+    // Size the scope column to the widest value, but never wider than
+    // MAX_SCOPE_W or narrower than the header.
+    let w = rows
+        .iter()
+        .map(|r| r.scope.chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(header.len(), MAX_SCOPE_W);
     println!(
-        "{:<40} {:>6} {:>10} {:>10} {:>10} {:>6}",
+        "{:<w$} {:>6} {:>10} {:>10} {:>10} {:>6}",
         header, "count", "input_tk", "output_tk", "saved_tk", "save%"
     );
     for r in rows {
         println!(
-            "{:<40} {:>6} {:>10} {:>10} {:>10} {:>6.1}",
-            r.scope, r.count, r.input_tokens, r.output_tokens, r.saved_tokens, r.save_pct
+            "{:<w$} {:>6} {:>10} {:>10} {:>10} {:>6.1}",
+            fit_left(&r.scope, w),
+            r.count,
+            r.input_tokens,
+            r.output_tokens,
+            r.saved_tokens,
+            r.save_pct
         );
     }
 }
@@ -302,4 +331,24 @@ pub(crate) fn csv_line(fields: &[&str]) -> String {
         .map(|f| csv_field(f))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fit_left_keeps_short_unchanged() {
+        assert_eq!(fit_left("/home/me/proj", 50), "/home/me/proj");
+    }
+
+    #[test]
+    fn fit_left_truncates_long_paths_keeping_tail() {
+        let long = "/home/me/very/deeply/nested/workspace/that/exceeds/the/cap/myrepo";
+        let out = fit_left(long, MAX_SCOPE_W);
+        // Width-bounded, ellipsis-prefixed, and the repo name survives.
+        assert_eq!(out.chars().count(), MAX_SCOPE_W);
+        assert!(out.starts_with('…'));
+        assert!(out.ends_with("myrepo"));
+    }
 }
