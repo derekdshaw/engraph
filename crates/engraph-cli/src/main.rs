@@ -155,8 +155,8 @@ async fn main() -> Result<()> {
                     tracing::warn!(?e, "post-read hook failed; emitting empty");
                 }
             }
-            HookCmd::SessionStart => {
-                if let Err(e) = run_session_start_hook(&conn) {
+            HookCmd::SessionStart { client } => {
+                if let Err(e) = run_session_start_hook(&conn, client) {
                     tracing::warn!(?e, "session-start hook failed; emitting empty");
                 }
             }

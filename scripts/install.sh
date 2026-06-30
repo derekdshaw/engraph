@@ -4,12 +4,14 @@ set -euo pipefail
 # Engraph installer for macOS and Linux.
 # Resolves the `engraph` binary relative to this script's directory (matches
 # the layout of the release archive), installs it under a per-user prefix,
-# and wires SessionStart + PreToolUse(Bash,Grep) + PostToolUse(Read) +
-# SessionEnd hooks into Claude Code's settings.json.
+# and wires Claude Code hooks into settings.json plus Codex SessionStart/Stop
+# hooks into hooks.json.
 
 BINARY="engraph"
 CLAUDE_DIR="$HOME/.claude"
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
+CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+CODEX_HOOKS_FILE="$CODEX_DIR/hooks.json"
 
 # Colors
 RED='\033[0;31m'
@@ -187,6 +189,55 @@ PYEOF
 
 ok "Updated $SETTINGS_FILE"
 
+# --- Configure Codex hooks ---
+
+info "Configuring Codex hooks"
+
+mkdir -p "$CODEX_DIR"
+
+"$PYTHON" - "$CODEX_HOOKS_FILE" "$ENGRAPH" <<'PYEOF'
+import json, os, sys
+
+hooks_path, engraph = sys.argv[1], sys.argv[2]
+
+settings = {}
+if os.path.exists(hooks_path):
+    try:
+        with open(hooks_path) as f:
+            settings = json.load(f)
+    except json.JSONDecodeError:
+        settings = {}
+
+hooks_config = {
+    "SessionStart": [{
+        "matcher": "",
+        "hooks": [{"type": "command", "command": f"{engraph} hook session-start --client codex"}],
+    }],
+    "Stop": [{
+        "hooks": [{"type": "command", "command": f"{engraph} hook session-end"}],
+    }],
+}
+
+existing_hooks = settings.get("hooks", {})
+for event, entries in hooks_config.items():
+    if event in existing_hooks:
+        filtered = [
+            e for e in existing_hooks[event]
+            if not any("engraph" in h.get("command", "") for h in e.get("hooks", []))
+        ]
+        existing_hooks[event] = filtered + entries
+    else:
+        existing_hooks[event] = entries
+
+settings["hooks"] = existing_hooks
+
+with open(hooks_path, "w") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+PYEOF
+
+ok "Updated $CODEX_HOOKS_FILE"
+
 # --- Install memory-capture guidance ---
 # The writer commands (remember/bug/save) only get called if Claude is told
 # when to call them. Ship a memory file and import it from CLAUDE.md so the
@@ -257,7 +308,8 @@ echo ""
 printf "${GREEN}${BOLD}Engraph installed successfully!${RESET}\n"
 echo ""
 echo "Binary:    $ENGRAPH"
-echo "Settings:  $SETTINGS_FILE"
+echo "Claude:    $SETTINGS_FILE"
+echo "Codex:     $CODEX_HOOKS_FILE"
 echo "Memory:    $ENGRAPH_MD (imported via @engraph.md)"
 echo "Database:  \$ENGRAPH_DB_PATH (default: ~/.local/share/engraph/engraph.db)"
 echo ""
@@ -265,12 +317,12 @@ echo "Sanity check:"
 echo "  $ENGRAPH --version"
 echo "  $ENGRAPH gain"
 echo ""
-echo "Next: open Claude Code in any project. SessionStart will auto-inject"
-echo "a brief if there's prior context for that cwd; Bash commands matching"
-echo "a wrapper (git log, cargo test, etc.) will be silently rewritten to"
-echo "route through 'engraph run'. After 'engraph index .', Grep on a"
-echo "bareword symbol indexed in the codegraph is redirected to"
-echo "'engraph subgraph <symbol>'."
+echo "Next: open Claude Code or Codex in any project. SessionStart will"
+echo "auto-inject a brief if there's prior context for that cwd. In Claude,"
+echo "Bash commands matching a wrapper (git log, cargo test, etc.) will be"
+echo "silently rewritten to route through 'engraph run'. After"
+echo "'engraph index .', Grep on a bareword symbol indexed in the codegraph"
+echo "is redirected to 'engraph subgraph <symbol>'."
 echo ""
 echo "Codegraph features (engraph index / subgraph) need external SCIP"
 echo "indexers — one per language (rust-analyzer, scip-python, scip-go,"

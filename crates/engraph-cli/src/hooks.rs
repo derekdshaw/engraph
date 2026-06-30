@@ -8,14 +8,15 @@ use engraph_core::{
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use crate::cli::HookClient;
 use crate::redirect::{emit_subgraph_deny, try_subgraph_redirect, try_subgraph_redirect_for_bash};
 use crate::rewrite::{RewriteOutcome, try_auto_rewrite};
 
-/// Hard cap for the session-start brief, in bytes. Claude Code injects this
-/// into context at session start; keep it small.
+/// Hard cap for the session-start brief, in bytes. Clients inject this into
+/// context at session start; keep it small.
 const MAX_BRIEF_BYTES: usize = 2048;
 
-pub(crate) fn run_session_start_hook(conn: &db::PooledConn) -> Result<()> {
+pub(crate) fn run_session_start_hook(conn: &db::PooledConn, client: HookClient) -> Result<()> {
     use std::io::Read;
     let mut buf = String::new();
     std::io::stdin().read_to_string(&mut buf)?;
@@ -37,11 +38,17 @@ pub(crate) fn run_session_start_hook(conn: &db::PooledConn) -> Result<()> {
         .and_then(|v| v.get("session_id").and_then(|c| c.as_str()))
         .map(|s| s.to_string());
 
-    // Catch-up capture: SessionEnd only fires on a clean exit, so killed or
-    // abruptly-closed sessions never get ingested. Sweep the project's
+    // Catch-up capture: end-of-turn ingest only fires on clean hook delivery, so
+    // killed or abruptly-closed sessions can be missed. Sweep the project's
     // transcripts here (incremental + idempotent via `ingestion_log`), which
-    // recovers anything a missed SessionEnd dropped on the next start.
-    ingest_project_transcripts(conn, parsed.as_ref(), cwd.as_deref(), session_id.as_deref());
+    // recovers anything a missed SessionEnd/Stop dropped on the next start.
+    ingest_project_transcripts(
+        conn,
+        client,
+        parsed.as_ref(),
+        cwd.as_deref(),
+        session_id.as_deref(),
+    );
 
     let mut signal_sections: Vec<String> = Vec::new();
     if let Some(cwd) = cwd.as_deref() {
@@ -88,7 +95,7 @@ pub(crate) fn run_session_start_hook(conn: &db::PooledConn) -> Result<()> {
         }
     }
 
-    // Empty additionalContext on a truly-fresh project: zero injected tokens.
+    // Empty brief on a truly-fresh project: zero injected tokens.
     let body = if signal_sections.is_empty() {
         String::new()
     } else {
@@ -101,12 +108,7 @@ pub(crate) fn run_session_start_hook(conn: &db::PooledConn) -> Result<()> {
     };
 
     let start = Instant::now();
-    let decision = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": body,
-        }
-    });
+    let decision = session_start_output(client, &body);
     println!("{decision}");
 
     if !body.is_empty() {
@@ -126,47 +128,42 @@ pub(crate) fn run_session_start_hook(conn: &db::PooledConn) -> Result<()> {
     Ok(())
 }
 
-/// Best-effort catch-up ingest of every transcript in the project's directory.
+fn session_start_output(client: HookClient, body: &str) -> serde_json::Value {
+    match client {
+        HookClient::Claude => serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": body,
+            }
+        }),
+        HookClient::Codex => serde_json::json!({
+            "systemMessage": body,
+        }),
+    }
+}
+
+/// Best-effort catch-up ingest of missed client transcripts for this project.
 /// Per-file errors are logged and skipped, and the whole pass is a no-op if the
-/// directory can't be located — a broken transcript never blocks the brief.
+/// transcript root can't be located — a broken transcript never blocks the brief.
 /// `ingest_file` tracks byte offsets in `ingestion_log`, so re-running each
 /// session start only reads bytes appended since last time.
 fn ingest_project_transcripts(
     conn: &db::PooledConn,
+    client: HookClient,
     parsed: Option<&serde_json::Value>,
     cwd: Option<&str>,
     session_id: Option<&str>,
 ) {
-    let Some(dir) = transcript_dir(parsed, cwd) else {
+    let Some((dir, scanned, inserted)) = (match client {
+        HookClient::Claude => ingest_claude_project_transcripts(conn, parsed, cwd),
+        HookClient::Codex => ingest_codex_project_transcripts(conn, cwd),
+    }) else {
         return;
     };
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::debug!(?e, dir = %dir.display(), "no transcript dir to ingest");
-            return;
-        }
-    };
-    let mut inserted = 0usize;
-    let mut scanned = 0usize;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        // Top-level session transcripts only; `read_dir` is non-recursive, so
-        // per-session `subagents/` sidechains are skipped automatically.
-        if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
-        }
-        scanned += 1;
-        match engraph_ingest::ingest_file(conn, &path) {
-            Ok(s) => inserted += s.messages_inserted,
-            Err(e) => {
-                tracing::warn!(?e, path = %path.display(), "session-start ingest failed; skipping")
-            }
-        }
-    }
+
     // Cost scales with the project's lifetime session count (one open+seek per
     // transcript every start); surface it so the scan can't grow silently.
-    tracing::debug!(scanned, inserted, dir = %dir.display(), "session-start catch-up ingest");
+    tracing::debug!(scanned, inserted, dir = %dir.display(), client = ?client, "session-start catch-up ingest");
     if inserted > 0 {
         telemetry::record_event(
             conn,
@@ -182,6 +179,113 @@ fn ingest_project_transcripts(
         )
         .ok();
     }
+}
+
+fn ingest_claude_project_transcripts(
+    conn: &db::PooledConn,
+    parsed: Option<&serde_json::Value>,
+    cwd: Option<&str>,
+) -> Option<(PathBuf, usize, usize)> {
+    let dir = transcript_dir(parsed, cwd)?;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!(?e, dir = %dir.display(), "no transcript dir to ingest");
+            return None;
+        }
+    };
+    let mut inserted = 0usize;
+    let mut scanned = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Top-level session transcripts only; `read_dir` is non-recursive, so
+        // per-session `subagents/` sidechains are skipped automatically.
+        if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        scanned += 1;
+        inserted += ingest_transcript_file(conn, &path);
+    }
+    Some((dir, scanned, inserted))
+}
+
+fn ingest_codex_project_transcripts(
+    conn: &db::PooledConn,
+    cwd: Option<&str>,
+) -> Option<(PathBuf, usize, usize)> {
+    let project = crate::canonical_repo_key(Path::new(cwd?));
+    let root = codex_sessions_dir()?;
+    let mut stack = vec![root.clone()];
+    let mut inserted = 0usize;
+    let mut scanned = 0usize;
+
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::debug!(?e, dir = %dir.display(), "no Codex transcript dir to ingest");
+                continue;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(e) => {
+                    tracing::debug!(?e, path = %path.display(), "cannot inspect transcript path");
+                    continue;
+                }
+            };
+            if file_type.is_dir() {
+                if path.file_name().and_then(|s| s.to_str()) != Some("subagents") {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !file_type.is_file() || path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            scanned += 1;
+            if codex_transcript_project(&path).as_deref() == Some(project.as_str()) {
+                inserted += ingest_transcript_file(conn, &path);
+            }
+        }
+    }
+    Some((root, scanned, inserted))
+}
+
+fn ingest_transcript_file(conn: &db::PooledConn, path: &Path) -> usize {
+    match engraph_ingest::ingest_file(conn, path) {
+        Ok(s) => s.messages_inserted,
+        Err(e) => {
+            tracing::warn!(?e, path = %path.display(), "session-start ingest failed; skipping");
+            0
+        }
+    }
+}
+
+fn codex_sessions_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))?;
+    Some(home.join("sessions"))
+}
+
+fn codex_transcript_project(path: &Path) -> Option<String> {
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut first_line = String::new();
+    if reader.read_line(&mut first_line).ok()? == 0 {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(first_line.trim()).ok()?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
+        return None;
+    }
+    let cwd = v.pointer("/payload/cwd").and_then(|c| c.as_str())?;
+    Some(crate::canonical_repo_key(Path::new(cwd)))
 }
 
 /// Locate the directory holding this project's transcripts. Prefer the parent

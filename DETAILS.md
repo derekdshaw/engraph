@@ -874,23 +874,24 @@ implementing the same trait. No call site changes needed.
 
 ## 8. SessionStart brief hook
 
-`run_session_start_hook` (`hooks.rs`). Reads Claude's
-SessionStart JSON from stdin, runs a catch-up ingest (below), produces a
-markdown brief, and emits it as `hookSpecificOutput.additionalContext`.
+`run_session_start_hook` (`hooks.rs`). Reads SessionStart JSON from stdin, runs
+a catch-up ingest (below), produces a markdown brief, and emits it in the client
+shape selected by `--client`: Claude uses `hookSpecificOutput.additionalContext`;
+Codex uses `systemMessage`.
 
 ### 8.0 Catch-up ingest
 
 Before building the brief, the hook calls `ingest_project_transcripts`
-(`hooks.rs`). `SessionEnd` ingest only fires on a *clean* session exit, so a
-killed or abruptly-closed session is never captured. SessionStart fires
-reliably, so it sweeps the project's transcript directory — the parent of the
-payload's `transcript_path`, else the reconstructed
-`~/.claude/projects/<cwd-with-slashes-as-dashes>` layout — and `ingest_file`s
-every top-level `.jsonl`. It is incremental and idempotent via `ingestion_log`
-offsets (re-runs only read appended bytes), `read_dir` is non-recursive so
-per-session `subagents/` sidechains are skipped, per-file errors are logged and
-skipped, and a `session_ingest` telemetry event is recorded when anything was
-inserted. This recovers sessions a missed `SessionEnd` dropped, on the next start.
+(`hooks.rs`). `SessionEnd`/Codex `Stop` ingest only fires on clean hook delivery,
+so a killed or abruptly-closed session can be missed. SessionStart recovers it:
+Claude sweeps the parent of the payload's `transcript_path`, else the
+reconstructed `~/.claude/projects/<cwd-with-slashes-as-dashes>` layout, and
+ingests every top-level `.jsonl`; Codex recursively sweeps
+`$CODEX_HOME/sessions` (default `~/.codex/sessions`), skips `subagents`
+directories, and only ingests rollouts whose `session_meta.payload.cwd`
+canonicalizes to the current project. Both paths are incremental and idempotent
+via `ingestion_log`, per-file errors are logged and skipped, and a
+`session_ingest` telemetry event is recorded when anything was inserted.
 
 ### 8.1 What goes in
 

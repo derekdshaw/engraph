@@ -251,13 +251,23 @@ pub(crate) enum HookCmd {
     /// as additionalContext so a follow-up subgraph call is often unneeded.
     PostRead,
     /// SessionStart hook: emit a terse brief of prior context for the current
-    /// project as `hookSpecificOutput.additionalContext` (<= MAX_BRIEF_BYTES).
-    SessionStart,
+    /// project in the output shape expected by the target client.
+    SessionStart {
+        /// Hook client output/protocol shape.
+        #[arg(long, value_enum, default_value_t = HookClient::Claude)]
+        client: HookClient,
+    },
     /// SessionEnd hook: ingest the JSONL transcript that Claude Code emits
     /// at session shutdown. Reads the hook payload from stdin, extracts
     /// `transcript_path`, calls `ingest_file`. Errors are logged and swallowed
     /// so a broken ingest never blocks Claude from exiting cleanly.
     SessionEnd,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum HookClient {
+    Claude,
+    Codex,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]

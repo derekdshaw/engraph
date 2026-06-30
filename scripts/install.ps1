@@ -2,14 +2,16 @@
 # Engraph installer for Windows.
 # Resolves the engraph.exe binary relative to this script's directory
 # (matches the release-archive layout), installs it under a per-user prefix,
-# and wires SessionStart + PreToolUse(Bash,Grep) + PostToolUse(Read) +
-# SessionEnd hooks into Claude Code's settings.json.
+# and wires Claude Code hooks into settings.json plus Codex SessionStart/Stop
+# hooks into hooks.json.
 
 $ErrorActionPreference = "Stop"
 
 $Binary       = "engraph.exe"
 $ClaudeDir    = "$env:USERPROFILE\.claude"
 $SettingsFile = "$ClaudeDir\settings.json"
+$CodexDir     = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { "$env:USERPROFILE\.codex" }
+$CodexHooksFile = "$CodexDir\hooks.json"
 
 function Write-Info($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host " OK $msg" -ForegroundColor Green }
@@ -181,6 +183,64 @@ foreach ($event in $hooksConfig.Keys) {
 $settings | ConvertTo-Json -Depth 10 | Set-Content $SettingsFile -Encoding UTF8
 Write-Ok "Updated $SettingsFile"
 
+# --- Configure Codex hooks ---
+
+Write-Info "Configuring Codex hooks"
+
+if (-not (Test-Path $CodexDir)) {
+    New-Item -ItemType Directory -Path $CodexDir -Force | Out-Null
+}
+
+$codexSettings = @{}
+if (Test-Path $CodexHooksFile) {
+    try {
+        $codexSettings = Get-Content $CodexHooksFile -Raw | ConvertFrom-Json -AsHashtable
+    }
+    catch {
+        $codexSettings = @{}
+    }
+}
+
+$codexHooksConfig = @{
+    "SessionStart" = @(
+        @{
+            matcher = ""
+            hooks   = @(@{ type = "command"; command = "$EngraphPath hook session-start --client codex" })
+        }
+    )
+    "Stop" = @(
+        @{
+            hooks = @(@{ type = "command"; command = "$EngraphPath hook session-end" })
+        }
+    )
+}
+
+if (-not $codexSettings.ContainsKey("hooks")) {
+    $codexSettings["hooks"] = @{}
+}
+
+foreach ($event in $codexHooksConfig.Keys) {
+    $newEntries = $codexHooksConfig[$event]
+    if ($codexSettings["hooks"].ContainsKey($event)) {
+        $existing = $codexSettings["hooks"][$event] | Where-Object {
+            $hasEngraph = $false
+            foreach ($h in $_.hooks) {
+                if ($h.command -match "engraph") { $hasEngraph = $true }
+            }
+            -not $hasEngraph
+        }
+        if ($null -eq $existing) { $existing = @() }
+        if ($existing -isnot [array]) { $existing = @($existing) }
+        $codexSettings["hooks"][$event] = @($existing) + $newEntries
+    }
+    else {
+        $codexSettings["hooks"][$event] = $newEntries
+    }
+}
+
+$codexSettings | ConvertTo-Json -Depth 10 | Set-Content $CodexHooksFile -Encoding UTF8
+Write-Ok "Updated $CodexHooksFile"
+
 # --- Install memory-capture guidance ---
 # The writer commands (remember/bug/save) only get called if Claude is told
 # when to call them. Ship a guidance file and import it from CLAUDE.md so the
@@ -259,7 +319,8 @@ Write-Host ""
 Write-Host "Engraph installed successfully!" -ForegroundColor Green
 Write-Host ""
 Write-Host "Binary:    $Dest"
-Write-Host "Settings:  $SettingsFile"
+Write-Host "Claude:    $SettingsFile"
+Write-Host "Codex:     $CodexHooksFile"
 Write-Host "Memory:    $EngraphMd (imported via @engraph.md)"
 Write-Host "Database:  `$env:ENGRAPH_DB_PATH (default: %LOCALAPPDATA%\engraph\engraph.db)"
 Write-Host ""
@@ -267,12 +328,12 @@ Write-Host "Sanity check:"
 Write-Host "  $Dest --version"
 Write-Host "  $Dest gain"
 Write-Host ""
-Write-Host "Next: open Claude Code in any project. SessionStart will auto-inject"
-Write-Host "a brief if there's prior context for that cwd; Bash commands matching"
-Write-Host "a wrapper (git log, cargo test, etc.) will be silently rewritten to"
-Write-Host "route through 'engraph run'. After 'engraph index .', Grep on a"
-Write-Host "bareword symbol indexed in the codegraph is redirected to"
-Write-Host "'engraph subgraph <symbol>'."
+Write-Host "Next: open Claude Code or Codex in any project. SessionStart will"
+Write-Host "auto-inject a brief if there's prior context for that cwd. In Claude,"
+Write-Host "Bash commands matching a wrapper (git log, cargo test, etc.) will be"
+Write-Host "silently rewritten to route through 'engraph run'. After"
+Write-Host "'engraph index .', Grep on a bareword symbol indexed in the codegraph"
+Write-Host "is redirected to 'engraph subgraph <symbol>'."
 Write-Host ""
 Write-Host "Codegraph features (engraph index / subgraph) need external SCIP"
 Write-Host "indexers — one per language (rust-analyzer, scip-python, scip-go,"

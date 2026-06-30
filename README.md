@@ -170,7 +170,7 @@ cd engraph-<version>-x86_64-pc-windows-msvc
 .\install.ps1
 ```
 
-The install script places the binary under a per-user prefix and merges the `SessionStart`, `PreToolUse(Bash, Grep)`, `PostToolUse(Read)`, and `SessionEnd` hooks into `~/.claude/settings.json`. It also installs the memory-capture guidance (`docs/engraph.md` → `~/.claude/engraph.md`, imported via `@engraph.md` in your `CLAUDE.md`), offers to install the [`engraph-refresh` skill](#claude-code-skill-engraph-refresh), and offers to run the SCIP-indexer installer. Re-running replaces existing entries in-place rather than duplicating them.
+The install script places the binary under a per-user prefix, merges the `SessionStart`, `PreToolUse(Bash, Grep)`, `PostToolUse(Read)`, and `SessionEnd` hooks into `~/.claude/settings.json`, and merges Codex `SessionStart`/`Stop` hooks into `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`). It also installs the memory-capture guidance (`docs/engraph.md` → `~/.claude/engraph.md`, imported via `@engraph.md` in your `CLAUDE.md`), offers to install the [`engraph-refresh` skill](#claude-code-skill-engraph-refresh), and offers to run the SCIP-indexer installer. Re-running replaces existing entries in-place rather than duplicating them.
 
 If you build with `--features embeddings`, swap the memory-guidance import to the embeddings variant — `docs/engraph-embeddings.md`, a superset of `docs/engraph.md` that adds a *Semantic recall* section steering Claude to prefer `engraph recall --hybrid` for conversation memory. Copy it to `~/.claude/engraph-embeddings.md` and import `@engraph-embeddings.md` (instead of `@engraph.md`) in your `CLAUDE.md`. Use exactly one of the two.
 
@@ -257,6 +257,25 @@ When Claude wants the raw grep anyway (e.g. to search for a literal occurrence i
 ### How `post-read` enriches Read results
 
 PostToolUse(Read) appends a brief listing of indexed symbols in the just-read file as `hookSpecificOutput.additionalContext` — name, line range, and signature for up to 30 entities. Often answers "what's in this file" without a follow-up grep or subgraph call. Silent passthrough for files that aren't in the graph; the augment never displaces or rewrites the actual Read output.
+
+## Wire into Codex
+
+Add to `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`):
+
+```jsonc
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "engraph hook session-start --client codex" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "engraph hook session-end" }] }
+    ]
+  }
+}
+```
+
+The install script does this automatically.
 
 ---
 
