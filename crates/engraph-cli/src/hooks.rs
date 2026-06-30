@@ -399,12 +399,12 @@ pub(crate) fn run_post_read_hook(conn: &db::PooledConn) -> Result<()> {
     Ok(())
 }
 
-/// SessionEnd hook: Claude Code emits a JSON envelope on stdin that carries
-/// `transcript_path` — the path to the JSONL transcript file for the session
-/// that just ended. Ingest it into the codegraph store so subsequent sessions'
-/// `engraph recall` queries can surface this session's messages. Empty stdin
-/// or a missing `transcript_path` is treated as a no-op (not every SessionEnd
-/// reason carries a transcript).
+/// SessionEnd hook: Claude Code (SessionEnd) and Codex (Stop) both emit a JSON
+/// envelope on stdin carrying `transcript_path` — the JSONL transcript/rollout
+/// for the session. Ingest it (format auto-detected) into the store so later
+/// sessions' `engraph recall` queries surface this session's messages. Empty
+/// stdin or a missing `transcript_path` is a no-op (not every event carries
+/// one); ingest is incremental, so a per-turn Codex Stop only picks up new lines.
 pub(crate) fn run_session_end_hook(conn: &db::PooledConn) -> Result<()> {
     use std::io::Read;
     let mut buf = String::new();
@@ -422,7 +422,12 @@ pub(crate) fn run_session_end_hook(conn: &db::PooledConn) -> Result<()> {
     };
     let start = std::time::Instant::now();
     let stats = engraph_ingest::ingest_file(conn, std::path::Path::new(transcript_path))?;
-    let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
+    // Claude exports the id via env; Codex carries it in the hook payload.
+    let session_id = std::env::var("CLAUDE_SESSION_ID").ok().or_else(|| {
+        v.pointer("/session_id")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string())
+    });
     telemetry::record_event(
         conn,
         EventInput {

@@ -1,4 +1,4 @@
-//! Claude Code JSONL transcript → SQLite ingestion.
+//! Claude Code / Codex JSONL transcript → SQLite ingestion.
 //!
 //! Parses the subset of events that carry textual content (user / assistant
 //! messages), populates `sessions` and `messages`, compresses oversized
@@ -50,6 +50,51 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn ingest_codex_rollout() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("codex.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let jp = dir.path().join("rollout.jsonl");
+        write_jsonl(
+            &jp,
+            &[
+                r#"{"timestamp":"2025-09-24T18:20:50.392Z","type":"session_meta","payload":{"id":"cx1","cwd":"/proj","git":{"branch":"main"}}}"#,
+                r#"{"timestamp":"2025-09-24T18:21:48.721Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"examine the file"}]}}"#,
+                // event_msg duplicates the user turn — must be skipped.
+                r#"{"timestamp":"2025-09-24T18:21:48.722Z","type":"event_msg","payload":{"type":"user_message","message":"examine the file","kind":"plain"}}"#,
+                r#"{"timestamp":"2025-09-24T18:21:48.722Z","type":"turn_context","payload":{"cwd":"/proj","model":"gpt-5-codex"}}"#,
+                r#"{"timestamp":"2025-09-24T18:22:08.851Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"nodes are heap-allocated"}]}}"#,
+            ],
+        );
+        let stats = ingest_file(&conn, &jp).unwrap();
+        assert_eq!(
+            stats.messages_inserted, 2,
+            "two messages, event_msg skipped"
+        );
+
+        // Session metadata comes from the header, not per-message.
+        let (sid, cwd): (String, String) = conn
+            .query_row("SELECT id, cwd FROM sessions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(sid, "cx1");
+        assert_eq!(cwd, "/proj");
+
+        // Re-ingest from offset 0 (drop the log) must not duplicate rows: Codex
+        // msg_ids are derived deterministically from the byte offset, so the
+        // replayed lines collide with the existing PKs under INSERT OR IGNORE.
+        // (`messages_inserted` counts insert *attempts*, so the row COUNT — not
+        // the stat — is what proves dedup.)
+        conn.execute("DELETE FROM ingestion_log", []).unwrap();
+        ingest_file(&conn, &jp).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2, "deterministic ids dedupe the replay");
     }
 
     #[test]

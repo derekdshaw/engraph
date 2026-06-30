@@ -43,6 +43,130 @@ struct RawMessage {
     content: Option<serde_json::Value>,
 }
 
+/// One textual message normalized out of either transcript format, ready for the
+/// shared insert/compress/scope path.
+struct ParsedLine {
+    session_id: String,
+    cwd: Option<String>,
+    branch: Option<String>,
+    role: String,
+    content: String,
+    msg_id: String,
+    ts: Option<String>,
+}
+
+/// Session-level metadata hoisted from a Codex rollout's `session_meta` header
+/// (Codex doesn't repeat these per message, unlike Claude Code).
+struct CodexHeader {
+    session_id: String,
+    cwd: Option<String>,
+    branch: Option<String>,
+}
+
+/// Read line 1 and, if it's a Codex `session_meta` header, extract the session
+/// id / cwd / branch. `None` means "not Codex" → treat the file as Claude Code.
+fn peek_codex_header(path: &Path) -> Option<CodexHeader> {
+    let f = File::open(path).ok()?;
+    let mut line = String::new();
+    BufReader::new(f).read_line(&mut line).ok()?;
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
+        return None;
+    }
+    let p = v.get("payload")?;
+    Some(CodexHeader {
+        session_id: p.get("id").and_then(|i| i.as_str())?.to_string(),
+        cwd: p.get("cwd").and_then(|c| c.as_str()).map(|s| s.to_string()),
+        branch: p
+            .get("git")
+            .and_then(|g| g.get("branch"))
+            .and_then(|b| b.as_str())
+            .map(|s| s.to_string()),
+    })
+}
+
+/// Parse one Claude Code transcript line into a normalized message, or `None`
+/// for events we don't ingest (sidechain, non-message, empty).
+fn parse_claude_line(trimmed: &str) -> Result<Option<ParsedLine>> {
+    let ev: RawEvent = serde_json::from_str(trimmed)?;
+    if ev.is_sidechain {
+        return Ok(None);
+    }
+    let kind = ev.kind.as_deref().unwrap_or("");
+    if kind != "user" && kind != "assistant" {
+        return Ok(None);
+    }
+    let Some(session_id) = ev.session_id.clone() else {
+        return Ok(None);
+    };
+    let content = ev
+        .message
+        .as_ref()
+        .and_then(|m| m.content.as_ref())
+        .map(extract_text)
+        .unwrap_or_default();
+    if content.is_empty() {
+        return Ok(None);
+    }
+    let role = ev
+        .message
+        .as_ref()
+        .and_then(|m| m.role.as_deref())
+        .unwrap_or(kind)
+        .to_string();
+    let msg_id = ev.uuid.unwrap_or_else(|| Uuid::now_v7().to_string());
+    Ok(Some(ParsedLine {
+        session_id,
+        cwd: ev.cwd,
+        branch: ev.git_branch,
+        role,
+        content,
+        msg_id,
+        ts: ev.timestamp,
+    }))
+}
+
+/// Parse one Codex rollout line. We ingest only `response_item` messages; the
+/// `event_msg` duplicates (user_message / agent_reasoning) and `turn_context`
+/// lines are skipped. Session-level fields come from `hdr`; the `msg_id` is
+/// derived from the byte offset so re-ingest from offset 0 stays idempotent.
+fn parse_codex_line(
+    trimmed: &str,
+    hdr: &CodexHeader,
+    line_start: u64,
+) -> Result<Option<ParsedLine>> {
+    let v: serde_json::Value = serde_json::from_str(trimmed)?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("response_item") {
+        return Ok(None);
+    }
+    let Some(payload) = v.get("payload") else {
+        return Ok(None);
+    };
+    if payload.get("type").and_then(|t| t.as_str()) != Some("message") {
+        return Ok(None);
+    }
+    let role = match payload.get("role").and_then(|r| r.as_str()) {
+        Some(r @ ("user" | "assistant")) => r.to_string(),
+        _ => return Ok(None),
+    };
+    let content = payload.get("content").map(extract_text).unwrap_or_default();
+    if content.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(ParsedLine {
+        session_id: hdr.session_id.clone(),
+        cwd: hdr.cwd.clone(),
+        branch: hdr.branch.clone(),
+        role,
+        content,
+        msg_id: format!("codex-{}-{}", hdr.session_id, line_start),
+        ts: v
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string()),
+    }))
+}
+
 /// RAII guard for an explicit BEGIN/COMMIT around a pooled SQLite connection.
 /// Rolls back on drop if `commit()` wasn't called, so an error path doesn't
 /// return the connection to the pool with an open transaction.
@@ -81,6 +205,12 @@ pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
         .canonicalize()
         .with_context(|| format!("canonicalize {}", path.display()))?;
     let abs_str = abs.to_string_lossy().to_string();
+
+    // Peek line 1 to detect the transcript format. Codex rollout files lead with
+    // a `session_meta` header carrying the session id / cwd / branch (none of
+    // which recur per message, so this must run even on an incremental resume).
+    // `None` => Claude Code format (the per-line shape `RawEvent` parses).
+    let codex = peek_codex_header(&abs);
 
     let mut f = File::open(&abs).with_context(|| format!("open {}", abs.display()))?;
     let meta = f.metadata()?;
@@ -173,6 +303,10 @@ pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
         if !line.ends_with('\n') {
             break;
         }
+        // `current_offset` still points at the start of this line; capture it
+        // before advancing, so Codex (which has no per-message uuid) can derive
+        // a deterministic `msg_id` from it and stay idempotent on re-ingest.
+        let line_start = current_offset;
         bytes_read += n as u64;
         current_offset += n as u64;
 
@@ -180,89 +314,60 @@ pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
         if trimmed.is_empty() {
             continue;
         }
-        let ev: RawEvent = match serde_json::from_str(trimmed) {
-            Ok(e) => e,
+        let parsed = match &codex {
+            Some(hdr) => parse_codex_line(trimmed, hdr, line_start),
+            None => parse_claude_line(trimmed),
+        };
+        let pl = match parsed {
+            Ok(Some(pl)) => pl,
+            Ok(None) => continue,
             Err(e) => {
                 tracing::warn!(?e, line = %&trimmed.chars().take(80).collect::<String>(), "skip malformed event");
                 continue;
             }
         };
 
-        if ev.is_sidechain {
-            continue;
-        }
-
-        let kind = ev.kind.as_deref().unwrap_or("");
-        if kind != "user" && kind != "assistant" {
-            continue;
-        }
-
-        let session_id = match ev.session_id.as_deref() {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-
         upsert_session(
             conn,
-            &session_id,
-            ev.cwd.as_deref(),
-            ev.timestamp.as_deref(),
-            ev.git_branch.as_deref(),
+            &pl.session_id,
+            pl.cwd.as_deref(),
+            pl.ts.as_deref(),
+            pl.branch.as_deref(),
         )?;
 
-        let content_str = ev
-            .message
-            .as_ref()
-            .and_then(|m| m.content.as_ref())
-            .map(extract_text)
-            .unwrap_or_default();
-        if content_str.is_empty() {
-            continue;
-        }
-
-        let msg_id = ev
-            .uuid
-            .clone()
-            .unwrap_or_else(|| Uuid::now_v7().to_string());
-        let role = ev
-            .message
-            .as_ref()
-            .and_then(|m| m.role.as_deref())
-            .unwrap_or(kind);
-
-        let (stored, compressed_flag, orig_tokens, comp_tokens) = maybe_compress(&content_str)?;
+        let (stored, compressed_flag, orig_tokens, comp_tokens) = maybe_compress(&pl.content)?;
         if compressed_flag {
             messages_compressed += 1;
         }
 
-        let hash = sha256(content_str.as_bytes());
+        let hash = sha256(pl.content.as_bytes());
         conn.execute(
             "INSERT OR IGNORE INTO messages
                 (id, session_id, role, content, content_compressed, content_hash, ts)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
-                msg_id,
-                session_id,
-                role,
+                pl.msg_id,
+                pl.session_id,
+                pl.role,
                 stored,
                 if compressed_flag { 1 } else { 0 },
                 hash,
-                ev.timestamp.unwrap_or_else(now_iso),
+                pl.ts.clone().unwrap_or_else(now_iso),
             ],
         )?;
         messages_inserted += 1;
 
         // Project scope membership.
-        if let Some(cwd) = ev.cwd.as_deref() {
+        if let Some(cwd) = pl.cwd.as_deref() {
             let scope_id = scope::ensure_project_scope(conn, cwd)?;
-            scope::add_member(conn, &scope_id, "message", &msg_id)?;
+            scope::add_member(conn, &scope_id, "message", &pl.msg_id)?;
         }
 
         if compressed_flag {
             telemetry::record_event(
                 conn,
                 telemetry::EventInput {
-                    session_id: Some(&session_id),
+                    session_id: Some(&pl.session_id),
                     kind: EventKind::Compress,
                     feature: "compress_ingest",
                     filter_id: Some("session_message"),
@@ -362,7 +467,8 @@ fn extract_text(v: &serde_json::Value) -> String {
             for item in items {
                 if let Some(t) = item.get("type").and_then(|t| t.as_str()) {
                     match t {
-                        "text" => {
+                        // "text" is Claude; "input_text"/"output_text" are Codex.
+                        "text" | "input_text" | "output_text" => {
                             if let Some(text) = item.get("text").and_then(|x| x.as_str()) {
                                 if !out.is_empty() {
                                     out.push('\n');
