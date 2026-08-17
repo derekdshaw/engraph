@@ -1,4 +1,7 @@
-use crate::{bazel, bazel_symbols, driver, scip_loader};
+use crate::{
+    bazel, bazel_symbols, driver,
+    scip_loader::{self, LoadOptions},
+};
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
 use sha2::{Digest, Sha256};
@@ -18,7 +21,7 @@ pub struct IndexStats {
     /// `--bazel-symbols` pass ran; lets the CLI report why symbols were (or
     /// were not) produced instead of silently degrading to target-level.
     pub symbol_langs: Vec<SymbolLangSummary>,
-    /// Orphan entities pruned by the pre-index GC pass (0 when GC is disabled).
+    /// Entities pruned by GC/stale cleanup (0 when GC is disabled).
     pub entities_pruned: usize,
 }
 
@@ -93,7 +96,7 @@ fn gc_pass(conn: &PooledConn, project: &str, gc: bool) -> Result<usize> {
 /// Drive a SCIP indexer (or accept a prebuilt index.scip) and load its output
 /// into the codegraph tables. `project` is the entity scope key (typically the
 /// canonical repo path). When `gc` is set, orphan entities for `project` are
-/// pruned before the load (see [`crate::gc`]).
+/// pruned before the load and stale SCIP symbols are pruned after the load.
 pub fn index_repo(
     conn: &PooledConn,
     repo: &Path,
@@ -104,7 +107,7 @@ pub fn index_repo(
     gc: bool,
 ) -> Result<IndexStats> {
     let start = Instant::now();
-    let entities_pruned = gc_pass(conn, project, gc)?;
+    let mut entities_pruned = gc_pass(conn, project, gc)?;
 
     // Phase 2.3: a Bazel workspace takes the bazel-query path unless the
     // caller explicitly passed --scip <path> (which says "load this SCIP
@@ -121,10 +124,11 @@ pub fn index_repo(
         let mut symbol_langs = Vec::new();
         if bazel_symbols {
             tracing::info!("--bazel-symbols set; running symbol-level pass");
-            let sym = bazel_symbols::index_bazel_symbols(conn, repo, project)?;
+            let sym = bazel_symbols::index_bazel_symbols(conn, repo, project, gc)?;
             entities += sym.entities_inserted;
             relations += sym.relations_inserted;
             scip_bytes_total += sym.scip_bytes_total;
+            entities_pruned += sym.entities_pruned;
             driver_name = "bazel-query+symbols";
             symbol_langs = sym
                 .results()
@@ -150,7 +154,9 @@ pub fn index_repo(
     // Prebuilt SCIP path: load the provided file as-is.
     if let Some(p) = scip_override {
         let bytes = std::fs::read(p).with_context(|| format!("reading SCIP at {}", p.display()))?;
-        let load_stats = scip_loader::load(conn, project, &bytes)?;
+        let load_stats =
+            scip_loader::load_with_options(conn, project, &bytes, LoadOptions { prune_stale: gc })?;
+        entities_pruned += load_stats.entities_pruned;
         return Ok(IndexStats {
             entities_inserted: load_stats.entities_inserted,
             relations_inserted: load_stats.relations_inserted,
@@ -166,7 +172,9 @@ pub fn index_repo(
     if let Some(name) = lang_override {
         let drv = driver::by_name(name).ok_or_else(|| anyhow::anyhow!("unknown driver: {name}"))?;
         let bytes = run_driver_to_scip(repo, &*drv)?;
-        let load_stats = scip_loader::load(conn, project, &bytes)?;
+        let load_stats =
+            scip_loader::load_with_options(conn, project, &bytes, LoadOptions { prune_stale: gc })?;
+        entities_pruned += load_stats.entities_pruned;
         return Ok(IndexStats {
             entities_inserted: load_stats.entities_inserted,
             relations_inserted: load_stats.relations_inserted,
@@ -226,7 +234,9 @@ pub fn index_repo(
     } else {
         bazel_symbols::merge_scip_bytes(&all_bytes)?
     };
-    let load_stats = scip_loader::load(conn, project, &merged)?;
+    let load_stats =
+        scip_loader::load_with_options(conn, project, &merged, LoadOptions { prune_stale: gc })?;
+    entities_pruned += load_stats.entities_pruned;
     let driver_name: &'static str = if succeeded_names.len() == 1 {
         succeeded_names[0]
     } else {
@@ -260,9 +270,11 @@ pub fn index_scip_manifest(
     gc: bool,
 ) -> Result<IndexStats> {
     let start = Instant::now();
-    let entities_pruned = gc_pass(conn, project, gc)?;
+    let mut entities_pruned = gc_pass(conn, project, gc)?;
     let (merged, scip_bytes_in) = build_manifest_scip(manifest)?;
-    let load_stats = scip_loader::load(conn, project, &merged)?;
+    let load_stats =
+        scip_loader::load_with_options(conn, project, &merged, LoadOptions { prune_stale: gc })?;
+    entities_pruned += load_stats.entities_pruned;
     Ok(IndexStats {
         entities_inserted: load_stats.entities_inserted,
         relations_inserted: load_stats.relations_inserted,

@@ -46,7 +46,7 @@
 //! not engraph. Go and TS read sources directly (no Bazel build subprocess).
 
 use crate::bazel::{bazel_binary, output_base_for, tail_lines};
-use crate::scip_loader;
+use crate::scip_loader::{self, LoadOptions};
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
 use sha2::{Digest, Sha256};
@@ -63,6 +63,7 @@ pub struct BazelSymbolStats {
     pub python: Option<LangIndexResult>,
     pub entities_inserted: usize,
     pub relations_inserted: usize,
+    pub entities_pruned: usize,
     pub scip_bytes_total: usize,
     pub elapsed_ms: i64,
 }
@@ -202,6 +203,7 @@ pub fn index_bazel_symbols(
     conn: &PooledConn,
     repo: &Path,
     project: &str,
+    prune_stale: bool,
 ) -> Result<BazelSymbolStats> {
     let start = Instant::now();
     let mut stats = BazelSymbolStats::default();
@@ -240,9 +242,11 @@ pub fn index_bazel_symbols(
 
     if !parts.is_empty() {
         let merged = merge_scip_bytes(&parts)?;
-        let load_stats = scip_loader::load(conn, project, &merged)?;
+        let load_stats =
+            scip_loader::load_with_options(conn, project, &merged, LoadOptions { prune_stale })?;
         stats.entities_inserted = load_stats.entities_inserted;
         stats.relations_inserted = load_stats.relations_inserted;
+        stats.entities_pruned = load_stats.entities_pruned;
     }
     stats.elapsed_ms = start.elapsed().as_millis() as i64;
     Ok(stats)

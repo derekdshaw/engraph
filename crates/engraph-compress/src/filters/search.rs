@@ -136,8 +136,8 @@ fn group_by_file(text: &str) -> String {
         let rests = &groups[key.as_str()];
         match rests.len() {
             0 => {
-                // Verbatim non-match line (rare once context/json are excluded).
-                out.push_str(key);
+                // Unparsed line, including single-file matches without a path prefix.
+                push_capped(&mut out, key);
                 out.push('\n');
                 emitted += 1;
             }
@@ -191,6 +191,14 @@ mod tests {
             .collect();
         let out = rg(&ctx(&["pattern".to_string()], &stdout));
         assert!(out.text.contains("truncated 100 more matches"));
+    }
+
+    #[test]
+    fn rg_caps_long_single_file_match() {
+        let stdout = format!("1:{}\n", "x".repeat(MAX_LINE_CHARS + 500));
+        let out = rg(&ctx(&["pattern".to_string()], &stdout));
+        assert_eq!(out.text.chars().count(), MAX_LINE_CHARS + 2);
+        assert!(out.text.ends_with("…\n"));
     }
 
     #[test]

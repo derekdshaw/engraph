@@ -64,6 +64,22 @@ fn build_fixture() -> Vec<u8> {
     idx.write_to_bytes().unwrap()
 }
 
+fn build_single_foo(symbol: &str, line: i32) -> Vec<u8> {
+    let mut lib = Document::new();
+    lib.relative_path = "src/lib.rs".to_string();
+    lib.symbols = vec![sym(symbol, "foo", SymKind::Function)];
+    lib.occurrences = vec![occ(
+        symbol,
+        vec![line, 0, line, 3],
+        SymbolRole::Definition as i32,
+    )];
+
+    let mut idx = Index::new();
+    idx.metadata = MessageField::some(Default::default());
+    idx.documents.push(lib);
+    idx.write_to_bytes().unwrap()
+}
+
 #[test]
 fn loader_emits_entities_and_a_calls_edge() {
     let dir = tempdir().unwrap();
@@ -143,6 +159,38 @@ fn reloading_same_bytes_is_idempotent() {
         )
         .unwrap();
     assert_eq!(e1, 2, "re-load must not duplicate entities");
+}
+
+#[test]
+fn reload_prunes_stale_symbol_locations_absent_from_new_scip() {
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+
+    let _ = load(&conn, "/proj/demo", &build_fixture()).unwrap();
+    let new_foo = "scip-test cargo demo 0.0.0 `foo_v2()`.";
+    let stats = load(&conn, "/proj/demo", &build_single_foo(new_foo, 20)).unwrap();
+    assert!(
+        stats.entities_pruned >= 1,
+        "expected stale foo/bar rows to be pruned"
+    );
+
+    let foos: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, line_range
+                 FROM entities
+                 WHERE project = ?1 AND name = 'foo' AND file_path = 'src/lib.rs'
+                 ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map(["/proj/demo"], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+
+    assert_eq!(foos, vec![(new_foo.to_string(), "21:21".to_string())]);
 }
 
 #[test]

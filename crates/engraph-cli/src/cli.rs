@@ -151,15 +151,14 @@ pub(crate) enum Cmd {
         /// is on by default. No effect outside `--workspace`.
         #[arg(long, conflicts_with = "bazel_symbols")]
         no_bazel_symbols: bool,
-        /// Prune orphan entities (rows referenced by no relation, in or out)
-        /// for the project(s) being indexed, before the load runs. On by
-        /// default; use --no-gc to disable. Note: after a partial load (a
-        /// --scip-manifest covering only some of a project's languages), GC
-        /// will delete the other languages' now-orphaned rows — re-index all
-        /// languages to restore them.
+        /// Prune orphan entities before indexing and stale SCIP symbols after
+        /// loading. On by default; use --no-gc to disable. Note: after a
+        /// partial load (a --scip-manifest covering only some of a project's
+        /// languages), GC will delete the other languages' now-orphaned rows —
+        /// re-index all languages to restore them.
         #[arg(long, conflicts_with = "no_gc")]
         gc: bool,
-        /// Disable the pre-index orphan GC pass (see --gc).
+        /// Disable index GC/stale-symbol pruning (see --gc).
         #[arg(long, conflicts_with = "gc")]
         no_gc: bool,
         /// Recurse into subdirectories to discover every project (not just the

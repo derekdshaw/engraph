@@ -4,10 +4,11 @@
 //! `entities.id` is the raw SCIP moniker (e.g.
 //! `rust-analyzer cargo engraph-core 0.1.0 schema/run_migrations().`).
 //! Cross-machine normalization of monikers is a Phase 2.2 problem; here we
-//! trust whatever the indexer emits. Re-indexing is idempotent: we delete all
-//! entities / relations scoped to `project` then re-insert from the new SCIP
-//! blob, all in one transaction. Below ~10M edges this is sufficient (the
-//! staging-tables-then-swap pattern from Mnemosyne is overkill at that scale).
+//! trust whatever the indexer emits. Re-indexing is idempotent: we replace the
+//! project's SCIP-derived relations, upsert current symbols, and prune stale
+//! unreferenced symbol rows absent from the new SCIP blob, all in one
+//! transaction. Below ~10M edges this is sufficient (the staging-tables-then-swap
+//! pattern from Mnemosyne is overkill at that scale).
 //!
 //! Relation kinds are validated against `RelationKind` enum values; there is
 //! no DB-level CHECK constraint (SQLite cannot add one in-place after the
@@ -18,7 +19,7 @@ use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
 use protobuf::{EnumOrUnknown, Message};
 use scip::types::{Document, Index, SymbolRole, symbol_information::Kind as SymKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -26,6 +27,21 @@ pub struct LoadStats {
     pub entities_inserted: usize,
     pub relations_inserted: usize,
     pub documents_seen: usize,
+    pub entities_pruned: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LoadOptions {
+    /// Delete project-owned symbol rows absent from the new SCIP blob after the
+    /// load replaces relations. Safe current edgeless symbols are kept because
+    /// they are present in the new symbol set.
+    pub prune_stale: bool,
+}
+
+impl Default for LoadOptions {
+    fn default() -> Self {
+        Self { prune_stale: true }
+    }
 }
 
 /// Cross-machine moniker normalization. SCIP monikers are stable
@@ -41,6 +57,15 @@ pub fn normalize_moniker(s: &str) -> &str {
 }
 
 pub fn load(conn: &PooledConn, project: &str, scip_bytes: &[u8]) -> Result<LoadStats> {
+    load_with_options(conn, project, scip_bytes, LoadOptions::default())
+}
+
+pub fn load_with_options(
+    conn: &PooledConn,
+    project: &str,
+    scip_bytes: &[u8],
+    options: LoadOptions,
+) -> Result<LoadStats> {
     let index = Index::parse_from_bytes(scip_bytes).context("decoding SCIP protobuf")?;
 
     // Pass 1: gather every symbol's Kind across all documents (and the
@@ -49,9 +74,11 @@ pub fn load(conn: &PooledConn, project: &str, scip_bytes: &[u8]) -> Result<LoadS
     // SymbolInformation — which may live in a different document than the
     // occurrence that references it.
     let mut sym_kind: HashMap<String, SymKind> = HashMap::new();
+    let mut current_symbols: HashSet<String> = HashSet::new();
     for doc in &index.documents {
         for s in &doc.symbols {
             if !s.symbol.is_empty() {
+                current_symbols.insert(s.symbol.clone());
                 sym_kind.insert(s.symbol.clone(), enum_or_unspecified(&s.kind));
             }
         }
@@ -78,12 +105,12 @@ pub fn load(conn: &PooledConn, project: &str, scip_bytes: &[u8]) -> Result<LoadS
     // chosen over an explicit kind-IN-list so a future symbol-level kind
     // (e.g. OVERRIDES) auto-cycles correctly on re-index.
     //
-    // We intentionally do NOT delete entities here. With cross-repo, another
-    // project's relation may point to a symbol we're about to recompute;
-    // dropping that entity would FK-fail the holding project's edge. The
-    // upsert path below refreshes file_path/line_range/signature in place.
-    // Stale entities from removed source code accumulate; a future GC pass
-    // (Phase 2.3 territory) can prune them.
+    // We intentionally do NOT bulk-delete entities here. With cross-repo,
+    // another project's relation may point to a symbol we're about to recompute;
+    // dropping that entity would FK-fail the holding project's edge. The upsert
+    // path below refreshes current symbols in place, and the stale-prune pass
+    // below deletes only symbols absent from this SCIP blob and unreferenced by
+    // any remaining relation.
     conn.execute(
         "DELETE FROM relations
          WHERE src_entity IN (SELECT id FROM entities WHERE project = ?1)
@@ -96,9 +123,46 @@ pub fn load(conn: &PooledConn, project: &str, scip_bytes: &[u8]) -> Result<LoadS
         stats.documents_seen += 1;
         load_document(conn, project, doc, &sym_kind, &mut stats)?;
     }
+    if options.prune_stale {
+        stats.entities_pruned = prune_stale_symbols(conn, project, &current_symbols)?;
+    }
 
     guard.commit()?;
     Ok(stats)
+}
+
+fn prune_stale_symbols(
+    conn: &PooledConn,
+    project: &str,
+    current_symbols: &HashSet<String>,
+) -> Result<usize> {
+    conn.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS current_scip_symbols (
+            id TEXT PRIMARY KEY
+        ) WITHOUT ROWID;
+        DELETE FROM current_scip_symbols;",
+    )?;
+
+    let mut insert_current =
+        conn.prepare_cached("INSERT OR IGNORE INTO current_scip_symbols (id) VALUES (?1)")?;
+    for sym in current_symbols {
+        insert_current.execute([sym.as_str()])?;
+    }
+    drop(insert_current);
+
+    let pruned = conn.execute(
+        "DELETE FROM entities
+         WHERE project = ?1
+           AND kind = 'symbol'
+           AND NOT EXISTS (
+             SELECT 1 FROM current_scip_symbols c WHERE c.id = entities.id
+           )
+           AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.src_entity = entities.id)
+           AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.dst_entity = entities.id)",
+        [project],
+    )?;
+    conn.execute("DELETE FROM current_scip_symbols", [])?;
+    Ok(pruned)
 }
 
 fn load_document(

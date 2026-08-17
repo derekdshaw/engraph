@@ -1264,13 +1264,15 @@ callers (`open_pool` etc.) instead of nearby variable names.
 2. Bulk re-insert from the current SCIP run. Entities are upserted;
    `file_path` / `line_range` / `signature` are refreshed on conflict
    so a real definition takes ownership from any earlier placeholder.
-3. `COMMIT`.
+3. When GC is enabled, delete project-owned `symbol` rows that are absent
+   from the new SCIP blob and have no remaining relations. This removes
+   moved/renamed stale definitions without dropping current edgeless
+   symbols or cross-repo inbound targets.
+4. `COMMIT`.
 
 Readers see the prior snapshot until commit. Staging-tables-then-swap
 (the heavier pattern ROADMAP.md mentions) is overkill below ~10M
-edges; a single `BEGIN…COMMIT` is sufficient at SQLite scale. Stale
-entities from removed source code accumulate; a future GC pass can
-prune them.
+edges; a single `BEGIN…COMMIT` is sufficient at SQLite scale.
 
 Entity-ID collision across the target-level (§14.8) and symbol-level
 (§14.9) Bazel layers is ruled out by inspection: `bazel_target` IDs
@@ -1346,17 +1348,17 @@ When two repos both reference the same fully-qualified symbol (e.g.
 the same row automatically. The work in 2.2 is the surrounding plumbing
 that makes this robust under realistic indexing patterns.
 
-**Loader change: drop the entity DELETE.** v2.1's loader did
+**Loader change: narrow entity cleanup.** v2.1's loader did
 `DELETE FROM entities WHERE project = ?` on every re-index. That's safe
 in a single-repo setting but breaks cross-repo: lib_a re-indexing would
 delete lib_a's symbols, and any CALLS edge from app_b pointing to one
 of them would be deleted to satisfy the FK, silently destroying app_b's
 graph. v2.2 narrows the cleanup to *outgoing* relations only
-(`WHERE src_entity IN (… project = ?)`) and never deletes entities.
-Stale defs from removed source accumulate; a future GC pass can prune
-them. The UPSERT now also updates `project` on conflict so a real
-definition takes ownership from any earlier placeholder a referrer had
-planted.
+(`WHERE src_entity IN (… project = ?)`) and stops bulk-deleting
+entities. The loader then prunes only stale project-owned symbols absent
+from the new SCIP blob and unreferenced by remaining relations. The
+UPSERT now also updates `project` on conflict so a real definition takes
+ownership from any earlier placeholder a referrer had planted.
 
 **Anchor heuristic — kind specificity.** With cross-crate references in
 play, multiple definitions often share the same `start_line` (typically

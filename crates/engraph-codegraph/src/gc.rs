@@ -1,11 +1,9 @@
 //! Pre-index garbage collection: prune orphan entities.
 //!
-//! The SCIP loader ([`crate::scip_loader::load`]) upserts entities but never
-//! deletes them — on each load it wipes a project's *relations* and re-inserts,
-//! leaving the entity rows in place (see the rationale in `scip_loader`). So
-//! when source code is removed, its entity rows linger as orphans: present in
-//! `entities` but referenced by no relation, in either direction.
-//! [`collect_orphans`] prunes those rows for one project.
+//! The SCIP loader ([`crate::scip_loader::load`]) upserts current entities and
+//! prunes stale unreferenced symbols absent from the new SCIP blob. This pass is
+//! still useful for older DBs, target-level Bazel rows, placeholders, or rows
+//! left by runs where stale pruning was disabled.
 //!
 //! Run this BEFORE a re-index, not after. The subsequent load re-creates any
 //! still-valid symbol that happens to be edgeless (e.g. an unreferenced private
@@ -14,10 +12,9 @@
 //! drop valid-but-unreferenced symbols until the next index.
 //!
 //! Caveat: with a partial load — a `--scip-manifest` covering only some of a
-//! project's languages (e.g. `engraph-atoms-scip --languages go`) — the loader
-//! wipes the *other* languages' relations under the same project, orphaning
-//! their entities; a later GC then deletes those rows, recoverable only by a
-//! full all-language re-index.
+//! project's languages — the loader wipes the *other* languages' relations under
+//! the same project, orphaning their entities; a later GC then deletes those
+//! rows, recoverable only by a full all-language re-index.
 
 use anyhow::Result;
 use engraph_core::db::PooledConn;

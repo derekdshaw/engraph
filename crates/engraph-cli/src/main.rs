@@ -255,9 +255,9 @@ async fn main() -> Result<()> {
             } else {
                 workspace.is_some() || recursive
             };
-            // Pre-index orphan GC: on by default, --no-gc opts out. (clap makes
-            // --gc / --no-gc mutually exclusive, so this is just `!no_gc` with
-            // an explicit --gc also forcing it on.)
+            // Index GC/stale-symbol cleanup: on by default, --no-gc opts out.
+            // (clap makes --gc / --no-gc mutually exclusive, so this is just
+            // `!no_gc` with an explicit --gc also forcing it on.)
             let effective_gc = gc || !no_gc;
             // `--recursive` indexes a tree of projects rooted at --workspace, or
             // the positional repo if --workspace wasn't given.
