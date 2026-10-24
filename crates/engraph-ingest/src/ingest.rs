@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
-use engraph_compress::{CompressInput, CompressKind, compress};
-use engraph_core::{db::PooledConn, models::EventKind, telemetry, tokens};
+use engraph_core::db::PooledConn;
 use engraph_retrieve::scope;
 use serde::Deserialize;
 use std::fs::File;
@@ -9,12 +8,11 @@ use std::path::Path;
 use std::time::Instant;
 use uuid::Uuid;
 
-use crate::common::{COMPRESS_THRESHOLD_TOKENS, sha256};
+use crate::common::sha256;
 use crate::digest::{self, COMPACT_SUMMARY_ROLE};
 
 pub struct IngestStats {
     pub messages_inserted: usize,
-    pub messages_compressed: usize,
     pub bytes_read: u64,
     pub elapsed_ms: u128,
 }
@@ -278,7 +276,6 @@ pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
         )?;
         return Ok(IngestStats {
             messages_inserted: 0,
-            messages_compressed: 0,
             bytes_read: 0,
             elapsed_ms: start.elapsed().as_millis(),
         });
@@ -287,7 +284,6 @@ pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
     let mut reader = BufReader::new(f);
 
     let mut messages_inserted = 0usize;
-    let mut messages_compressed = 0usize;
     let mut bytes_read = 0u64;
     let mut current_offset = last_offset as u64;
     let mut line = String::new();
@@ -344,22 +340,18 @@ pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
             pl.branch.as_deref(),
         )?;
 
-        let (stored, compressed_flag, orig_tokens, comp_tokens) = maybe_compress(&pl.content)?;
-        if compressed_flag {
-            messages_compressed += 1;
-        }
-
+        // Stored verbatim: recall only injects short previews, so compressing
+        // here saved no live tokens and cut compaction summaries in half.
         let hash = sha256(pl.content.as_bytes());
         let inserted = conn.execute(
             "INSERT OR IGNORE INTO messages
-                (id, session_id, role, content, content_compressed, content_hash, ts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (id, session_id, role, content, content_hash, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 pl.msg_id,
                 pl.session_id,
                 pl.role,
-                stored,
-                if compressed_flag { 1 } else { 0 },
+                pl.content,
                 hash,
                 pl.ts.clone().unwrap_or_else(now_iso),
             ],
@@ -373,22 +365,6 @@ pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
         if let Some(cwd) = pl.cwd.as_deref() {
             let scope_id = scope::ensure_project_scope(conn, cwd)?;
             scope::add_member(conn, &scope_id, "message", &pl.msg_id)?;
-        }
-
-        if compressed_flag {
-            telemetry::record_event(
-                conn,
-                telemetry::EventInput {
-                    session_id: Some(&pl.session_id),
-                    kind: EventKind::Compress,
-                    feature: "compress_ingest",
-                    filter_id: Some("session_message"),
-                    input_tokens: orig_tokens as i64,
-                    output_tokens: comp_tokens as i64,
-                    latency_ms: 0,
-                },
-            )
-            .ok();
         }
     }
 
@@ -410,7 +386,6 @@ pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
 
     Ok(IngestStats {
         messages_inserted,
-        messages_compressed,
         bytes_read,
         elapsed_ms: start.elapsed().as_millis(),
     })
@@ -509,20 +484,6 @@ fn extract_text(v: &serde_json::Value) -> String {
         }
         _ => String::new(),
     }
-}
-
-fn maybe_compress(content: &str) -> Result<(String, bool, u32, u32)> {
-    let tk = tokens::count(content);
-    if tk < COMPRESS_THRESHOLD_TOKENS {
-        return Ok((content.to_string(), false, tk, tk));
-    }
-    let r = compress(CompressInput {
-        text: content,
-        kind: CompressKind::SessionMessage,
-        target_ratio: 0.5,
-        brevity: false,
-    });
-    Ok((r.text, true, r.original_tokens, r.compressed_tokens))
 }
 
 fn now_iso() -> String {

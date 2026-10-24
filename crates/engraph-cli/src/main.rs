@@ -477,11 +477,8 @@ async fn main() -> Result<()> {
         Cmd::Ingest { path } => {
             let stats = engraph_ingest::ingest_file(&conn, &path)?;
             println!(
-                "ingested {} messages ({} compressed, {} bytes read, {}ms)",
-                stats.messages_inserted,
-                stats.messages_compressed,
-                stats.bytes_read,
-                stats.elapsed_ms
+                "ingested {} messages ({} bytes read, {}ms)",
+                stats.messages_inserted, stats.bytes_read, stats.elapsed_ms
             );
         }
         Cmd::CompressExisting { batch } => {

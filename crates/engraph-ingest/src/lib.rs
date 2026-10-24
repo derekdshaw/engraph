@@ -1,9 +1,10 @@
 //! Claude Code / Codex JSONL transcript → SQLite ingestion.
 //!
 //! Parses the subset of events that carry textual content (user / assistant
-//! messages), populates `sessions` and `messages`, compresses oversized
-//! messages via `engraph-compress` during ingest, derives a project scope from
-//! `cwd`, and tracks file offsets in `ingestion_log` for incremental re-runs.
+//! messages), stores them verbatim in `sessions` and `messages`, derives a
+//! project scope from `cwd`, and tracks file offsets in `ingestion_log` for
+//! incremental re-runs. Oversized rows are compressed only by the explicit
+//! `compress_existing` sweep.
 //! Each session that gains rows gets its `session_digest` context item rebuilt.
 
 mod common;
