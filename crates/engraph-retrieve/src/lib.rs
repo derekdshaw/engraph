@@ -116,8 +116,10 @@ fn search_messages(
     limit: usize,
 ) -> Result<Vec<Hit>> {
     use rusqlite::types::Value;
+    // `snippet()` centers the preview on the match instead of the message head.
     let base = "
-        SELECT m.id, m.session_id, m.content, m.ts, bm25(messages_fts) AS rank
+        SELECT m.id, m.session_id, snippet(messages_fts, 0, '', '', '…', 32), m.ts,
+               bm25(messages_fts) AS rank
         FROM messages_fts
         JOIN messages m ON m.rowid = messages_fts.rowid
     ";
@@ -174,7 +176,8 @@ fn search_context_items(
     // Session digests quote ingested messages verbatim, so a digest hit would
     // only duplicate a message hit.
     let base = "
-        SELECT c.id, c.session_id, c.content, c.ts, bm25(context_items_fts) AS rank
+        SELECT c.id, c.session_id, snippet(context_items_fts, 0, '', '', '…', 32), c.ts,
+               bm25(context_items_fts) AS rank
         FROM context_items_fts
         JOIN context_items c ON c.rowid = context_items_fts.rowid
     ";

@@ -786,6 +786,12 @@ FTS5's `bm25(messages_fts)` returns a *negative-is-better* number
 descending). `Hit::score` flips the sign so all consumers can sort
 descending uniformly.
 
+`Hit::preview` for message and context-item hits is FTS5's
+`snippet(…, 32)`: a ~32-token window around the match, still capped at 240
+chars. A head-of-row cut missed matches deep in long messages. Rows rewritten
+by the `compress-existing` sweep snippet from their compressed text, which
+may no longer contain the matched term, so FTS5 falls back to the row head.
+
 ### 7.5 The hybrid path (Reciprocal Rank Fusion)
 
 Behind the `embeddings` Cargo feature, `Strategy::Hybrid` fuses three
