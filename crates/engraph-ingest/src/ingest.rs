@@ -9,7 +9,7 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::common::sha256;
-use crate::digest::{self, COMPACT_SUMMARY_ROLE};
+use crate::digest::{self, COMPACT_SUMMARY_ROLE, META_ROLE};
 
 pub struct IngestStats {
     pub messages_inserted: usize,
@@ -36,6 +36,9 @@ struct RawEvent {
     /// The user line Claude Code writes after compaction, holding its summary.
     #[serde(rename = "isCompactSummary", default)]
     is_compact_summary: bool,
+    /// Harness-authored user lines (expanded slash-command prompts, notices).
+    #[serde(rename = "isMeta", default)]
+    is_meta: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +115,8 @@ fn parse_claude_line(trimmed: &str) -> Result<Option<ParsedLine>> {
     }
     let role = if ev.is_compact_summary {
         COMPACT_SUMMARY_ROLE
+    } else if ev.is_meta {
+        META_ROLE
     } else {
         ev.message
             .as_ref()

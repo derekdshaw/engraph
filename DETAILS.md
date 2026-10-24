@@ -724,7 +724,10 @@ runs 17–33% of the raw message tokens; caveman brevity manages 94–96%.
 - **Prompts**: leading harness tag blocks (`<local-command-caveat>`,
   `<command-name>`, `<task-notification>`, Codex `<environment_context>`, …)
   and `[Request interrupted by user…` lines are stripped; a row with nothing
-  left, a skill body, or a sentinel-compressed row is not a turn.
+  left, a skill body, or a sentinel-compressed row is not a turn. Claude Code
+  `isMeta` lines (expanded slash-command prompts, permission notices) are
+  ingested with role `meta` and never count. A slash command renders as typed
+  (`/name args`) and is dropped when no reply follows (local commands).
 - **Replies**: text before the first `[thinking] ` block; thinking never counts.
 - **Compaction**: Claude Code's `isCompactSummary` line is ingested with role
   `compact_summary`. The digest starts with the last such summary verbatim

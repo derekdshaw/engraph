@@ -500,16 +500,19 @@ mod tests {
                 r#"{"type":"system","subtype":"compact_boundary","sessionId":"s1","content":"Conversation compacted","timestamp":"t2","uuid":"b1"}"#,
                 r#"{"type":"user","sessionId":"s1","cwd":"/p","timestamp":"t3","uuid":"u2","isCompactSummary":true,"message":{"role":"user","content":"Summary of the earlier work."}}"#,
                 r#"{"type":"user","sessionId":"s1","cwd":"/p","timestamp":"t4","uuid":"u3","message":{"role":"user","content":"next ask"}}"#,
+                r#"{"type":"user","sessionId":"s1","cwd":"/p","timestamp":"t4","uuid":"m1","isMeta":true,"message":{"role":"user","content":"Permission granted for: Run shell command."}}"#,
                 r#"{"type":"assistant","sessionId":"s1","cwd":"/p","timestamp":"t5","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}"#,
             ],
         );
         ingest_file(&conn, &jp).unwrap();
-        let role: String = conn
-            .query_row("SELECT role FROM messages WHERE id = 'u2'", [], |r| {
+        let role = |id: &str| -> String {
+            conn.query_row("SELECT role FROM messages WHERE id = ?1", [id], |r| {
                 r.get(0)
             })
-            .unwrap();
-        assert_eq!(role, "compact_summary");
+            .unwrap()
+        };
+        assert_eq!(role("u2"), "compact_summary");
+        assert_eq!(role("m1"), "meta");
         assert_eq!(
             digests(&conn)[0].1,
             "[compacted]\nSummary of the earlier work.\n\nU: next ask\nA: done"

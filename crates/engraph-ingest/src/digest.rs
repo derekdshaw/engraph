@@ -12,6 +12,9 @@ use engraph_retrieve::scope;
 pub(crate) const DIGEST_KIND: &str = "session_digest";
 /// Role given at ingest to Claude Code's `isCompactSummary` user line.
 pub(crate) const COMPACT_SUMMARY_ROLE: &str = "compact_summary";
+/// Role given at ingest to `isMeta` user lines: harness text the user never
+/// typed (expanded slash-command prompts, permission notices, …).
+pub(crate) const META_ROLE: &str = "meta";
 /// Prefix `extract_text` puts on each thinking block.
 const THINKING_PREFIX: &str = "[thinking] ";
 
@@ -63,23 +66,28 @@ fn render(rows: &[(String, String)]) -> String {
     }
 
     let tail = &rows[last_summary.map_or(0, |i| i + 1)..];
-    let mut turns: Vec<(String, Option<&str>)> = Vec::new();
+    // (prompt, is_slash_command, final reply)
+    let mut turns: Vec<(String, bool, Option<&str>)> = Vec::new();
     for (role, content) in tail {
         match role.as_str() {
             "user" => {
-                if let Some(p) = prompt_text(content) {
-                    turns.push((p, None));
+                if let Some((p, is_command)) = prompt_text(content) {
+                    turns.push((p, is_command, None));
                 }
             }
             "assistant" => {
                 if let (Some(turn), Some(reply)) = (turns.last_mut(), reply_text(content)) {
-                    turn.1 = Some(reply);
+                    turn.2 = Some(reply);
                 }
             }
             _ => {}
         }
     }
-    for (prompt, reply) in turns {
+    for (prompt, is_command, reply) in turns {
+        // Local commands (`/model`, `/advisor`, …) never reach the model.
+        if is_command && reply.is_none() {
+            continue;
+        }
         if !out.is_empty() {
             out.push_str("\n\n");
         }
@@ -95,13 +103,21 @@ fn render(rows: &[(String, String)]) -> String {
 
 /// The human-typed part of a user message, or `None` for harness-injected
 /// rows. Claude Code wraps its injections (`<local-command-caveat>`,
-/// `<command-name>`, `<task-notification>`, …) in leading tag blocks that can
-/// share a message with a real prompt, so strip them rather than skip the row.
-fn prompt_text(content: &str) -> Option<String> {
+/// `<task-notification>`, …) in leading tag blocks that can share a message
+/// with a real prompt, so strip them rather than skip the row. A slash command
+/// is rendered as typed (`/name args`) and flagged so a reply-less one drops.
+fn prompt_text(content: &str) -> Option<(String, bool)> {
     if is_compressed(content) || content.starts_with("Base directory for this skill:") {
         return None;
     }
     let mut rest = content.trim_start();
+    if rest.starts_with('<')
+        && let Some(name) = tag_body(rest, "command-name")
+    {
+        let args = tag_body(rest, "command-args").unwrap_or("").trim();
+        let typed = format!("{} {args}", name.trim());
+        return Some((typed.trim_end().to_string(), true));
+    }
     while let Some(after) = strip_leading_tag(rest) {
         rest = after.trim_start();
     }
@@ -111,7 +127,14 @@ fn prompt_text(content: &str) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
+    (!text.is_empty()).then(|| (text.to_string(), false))
+}
+
+fn tag_body<'a>(s: &'a str, name: &str) -> Option<&'a str> {
+    let open = format!("<{name}>");
+    let start = s.find(&open)? + open.len();
+    let len = s[start..].find(&format!("</{name}>"))?;
+    Some(&s[start..start + len])
 }
 
 fn strip_leading_tag(s: &str) -> Option<&str> {
@@ -162,6 +185,33 @@ mod tests {
         assert_eq!(
             d,
             "U: why does it fail\nA: It fails because X.\n\nU: fix it\nA: Fixed."
+        );
+    }
+
+    #[test]
+    fn slash_commands_render_as_typed_and_meta_rows_are_ignored() {
+        let d = render(&rows(&[
+            ("user", "first ask"),
+            ("assistant", "first reply"),
+            (
+                "user",
+                "<command-message>code-review</command-message>\n<command-name>/code-review</command-name>\n<command-args>high</command-args>",
+            ),
+            (META_ROLE, "Review the current diff for correctness bugs."),
+            ("assistant", "Two findings."),
+            (
+                "user",
+                "<command-name>/model</command-name>\n<command-args></command-args>",
+            ),
+            (
+                "user",
+                "<local-command-stdout>Set model to opus</local-command-stdout>",
+            ),
+            (META_ROLE, "Permission granted for: Run shell command."),
+        ]));
+        assert_eq!(
+            d,
+            "U: first ask\nA: first reply\n\nU: /code-review high\nA: Two findings."
         );
     }
 
