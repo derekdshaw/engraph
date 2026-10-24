@@ -171,6 +171,8 @@ fn search_context_items(
     limit: usize,
 ) -> Result<Vec<Hit>> {
     use rusqlite::types::Value;
+    // Session digests quote ingested messages verbatim, so a digest hit would
+    // only duplicate a message hit.
     let base = "
         SELECT c.id, c.session_id, c.content, c.ts, bm25(context_items_fts) AS rank
         FROM context_items_fts
@@ -179,7 +181,10 @@ fn search_context_items(
     let limit_val = Value::Integer(limit as i64);
     let (sql, params) = match scope_ids {
         None => (
-            format!("{base} WHERE context_items_fts MATCH ?1 ORDER BY rank LIMIT ?2"),
+            format!(
+                "{base} WHERE context_items_fts MATCH ?1 AND c.kind != 'session_digest' \
+                 ORDER BY rank LIMIT ?2"
+            ),
             vec![Value::Text(fts_q.to_string()), limit_val],
         ),
         Some([]) => return Ok(vec![]),
@@ -191,6 +196,7 @@ fn search_context_items(
             let q = format!(
                 "{base} JOIN scope_members sm ON sm.target_kind = 'context_item' AND sm.target_id = c.id
                  WHERE context_items_fts MATCH ?{q_idx} AND sm.scope_id IN ({placeholders})
+                   AND c.kind != 'session_digest'
                  ORDER BY rank LIMIT ?{lim_idx}",
                 q_idx = ids.len() + 1,
                 lim_idx = ids.len() + 2,

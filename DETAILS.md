@@ -47,7 +47,7 @@ crates/
 ├── engraph-core/          schema, db pool, telemetry, budget, tokens, embedding trait
 ├── engraph-compress/      compressor + per-command filters (git, cargo, npm, …)
 ├── engraph-retrieve/      FTS+scoping+KG, hybrid (feature-gated)
-├── engraph-ingest/        JSONL → SQLite, rotation guard, compress-existing sweep
+├── engraph-ingest/        JSONL → SQLite, rotation guard, compress-existing sweep, session digests
 ├── engraph-codegraph/     SCIP ingest → entities/relations, subgraph formatter, Bazel
 └── engraph-cli/           the `engraph` binary (subcommands + hooks)
 ```
@@ -711,6 +711,29 @@ anchored to the same message after compression.
 Tested by `compress_existing_keeps_fts_pointed_at_original` which seeds
 a distinctive phrase, runs the sweep, and asserts FTS recall still
 hits the original phrase against the compressed message.
+
+### 6.5 Session digest
+
+After each `ingest_file` pass, every session that gained a row gets its
+digest rebuilt (`digest.rs`): one `session_digest` context item holding each
+real user prompt plus the final visible assistant reply of that turn, as
+`U: …` / `A: …` pairs. Selection is structural — no model, no prose rewriting
+— so the text is verbatim and the build is deterministic. On real sessions it
+runs 17–33% of the raw message tokens; caveman brevity manages 94–96%.
+
+- **Prompts**: leading harness tag blocks (`<local-command-caveat>`,
+  `<command-name>`, `<task-notification>`, Codex `<environment_context>`, …)
+  and `[Request interrupted by user…` lines are stripped; a row with nothing
+  left, a skill body, or a sentinel-compressed row is not a turn.
+- **Replies**: text before the first `[thinking] ` block; thinking never counts.
+- **Compaction**: Claude Code's `isCompactSummary` line is ingested with role
+  `compact_summary`. The digest starts with the last such summary verbatim
+  (`[compacted]` header) and only renders turns after it.
+
+The row id is `digest-<session_id>`, rebuilt by explicit DELETE + INSERT inside
+the ingest transaction so the FTS insert/delete triggers stay in sync. Digests
+are excluded from `recall`'s context-item search, since they only repeat
+message text.
 
 ---
 

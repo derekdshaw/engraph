@@ -10,6 +10,7 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::common::{COMPRESS_THRESHOLD_TOKENS, sha256};
+use crate::digest::{self, COMPACT_SUMMARY_ROLE};
 
 pub struct IngestStats {
     pub messages_inserted: usize,
@@ -34,6 +35,9 @@ struct RawEvent {
     /// that shouldn't pollute the main session transcript.
     #[serde(rename = "isSidechain", default)]
     is_sidechain: bool,
+    /// The user line Claude Code writes after compaction, holding its summary.
+    #[serde(rename = "isCompactSummary", default)]
+    is_compact_summary: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,12 +112,15 @@ fn parse_claude_line(trimmed: &str) -> Result<Option<ParsedLine>> {
     if content.is_empty() {
         return Ok(None);
     }
-    let role = ev
-        .message
-        .as_ref()
-        .and_then(|m| m.role.as_deref())
-        .unwrap_or(kind)
-        .to_string();
+    let role = if ev.is_compact_summary {
+        COMPACT_SUMMARY_ROLE
+    } else {
+        ev.message
+            .as_ref()
+            .and_then(|m| m.role.as_deref())
+            .unwrap_or(kind)
+    }
+    .to_string();
     let msg_id = ev.uuid.unwrap_or_else(|| Uuid::now_v7().to_string());
     Ok(Some(ParsedLine {
         session_id,
@@ -284,6 +291,8 @@ pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
     let mut bytes_read = 0u64;
     let mut current_offset = last_offset as u64;
     let mut line = String::new();
+    // Sessions that gained a row this pass; their digests are rebuilt below.
+    let mut touched = std::collections::BTreeSet::new();
 
     // Wrap the per-message writes in a single transaction. SQLite WAL mode
     // fsyncs once per implicit txn; the previous auto-commit path issued ~3
@@ -341,7 +350,7 @@ pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
         }
 
         let hash = sha256(pl.content.as_bytes());
-        conn.execute(
+        let inserted = conn.execute(
             "INSERT OR IGNORE INTO messages
                 (id, session_id, role, content, content_compressed, content_hash, ts)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -356,6 +365,9 @@ pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
             ],
         )?;
         messages_inserted += 1;
+        if inserted > 0 {
+            touched.insert(pl.session_id.clone());
+        }
 
         // Project scope membership.
         if let Some(cwd) = pl.cwd.as_deref() {
@@ -378,6 +390,10 @@ pub fn ingest_file(conn: &PooledConn, path: &Path) -> Result<IngestStats> {
             )
             .ok();
         }
+    }
+
+    for session_id in &touched {
+        digest::rebuild(conn, session_id)?;
     }
 
     // Refresh metadata after read so size reflects what we actually processed.
