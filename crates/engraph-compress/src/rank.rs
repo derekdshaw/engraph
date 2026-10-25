@@ -84,12 +84,20 @@ pub(crate) fn extract(text: &str, target_tokens: u32) -> String {
     out
 }
 
+/// Terminal punctuation ends a sentence only before whitespace or end of text,
+/// so `CLAUDE.md`, `v1.2.3` and `main.rs:42` stay whole.
 fn split_sentences(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut buf = String::new();
-    for ch in text.chars() {
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
         buf.push(ch);
-        if matches!(ch, '.' | '!' | '?' | '\n') {
+        let ends = match ch {
+            '\n' => true,
+            '.' | '!' | '?' => chars.peek().is_none_or(|c| c.is_whitespace()),
+            _ => false,
+        };
+        if ends {
             let trimmed = buf.trim().to_string();
             if !trimmed.is_empty() {
                 out.push(trimmed);
@@ -127,6 +135,19 @@ mod tests {
         let out = extract(text, 30);
         assert!(out.to_lowercase().contains("engraph"));
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn dots_inside_words_do_not_split() {
+        assert_eq!(
+            split_sentences("Read CLAUDE.md first. Then ship v1.2.3! Done?\nsrc/main.rs:42 ok"),
+            vec![
+                "Read CLAUDE.md first.",
+                "Then ship v1.2.3!",
+                "Done?",
+                "src/main.rs:42 ok"
+            ]
+        );
     }
 
     #[test]
