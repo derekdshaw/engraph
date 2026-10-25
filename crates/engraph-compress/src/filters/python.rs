@@ -1,4 +1,4 @@
-use super::util::{combine, drop_matching, truncate_lines};
+use super::util::{combine, drop_matching, truncate_lines, with_stderr_on_failure};
 use super::{FilterCtx, FilterOutput};
 use regex::Regex;
 use std::sync::OnceLock;
@@ -46,7 +46,7 @@ pub fn pip_install(ctx: &FilterCtx<'_>) -> FilterOutput {
 /// `pip list` — cap at 200 lines; keep header.
 pub fn pip_list(ctx: &FilterCtx<'_>) -> FilterOutput {
     FilterOutput {
-        text: truncate_lines(ctx.stdout, 200, "packages"),
+        text: with_stderr_on_failure(ctx, truncate_lines(ctx.stdout, 200, "packages")),
         filter_id: "pip_list",
     }
 }

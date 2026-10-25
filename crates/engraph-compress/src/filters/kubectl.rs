@@ -1,9 +1,9 @@
-use super::util::{combine, tail_lines, truncate_lines};
+use super::util::{combine, tail_lines, truncate_lines, with_stderr_on_failure};
 use super::{FilterCtx, FilterOutput};
 
 pub fn get(ctx: &FilterCtx<'_>) -> FilterOutput {
     FilterOutput {
-        text: truncate_lines(ctx.stdout, 100, "resources"),
+        text: with_stderr_on_failure(ctx, truncate_lines(ctx.stdout, 100, "resources")),
         filter_id: "kubectl_get",
     }
 }

@@ -331,6 +331,13 @@ The mismatch we paid for once was `cargo check` (picker said
 `cargo_check`, but the underlying `cargo::build` stamped `cargo_build`);
 the v2.1 fix introduced a thin `cargo::check` wrapper.
 
+`engraph run` prints only `FilterOutput::text`, so a filter that shapes
+stdout alone must still surface a failure's stderr. Filters that don't fold
+stderr in themselves wrap their text in `util::with_stderr_on_failure`, which
+appends it (capped at 50 lines) only when `exit_code != 0`; success output is
+unchanged. `tests/stderr_on_failure.rs` runs every `pick` arm with a failing
+stderr and fails if any filter drops it — add new arms there.
+
 ### 4.2 Filter taxonomy
 
 Each filter has the same broad shape:

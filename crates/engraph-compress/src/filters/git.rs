@@ -1,3 +1,4 @@
+use super::util::with_stderr_on_failure;
 use super::{FilterCtx, FilterOutput};
 use regex::Regex;
 use std::sync::OnceLock;
@@ -8,7 +9,7 @@ use std::sync::OnceLock;
 pub fn log(ctx: &FilterCtx<'_>) -> FilterOutput {
     if ctx.args.iter().any(|a| a == "--oneline") {
         return FilterOutput {
-            text: ctx.stdout.to_string(),
+            text: with_stderr_on_failure(ctx, ctx.stdout.to_string()),
             filter_id: "git_log",
         };
     }
@@ -38,7 +39,7 @@ pub fn log(ctx: &FilterCtx<'_>) -> FilterOutput {
     }
     out.push_str(&format!("[engraph: {total} commits]\n"));
     FilterOutput {
-        text: out,
+        text: with_stderr_on_failure(ctx, out),
         filter_id: "git_log",
     }
 }
@@ -94,7 +95,7 @@ pub fn diff(ctx: &FilterCtx<'_>) -> FilterOutput {
         )
     }) {
         return FilterOutput {
-            text: ctx.stdout.to_string(),
+            text: with_stderr_on_failure(ctx, ctx.stdout.to_string()),
             filter_id: "git_diff",
         };
     }
@@ -155,7 +156,7 @@ pub fn diff(ctx: &FilterCtx<'_>) -> FilterOutput {
         flush_hunk(&mut out, &mut added, &mut removed, &mut hunk_preview);
     }
     FilterOutput {
-        text: out,
+        text: with_stderr_on_failure(ctx, out),
         filter_id: "git_diff",
     }
 }
@@ -187,7 +188,7 @@ pub fn status(ctx: &FilterCtx<'_>) -> FilterOutput {
     }
     let text = super::util::truncate_lines(&out, MAX_LINES, "lines");
     FilterOutput {
-        text,
+        text: with_stderr_on_failure(ctx, text),
         filter_id: "git_status",
     }
 }
@@ -281,7 +282,7 @@ pub fn commit(ctx: &FilterCtx<'_>) -> FilterOutput {
         out.push_str(&format!("[engraph: {dropped} file-mode lines hidden]\n"));
     }
     FilterOutput {
-        text: out,
+        text: with_stderr_on_failure(ctx, out),
         filter_id: "git_commit",
     }
 }

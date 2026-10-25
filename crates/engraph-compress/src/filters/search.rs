@@ -28,7 +28,7 @@ pub fn rg(ctx: &FilterCtx<'_>) -> FilterOutput {
         super::util::truncate_lines(clean.as_ref(), MAX_MATCH_LINES, "matches")
     };
     FilterOutput {
-        text,
+        text: super::util::with_stderr_on_failure(ctx, text),
         filter_id: "rg",
     }
 }
