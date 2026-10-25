@@ -730,7 +730,7 @@ digest rebuilt (`digest.rs`): one `session_digest` context item holding each
 real user prompt plus the final visible assistant reply of that turn, as
 `U: …` / `A: …` pairs. Selection is structural — no model, no prose rewriting
 — so the text is verbatim and the build is deterministic. On real sessions it
-runs 17–33% of the raw message tokens; caveman brevity manages 94–96%.
+runs 17–33% of the raw message tokens; caveman brevity manages ~94%.
 
 - **Prompts**: leading harness tag blocks (`<local-command-caveat>`,
   `<command-name>`, `<task-notification>`, Codex `<environment_context>`, …)
