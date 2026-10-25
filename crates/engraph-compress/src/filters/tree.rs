@@ -83,7 +83,8 @@ fn group_paths_by_dir(text: &str, max: usize) -> String {
         if line.is_empty() {
             continue;
         }
-        match line.rfind('/') {
+        // A directory entry (`fd`'s trailing `/`) is filed under its parent.
+        match line.strip_suffix('/').unwrap_or(line).rfind('/') {
             Some(i) => {
                 let dir = &line[..=i]; // keep the trailing slash
                 let file = &line[i + 1..];
@@ -184,6 +185,15 @@ mod tests {
         let o = fd(&ctx(stdout));
         assert_eq!(o.text, "src/filters/ (3): a.rs, b.rs, c.rs\nsrc/lib.rs\n");
         assert_eq!(o.filter_id, "fd");
+    }
+
+    #[test]
+    fn fd_directory_entries_group_under_their_parent() {
+        // fd prints directories with a trailing slash; the entry belongs to the
+        // parent, not to a group of its own with an empty file name.
+        let stdout = "/p/s/\n/p/s/a.jsonl\n/p/s/b.jsonl\nsub/\n";
+        let o = fd(&ctx(stdout));
+        assert_eq!(o.text, "/p/s/\n/p/s/ (2): a.jsonl, b.jsonl\nsub/\n");
     }
 
     #[test]
