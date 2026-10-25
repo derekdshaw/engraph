@@ -53,6 +53,9 @@ pub(crate) fn try_auto_rewrite(command: &str) -> RewriteOutcome {
 /// command runs against the right repo; classification strips them on a copy so
 /// the subcommand is visible to `filters::pick`.
 fn classify_for_wrap(segment: &str) -> Option<(Vec<String>, Vec<String>, &'static str)> {
+    if has_shell_expansion(segment) {
+        return None;
+    }
     let mut argv = match shell_words::split(segment) {
         Ok(v) if !v.is_empty() => v,
         _ => return None,
@@ -302,6 +305,39 @@ fn is_env_assignment(tok: &str) -> bool {
         }
     }
     saw_eq
+}
+
+/// True when the shell would expand part of `s`: `$`/backtick outside single
+/// quotes, or an unquoted glob (`*`, `?`, `[`), brace, or word-leading `~`.
+/// `build_wrapped` re-quotes every argv word, which would freeze these into
+/// literals, so such commands must run untouched. Over-matching only costs the
+/// compression.
+fn has_shell_expansion(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && !in_single {
+            i += 2;
+            continue;
+        }
+        if b == b'\'' && !in_double {
+            in_single = !in_single;
+        } else if b == b'"' && !in_single {
+            in_double = !in_double;
+        } else if !in_single && (b == b'$' || b == b'`') {
+            return true;
+        } else if !in_single && !in_double {
+            let word_start = i == 0 || bytes[i - 1].is_ascii_whitespace();
+            if matches!(b, b'*' | b'?' | b'[' | b'{') || (b == b'~' && word_start) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Scan for shell operators outside of single/double quotes. Tracks backslash

@@ -99,6 +99,50 @@ fn quoted_args_are_preserved() {
 }
 
 #[test]
+fn shell_expanded_words_are_passthrough() {
+    let (_t, db) = db_dir();
+    // Re-quoting argv would turn these into literals (`'~/x'`, `'src/*.rs'`,
+    // `'$HOME'`), so the wrapped command would search paths that don't exist.
+    for cmd in [
+        "fd . ~/x",
+        "ls -laR ~",
+        "fd . ~/x | head -20",
+        "rg foo src/*.rs",
+        "rg foo src/[ab].rs",
+        "ls {src,docs}",
+        "rg foo $HOME/x",
+        "rg foo \"$HOME/x\"",
+        "rg foo \"`pwd`\"",
+    ] {
+        let out = run_hook(&db, cmd);
+        assert_eq!(
+            out.trim(),
+            "",
+            "expected passthrough for {cmd:?}, got: {out}"
+        );
+    }
+}
+
+#[test]
+fn quoted_expansion_chars_still_rewrite() {
+    let (_t, db) = db_dir();
+    for (cmd, want) in [
+        ("rg -g '*.rs' foo", "engraph run rg -g '*.rs' foo"),
+        ("rg 'a?b' src", "engraph run rg 'a?b' src"),
+        ("rg '$HOME' src", "engraph run rg '$HOME' src"),
+        ("ls a~b", "engraph run ls 'a~b'"),
+    ] {
+        let out = run_hook(&db, cmd);
+        let v = parse(&out).unwrap_or_else(|| panic!("expected rewrite for {cmd:?}"));
+        let updated = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|s| s.as_str())
+            .unwrap();
+        assert_eq!(updated, want);
+    }
+}
+
+#[test]
 fn non_pipeline_compound_is_passthrough() {
     let (_t, db) = db_dir();
     // `&&` isn't a pipe — we can't safely wrap it, so it passes through raw
@@ -415,7 +459,8 @@ fn rg_on_regex_pattern_still_rewrites_for_compression() {
     let (_t, db) = db_dir();
     insert_entity(&db, "process");
     // Regex metachar → not a single-symbol lookup. Don't redirect; compress.
-    let out = run_hook(&db, "rg process.*");
+    // Quoted: unquoted `process.*` is a shell glob and passes through raw.
+    let out = run_hook(&db, "rg 'process.*'");
     let v = parse(&out).expect("expected rewrite JSON");
     assert_eq!(
         v.pointer("/hookSpecificOutput/permissionDecision")

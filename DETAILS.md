@@ -511,6 +511,12 @@ the decision tree to Passthrough: any rewrite that re-shelled the
 command would terminate the heredoc body at the wrong place or pull
 the body lines into argv.
 
+`has_shell_expansion` uses the same loop to find words the shell would
+expand: `$` or a backtick outside single quotes, or an unquoted `*`, `?`,
+`[`, `{`, or word-leading `~`. `build_wrapped` re-quotes every argv word, so
+wrapping `fd . ~/x` or `rg foo src/*.rs` would hand the tool the literal
+`'~/x'` / `'src/*.rs'`. Any segment with an expansion passes through instead.
+
 `is_env_assignment` is a tight identifier-equals-anything
 check matching POSIX variable-name rules. Its only caller is the
 prefix-peeling logic in `strip_command_prefix`.
