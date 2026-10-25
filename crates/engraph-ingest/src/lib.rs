@@ -212,6 +212,41 @@ mod tests {
     }
 
     #[test]
+    fn compress_existing_skips_digests_and_compaction_summaries() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("skip.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let large = "The digest keeps every prompt and reply verbatim for later.\n".repeat(400);
+        conn.execute(
+            "INSERT INTO sessions (id, project, cwd, started_at) VALUES ('s', '/p', '/p', 't')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, ts) \
+             VALUES ('m','s','compact_summary',?1,'t')",
+            [&large],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO context_items (id, session_id, kind, content) \
+             VALUES ('digest-s','s','session_digest',?1)",
+            [&large],
+        )
+        .unwrap();
+        let stats = compress_existing(&conn, 100).unwrap();
+        assert_eq!(stats.rows_compressed, 0);
+        let kept: String = conn
+            .query_row(
+                "SELECT content FROM context_items WHERE id = 'digest-s'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, large);
+    }
+
+    #[test]
     fn compress_existing_keeps_fts_pointed_at_original() {
         // v5 fix: dropping the messages_au trigger means UPDATE-by-compression
         // does NOT replace FTS index content. Recall against the original

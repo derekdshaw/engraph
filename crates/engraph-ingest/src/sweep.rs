@@ -28,20 +28,31 @@ pub fn compress_existing(conn: &PooledConn, batch: usize) -> Result<SweepStats> 
         elapsed_ms: 0,
     };
 
-    for table in ["messages", "context_items"] {
-        sweep_table(conn, table, batch, &mut stats)?;
+    // Digests and compaction summaries are already dense and promised verbatim;
+    // extractive ranking would halve them.
+    for (table, keep_verbatim) in [
+        ("messages", "role = 'compact_summary'"),
+        ("context_items", "kind = 'session_digest'"),
+    ] {
+        sweep_table(conn, table, keep_verbatim, batch, &mut stats)?;
     }
 
     stats.elapsed_ms = start.elapsed().as_millis();
     Ok(stats)
 }
 
-fn sweep_table(conn: &PooledConn, table: &str, batch: usize, stats: &mut SweepStats) -> Result<()> {
+fn sweep_table(
+    conn: &PooledConn,
+    table: &str,
+    keep_verbatim: &str,
+    batch: usize,
+    stats: &mut SweepStats,
+) -> Result<()> {
     // Read candidate rows in one prepared statement, then update in a loop.
     // `batch` caps the number of rows processed per call.
     let select_sql = format!(
         "SELECT rowid, id, content FROM {table}
-         WHERE content_compressed = 0
+         WHERE content_compressed = 0 AND NOT ({keep_verbatim})
          ORDER BY rowid ASC LIMIT ?1"
     );
     let update_sql = format!(

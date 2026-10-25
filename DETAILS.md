@@ -708,7 +708,9 @@ statements per message → 1 fsync for the whole file).
 `compress_existing(conn, batch)` (`engraph-ingest`) walks
 `messages` and `context_items`, compresses any row whose
 `content_compressed = 0` and whose token count exceeds the threshold,
-and writes the compressed text back. Idempotent: the sentinel fast-path
+and writes the compressed text back. Session digests and `compact_summary`
+messages are never touched, since they are already dense and kept
+verbatim. Idempotent: the sentinel fast-path
 makes a re-run a no-op even if `content_compressed` wasn't updated;
 rows are also marked `content_compressed = 1` to skip re-tokenization
 on the next sweep.
