@@ -17,47 +17,43 @@ const FILLERS: &[&str] = &[
     "maybe",
 ];
 
+/// Delete articles and fillers in place; every other byte is copied verbatim.
+/// A word is dropped only when it stands alone in prose (start of text or after
+/// whitespace, followed by a space, outside backticks), so identifiers like
+/// `foo(a, b)` or `a.b` and code spans survive.
 pub(crate) fn strip_fillers(text: &str) -> String {
-    let fillers: std::collections::HashSet<&'static str> = FILLERS.iter().copied().collect();
-
     let mut out = String::with_capacity(text.len());
-    for line in text.lines() {
-        let mut first = true;
-        for tok in tokenize_keeping_punct(line) {
-            let lower = tok.to_lowercase();
-            if lower == "a" || lower == "an" || lower == "the" || fillers.contains(lower.as_str()) {
-                continue;
+    let mut in_code = false;
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        if !is_word_char(c) {
+            if c == '`' {
+                in_code = !in_code;
             }
-            if !first && !tok.starts_with(|c: char| c.is_ascii_punctuation()) {
-                out.push(' ');
-            }
-            out.push_str(&tok);
-            first = false;
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+            continue;
         }
-        out.push('\n');
+        let end = rest.find(|ch| !is_word_char(ch)).unwrap_or(rest.len());
+        let (word, after) = rest.split_at(end);
+        let standalone = out.is_empty() || out.ends_with(char::is_whitespace);
+        if !in_code && standalone && after.starts_with(' ') && is_filler(word) {
+            rest = &after[1..];
+            continue;
+        }
+        out.push_str(word);
+        rest = after;
     }
     out
 }
 
-fn tokenize_keeping_punct(line: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut buf = String::new();
-    for ch in line.chars() {
-        if ch.is_alphanumeric() || ch == '_' || ch == '-' {
-            buf.push(ch);
-        } else {
-            if !buf.is_empty() {
-                tokens.push(std::mem::take(&mut buf));
-            }
-            if !ch.is_whitespace() {
-                tokens.push(ch.to_string());
-            }
-        }
-    }
-    if !buf.is_empty() {
-        tokens.push(buf);
-    }
-    tokens
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-' || c == '\''
+}
+
+fn is_filler(word: &str) -> bool {
+    let lower = word.to_lowercase();
+    matches!(lower.as_str(), "a" | "an" | "the") || FILLERS.contains(&lower.as_str())
 }
 
 #[cfg(test)]
@@ -73,6 +69,21 @@ mod tests {
         assert!(!lower.contains("really"));
         assert!(!lower.contains("very"));
         assert!(lower.contains("simple"));
+    }
+
+    #[test]
+    fn leaves_everything_else_byte_identical() {
+        let s = "Here's what's really hooked in:\n\
+                 - `SessionStart` → `engraph hook session-start` (injects the brief)\n\
+                 - `engraph ingest --from-stdin` reads foo(a, b) and a.b\n\
+                 \tthe `the` value\n";
+        assert_eq!(
+            strip_fillers(s),
+            "Here's what's hooked in:\n\
+             - `SessionStart` → `engraph hook session-start` (injects brief)\n\
+             - `engraph ingest --from-stdin` reads foo(a, b) and a.b\n\
+             \t`the` value\n"
+        );
     }
 
     #[test]

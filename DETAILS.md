@@ -269,6 +269,11 @@ Why this exact shape:
 `actually`, `basically`, `literally`, `simply`, `quite`, `rather`,
 `somewhat`, `perhaps`, `maybe`).
 
+Words are deleted in place and every other byte is copied verbatim. A word
+goes only when it stands alone in prose (after whitespace or at the start,
+followed by a space, outside backticks), so identifiers such as `foo(a, b)`
+and `a.b`, flags such as `--from-stdin`, and code spans survive.
+
 Opt-in per call, never per-kind default. Articles carry meaning in prose
 ("the foo" vs "a foo" is sometimes the whole point); we only apply this
 to inputs where verbatim grammar isn't preserved anyway, like noisy tool
