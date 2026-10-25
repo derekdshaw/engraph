@@ -13,6 +13,7 @@ mod ingest;
 mod sweep;
 
 pub use common::COMPRESS_THRESHOLD_TOKENS;
+pub use digest::{SessionDigest, latest_digest};
 pub use ingest::{IngestStats, ingest_file};
 pub use sweep::{SweepStats, compress_existing};
 #[cfg(test)]
@@ -577,5 +578,37 @@ mod tests {
                 "U: examine the file\nA: nodes are heap-allocated".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn latest_digest_picks_newest_for_project_and_skips_the_asker() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("l.db")).unwrap();
+        let conn = pool.get().unwrap();
+        for (sid, project, ts) in [
+            ("old", "/main", "2026-10-01 10:00:00"),
+            ("wt", "/main-wt", "2026-10-02 10:00:00"),
+            ("cur", "/main", "2026-10-03 10:00:00"),
+            ("other", "/elsewhere", "2026-10-04 10:00:00"),
+        ] {
+            conn.execute(
+                "INSERT INTO sessions (id, project, cwd, started_at) VALUES (?1, ?2, ?2, 't')",
+                [sid, project],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO context_items (id, session_id, kind, content, project, ts) \
+                 VALUES (?1, ?1, 'session_digest', ?2, ?3, ?4)",
+                [sid, &format!("U: from {sid}"), project, ts],
+            )
+            .unwrap();
+        }
+        let d = latest_digest(&conn, &["/main", "/main-wt"], Some("cur"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.session_id, "wt");
+        let d = latest_digest(&conn, &["/main"], None).unwrap().unwrap();
+        assert_eq!(d.session_id, "cur");
+        assert!(latest_digest(&conn, &["/none"], None).unwrap().is_none());
     }
 }

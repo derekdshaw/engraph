@@ -951,6 +951,11 @@ For the resolved `cwd`:
 
 - `## do-not-repeat` — top 5 rules from `do_not_repeat WHERE project = ?`.
 - `## open bugs` — top 5 unresolved rows from `bugs`.
+- `## last session` — from the most recently rebuilt `session_digest` (§6.5)
+  of another session, under either the canonical key or the raw `cwd`: its
+  timestamp, then the first line (≤160 chars) of the final prompt and reply.
+  It sits before decisions because those alone overflow the cap. The full
+  digest is printed on demand by `engraph resume`.
 - `## decisions` — top 5 `context_items` rows for the project whose `kind` is
   `decision`/`architecture`/`convention`/`performance`.
 

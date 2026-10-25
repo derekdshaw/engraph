@@ -234,6 +234,13 @@ pub(crate) enum Cmd {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Print the project's most recent session digest: each prompt plus the
+    /// final reply of its turn, verbatim
+    Resume {
+        /// Project key override (default: the current working directory)
+        #[arg(long)]
+        project: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

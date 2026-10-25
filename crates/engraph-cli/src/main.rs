@@ -624,6 +624,20 @@ async fn main() -> Result<()> {
             engraph_retrieve::scope::add_member(&conn, &scope_id, "context_item", &id)?;
             println!("saved {} {id} for {project}", kind.as_str());
         }
+        Cmd::Resume { project } => {
+            // Digests are keyed by the session's raw cwd, which differs from the
+            // canonical key inside a linked worktree, so look under both.
+            let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+            let project = resolve_project(project)?;
+            let current = std::env::var("CLAUDE_SESSION_ID").ok();
+            match engraph_ingest::latest_digest(&conn, &[&project, &cwd], current.as_deref())? {
+                Some(d) => println!(
+                    "# session {} (updated {} UTC)\n\n{}",
+                    d.session_id, d.ts, d.content
+                ),
+                None => println!("no session digest for {project}"),
+            }
+        }
     }
     Ok(())
 }

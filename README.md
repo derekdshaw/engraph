@@ -319,6 +319,9 @@ engraph subgraph run_migrations --json
 engraph recall "auth flow"
 engraph recall --hybrid "auth flow"    # requires --features embeddings
 
+# Print the last session's digest (each prompt + its final reply, verbatim)
+engraph resume
+
 # Ingest a transcript file (one path, or - for stdin)
 engraph ingest ~/.claude/projects/<project>/<session>.jsonl
 

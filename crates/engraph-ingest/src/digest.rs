@@ -18,6 +18,62 @@ pub(crate) const META_ROLE: &str = "meta";
 /// Prefix `extract_text` puts on each thinking block.
 const THINKING_PREFIX: &str = "[thinking] ";
 
+pub struct SessionDigest {
+    pub session_id: String,
+    /// When the digest was last rebuilt (UTC, `YYYY-MM-DD HH:MM:SS`).
+    pub ts: String,
+    pub content: String,
+}
+
+impl SessionDigest {
+    /// The final turn as `(prompt, reply)`.
+    pub fn last_turn(&self) -> Option<(&str, Option<&str>)> {
+        let start = match self.content.rfind("\n\nU: ") {
+            Some(i) => i + 2,
+            None if self.content.starts_with("U: ") => 0,
+            None => return None,
+        };
+        let turn = &self.content[start + 3..];
+        Some(match turn.split_once("\nA: ") {
+            Some((prompt, reply)) => (prompt, Some(reply)),
+            None => (turn, None),
+        })
+    }
+}
+
+/// The most recently rebuilt digest stored under any of `projects`, skipping
+/// `exclude` (the session asking for it).
+pub fn latest_digest(
+    conn: &PooledConn,
+    projects: &[&str],
+    exclude: Option<&str>,
+) -> Result<Option<SessionDigest>> {
+    let mut found = None;
+    for project in projects {
+        let mut stmt = conn.prepare(
+            "SELECT session_id, ts, content FROM context_items \
+             WHERE kind = ?1 AND project = ?2 AND session_id IS NOT ?3 \
+             ORDER BY ts DESC, rowid DESC LIMIT 1",
+        )?;
+        let row = stmt
+            .query_map(rusqlite::params![DIGEST_KIND, project, exclude], |r| {
+                Ok(SessionDigest {
+                    session_id: r.get(0)?,
+                    ts: r.get(1)?,
+                    content: r.get(2)?,
+                })
+            })?
+            .next()
+            .transpose()?;
+        if let Some(d) = row
+            && found.as_ref().is_none_or(|f: &SessionDigest| d.ts > f.ts)
+        {
+            found = Some(d);
+        }
+    }
+    Ok(found)
+}
+
 /// Rebuild the digest for `session_id` from its stored messages. The id is
 /// derived from the session so the rebuild is an explicit DELETE + INSERT:
 /// `context_items_fts` is kept in sync only by insert/delete triggers.
@@ -258,6 +314,22 @@ mod tests {
             d,
             "[compacted]\nSummary two\n\nU: third ask\nA: third reply"
         );
+    }
+
+    #[test]
+    fn last_turn_splits_prompt_and_reply() {
+        let d = |content: &str| SessionDigest {
+            session_id: "s".into(),
+            ts: "t".into(),
+            content: content.into(),
+        };
+        let two = d("U: first\nA: one\n\nU: second ask\nA: line one\nline two");
+        assert_eq!(
+            two.last_turn(),
+            Some(("second ask", Some("line one\nline two")))
+        );
+        assert_eq!(d("U: only ask").last_turn(), Some(("only ask", None)));
+        assert_eq!(d("[compacted]\nSummary").last_turn(), None);
     }
 
     #[test]

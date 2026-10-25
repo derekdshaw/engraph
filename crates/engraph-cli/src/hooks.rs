@@ -71,6 +71,19 @@ pub(crate) fn run_session_start_hook(conn: &db::PooledConn, client: HookClient) 
                 signal_sections.push(format!("- {b}"));
             }
         }
+        // Ahead of decisions: those alone overflow MAX_BRIEF_BYTES, so anything
+        // after them is truncated away. Digests are keyed by the raw cwd.
+        let last = engraph_ingest::latest_digest(conn, &[project, cwd], session_id.as_deref())?;
+        if let Some((d, (prompt, reply))) = last.as_ref().and_then(|d| Some((d, d.last_turn()?))) {
+            signal_sections.push(format!(
+                "## last session ({} UTC; full digest: `engraph resume`)",
+                d.ts
+            ));
+            signal_sections.push(format!("- asked: {}", first_line_clipped(prompt)));
+            if let Some(reply) = reply {
+                signal_sections.push(format!("- replied: {}", first_line_clipped(reply)));
+            }
+        }
         let decisions = recent_decisions(conn, project, 5)?;
         if !decisions.is_empty() {
             signal_sections.push("## decisions".to_string());
@@ -312,6 +325,19 @@ fn transcript_dir(parsed: Option<&serde_json::Value>, cwd: Option<&str>) -> Opti
 }
 
 const TRUNCATE_MARKER: &str = "\n…[truncated]";
+
+/// Max chars of a digest line quoted in the brief's `## last session`.
+const LAST_SESSION_LINE_CHARS: usize = 160;
+
+fn first_line_clipped(s: &str) -> String {
+    let line = s.lines().next().unwrap_or("").trim();
+    if line.chars().count() <= LAST_SESSION_LINE_CHARS {
+        return line.to_string();
+    }
+    let mut out: String = line.chars().take(LAST_SESSION_LINE_CHARS).collect();
+    out.push('…');
+    out
+}
 
 fn truncate_to_bytes(s: &str, max: usize) -> String {
     if s.len() <= max {
