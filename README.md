@@ -344,7 +344,8 @@ engraph run git log -n 20
 engraph run cargo test
 
 # Embeddings (requires --features embeddings)
-engraph init-embeddings          # download model (~130MB)
+engraph init-embeddings          # download model (~130MB) to ~/.cache/engraph/fastembed
+                                 # (override with ENGRAPH_EMBED_CACHE); shared by all projects
 engraph reindex-embeddings       # embed all stored messages
 ```
 

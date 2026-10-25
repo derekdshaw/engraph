@@ -919,6 +919,13 @@ the underlying `TextEmbedding` matches fastembed's `&mut self`
 requirement on `embed`; for our workload (compress-existing sweep +
 ad-hoc recall) the lock contention is negligible.
 
+The model files live in `default_embed_cache_dir()`: `ENGRAPH_EMBED_CACHE`,
+else the platform cache dir + `engraph/fastembed` (`~/.cache/engraph/fastembed`
+on Linux). It is passed explicitly because fastembed's own default is the
+relative `./.fastembed_cache`, which put a full model copy into whichever
+project tree a command ran in. One cache serves every project: the model is
+identical, and the per-project data (vectors) is in the `embeddings` table.
+
 A cloud provider — call it `OpenAIEmbeddingProvider` — would slot in by
 implementing the same trait. No call site changes needed.
 

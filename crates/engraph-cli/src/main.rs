@@ -496,9 +496,10 @@ async fn main() -> Result<()> {
         Cmd::InitEmbeddings => {
             let provider = engraph_core::embedding::default_provider()?;
             println!(
-                "initialized embedding model: {} (dim {})",
+                "initialized embedding model: {} (dim {}) in {}",
                 provider.model_id(),
-                provider.dim()
+                provider.dim(),
+                engraph_core::embedding::default_embed_cache_dir().display()
             );
         }
         #[cfg(feature = "embeddings")]
