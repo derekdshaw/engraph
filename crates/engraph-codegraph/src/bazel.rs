@@ -238,11 +238,26 @@ fn target_display_name(label: &str) -> String {
 }
 
 fn relative_to_repo(abs_file: &str, repo_root: &Path) -> String {
-    let abs_path = Path::new(abs_file);
-    match abs_path.strip_prefix(repo_root) {
-        Ok(p) => p.to_string_lossy().into_owned(),
-        Err(_) => abs_file.to_string(),
+    // Joined with `/` so file_path matches the SCIP-derived entities on every OS.
+    fn slash_join(p: &Path) -> String {
+        p.iter()
+            .map(|s| s.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
     }
+    let abs_path = Path::new(abs_file);
+    if let Ok(p) = abs_path.strip_prefix(repo_root) {
+        return slash_join(p);
+    }
+    // On Windows Bazel reports `C:/users/...` — lowercased root, no `\\?\`
+    // prefix — which never prefix-matches the canonical root; canonicalizing
+    // the file restores the on-disk case and form.
+    if let Ok(canonical) = abs_path.canonicalize()
+        && let Ok(p) = canonical.strip_prefix(repo_root)
+    {
+        return slash_join(p);
+    }
+    abs_file.to_string()
 }
 
 pub(crate) fn bazel_binary() -> Result<PathBuf> {
@@ -347,6 +362,32 @@ mod tests {
         let loc = parse_location("/tmp/work/foo/BUILD.bazel:42:8").unwrap();
         assert_eq!(loc.file, "/tmp/work/foo/BUILD.bazel");
         assert_eq!(loc.line, 42);
+    }
+
+    #[test]
+    fn relative_to_repo_strips_canonical_root_with_forward_slashes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("foo")).unwrap();
+        std::fs::write(dir.path().join("foo/BUILD.bazel"), "").unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        // Bazel reports forward-slash paths without the `\\?\` verbatim
+        // prefix `canonicalize` adds on Windows.
+        let reported = format!("{}/foo/BUILD.bazel", dir.path().display()).replace('\\', "/");
+        assert_eq!(relative_to_repo(&reported, &root), "foo/BUILD.bazel");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn relative_to_repo_tolerates_bazel_lowercased_windows_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("foo")).unwrap();
+        std::fs::write(dir.path().join("foo/BUILD.bazel"), "").unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        // Bazel on Windows lowercases the workspace root (not the drive
+        // letter or the package-relative part).
+        let r = dir.path().display().to_string().replace('\\', "/");
+        let reported = format!("{}{}/foo/BUILD.bazel", &r[..1], r[1..].to_lowercase());
+        assert_eq!(relative_to_repo(&reported, &root), "foo/BUILD.bazel");
     }
 
     #[test]
