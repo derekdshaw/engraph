@@ -96,8 +96,7 @@ pub fn search_hybrid(
             .iter()
             .map(|h| (target_kind_key(&h.target_kind), h.target_id.as_str()))
             .collect();
-        let placeholders = std::iter::repeat("(?,?)")
-            .take(pairs.len())
+        let placeholders = std::iter::repeat_n("(?,?)", pairs.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
