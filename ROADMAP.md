@@ -40,11 +40,11 @@ under its feature section, not here.
 
 ## `/resume` and `/save` skills
 
-**What:** the writer (`engraph save`) and the SessionStart `## decisions` surfacing now ship (alongside `engraph remember` and `engraph bug`). What remains is the optional skill UX: a `/save` shortcut and a `/resume` (thin `engraph resume`) that queries the latest decisions and pretty-prints them mid-session.
+**What:** the writer (`engraph save`), the SessionStart `## decisions` and `## last session` surfacing, and `engraph resume` (prints the last session's digest) now ship. What remains is the optional skill UX: a `/save` shortcut and a `/resume` skill wrapping `engraph resume`.
 
-**Why deferred:** the SessionStart brief already auto-surfaces saved decisions, covering ~80% of this. `/resume` matters when you want to pull them up explicitly mid-session.
+**Why deferred:** the SessionStart brief already auto-surfaces saved decisions and the last session's final turn, and `engraph resume` is one Bash call away.
 
-**Effort:** ~0.5 day (skill markdown + a thin `engraph resume` reader).
+**Effort:** ~0.5 day (skill markdown).
 
 ---
 

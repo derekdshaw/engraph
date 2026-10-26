@@ -6,6 +6,21 @@
 //! `default_provider()` returns `None`.
 
 use crate::Result;
+use std::path::PathBuf;
+
+/// Where the embedding model is downloaded to and loaded from:
+/// `ENGRAPH_EMBED_CACHE`, else the platform cache dir (`~/.cache` on Linux,
+/// honoring `XDG_CACHE_HOME`) + `engraph/fastembed`. One cache serves every
+/// project — the model is identical, and per-project vectors live in the DB.
+/// Left unset, fastembed uses `./.fastembed_cache`, dropping a ~130MB copy into
+/// whichever project tree the command ran in.
+pub fn default_embed_cache_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("ENGRAPH_EMBED_CACHE") {
+        return PathBuf::from(p);
+    }
+    let base = dirs::cache_dir().unwrap_or_else(|| dirs::home_dir().expect("HOME").join(".cache"));
+    base.join("engraph").join("fastembed")
+}
 
 pub trait EmbeddingProvider: Send + Sync {
     /// Embed a single text into a fixed-dimension vector.
@@ -49,7 +64,8 @@ pub mod fastembed_provider {
     impl FastEmbedProvider {
         /// bge-small-en-v1.5 — 33M params, 384 dimensions, ~130MB on disk.
         pub fn bge_small_en() -> Result<Self> {
-            let opts = InitOptions::new(EmbeddingModel::BGESmallENV15);
+            let opts = InitOptions::new(EmbeddingModel::BGESmallENV15)
+                .with_cache_dir(super::default_embed_cache_dir());
             let model = TextEmbedding::try_new(opts)
                 .map_err(|e| Error::Config(format!("fastembed init: {e}")))?;
             Ok(Self {
@@ -102,6 +118,17 @@ mod tests {
         let b = vec![0.0, 1.0];
         assert!(cosine(&a, &a) > 0.999);
         assert!(cosine(&a, &b).abs() < 0.001);
+    }
+
+    #[test]
+    fn embed_cache_is_absolute_and_outside_the_cwd() {
+        if std::env::var_os("ENGRAPH_EMBED_CACHE").is_some() {
+            return;
+        }
+        let dir = default_embed_cache_dir();
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert!(dir.ends_with("engraph/fastembed"), "{}", dir.display());
+        assert!(!dir.starts_with(std::env::current_dir().unwrap()));
     }
 
     #[test]

@@ -477,11 +477,8 @@ async fn main() -> Result<()> {
         Cmd::Ingest { path } => {
             let stats = engraph_ingest::ingest_file(&conn, &path)?;
             println!(
-                "ingested {} messages ({} compressed, {} bytes read, {}ms)",
-                stats.messages_inserted,
-                stats.messages_compressed,
-                stats.bytes_read,
-                stats.elapsed_ms
+                "ingested {} messages ({} bytes read, {}ms)",
+                stats.messages_inserted, stats.bytes_read, stats.elapsed_ms
             );
         }
         Cmd::CompressExisting { batch } => {
@@ -499,9 +496,10 @@ async fn main() -> Result<()> {
         Cmd::InitEmbeddings => {
             let provider = engraph_core::embedding::default_provider()?;
             println!(
-                "initialized embedding model: {} (dim {})",
+                "initialized embedding model: {} (dim {}) in {}",
                 provider.model_id(),
-                provider.dim()
+                provider.dim(),
+                engraph_core::embedding::default_embed_cache_dir().display()
             );
         }
         #[cfg(feature = "embeddings")]
@@ -626,6 +624,20 @@ async fn main() -> Result<()> {
             let scope_id = engraph_retrieve::scope::ensure_project_scope(&conn, &project)?;
             engraph_retrieve::scope::add_member(&conn, &scope_id, "context_item", &id)?;
             println!("saved {} {id} for {project}", kind.as_str());
+        }
+        Cmd::Resume { project } => {
+            // Digests are keyed by the session's raw cwd, which differs from the
+            // canonical key inside a linked worktree, so look under both.
+            let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+            let project = resolve_project(project)?;
+            let current = std::env::var("CLAUDE_SESSION_ID").ok();
+            match engraph_ingest::latest_digest(&conn, &[&project, &cwd], current.as_deref())? {
+                Some(d) => println!(
+                    "# session {} (updated {} UTC)\n\n{}",
+                    d.session_id, d.ts, d.content
+                ),
+                None => println!("no session digest for {project}"),
+            }
         }
     }
     Ok(())

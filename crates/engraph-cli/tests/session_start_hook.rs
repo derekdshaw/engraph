@@ -266,3 +266,38 @@ fn codex_catch_up_recurses_filters_project_and_is_idempotent() {
     assert!(!body.contains("wrong project"));
     assert!(!body.contains("nested project"));
 }
+
+#[test]
+fn brief_shows_the_previous_sessions_last_turn() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("sh.db");
+    let codex_home = dir.path().join("codex-home");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    write_codex_rollout(
+        &codex_home.join("sessions/2026/06/29/prev.jsonl"),
+        "cx-prev",
+        &project,
+        "wire the digest into the brief",
+        "Done.\nSecond line stays out.",
+    );
+    let envs = [("CODEX_HOME", codex_home.as_path())];
+
+    let stdin = serde_json::json!({"cwd": project, "session_id": "cx-next"}).to_string();
+    let out = run_hook_with_args_and_env(&db, &["--client", "codex"], &stdin, &envs);
+    let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    let body = v
+        .pointer("/systemMessage")
+        .and_then(|c| c.as_str())
+        .unwrap();
+    assert!(body.contains("## last session ("), "{body}");
+    assert!(body.contains("full digest: `engraph resume`"));
+    assert!(body.contains("- asked: wire the digest into the brief"));
+    assert!(body.contains("- replied: Done."));
+    assert!(!body.contains("Second line stays out."));
+
+    // A session never sees its own digest as the "last" one.
+    let stdin = serde_json::json!({"cwd": project, "session_id": "cx-prev"}).to_string();
+    let out = run_hook_with_args_and_env(&db, &["--client", "codex"], &stdin, &envs);
+    assert!(!out.contains("## last session"), "{out}");
+}

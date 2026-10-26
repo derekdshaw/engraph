@@ -35,7 +35,7 @@ raw text. Keep the graph fresh with `engraph index .`.
 | `engraph-core` | SQLite pool + schema/migrations (`db`), `budget`, `telemetry`/events, `memory` (do_not_repeat/bugs/context_items), `tokens` (tiktoken), feature-gated `embedding` |
 | `engraph-compress` | Deterministic output compression; per-command filters in `filters/` (one fn + a `filters::pick` arm each); `preprocess`/`rank`/`sentinel`/`brevity` |
 | `engraph-retrieve` | Recall: FTS5 (`lib`) + `hybrid` embeddings; project `scope`s |
-| `engraph-ingest` | JSONL transcript → SQLite. `ingest` (parse + incremental offset/rotation handling), `sweep` (compress existing rows), `common` (sha256 + threshold) |
+| `engraph-ingest` | JSONL transcript → SQLite. `ingest` (parse + incremental offset/rotation handling), `sweep` (compress existing rows), `digest` (per-session `session_digest` context item), `common` (sha256 + threshold) |
 | `engraph-codegraph` | SCIP indexing (`index`, `scip_loader`, `driver`, `bazel`, `bazel_symbols`), `subgraph` neighborhoods, `relation_kind` |
 | `engraph-cli` | The `engraph` binary. `main` (dispatch), `cli` (clap defs), `rewrite` (bash-rewrite parser), `redirect` (grep→subgraph), `hooks` (5 lifecycle hooks + brief + catch-up ingest), `output` (tables/plans) |
 

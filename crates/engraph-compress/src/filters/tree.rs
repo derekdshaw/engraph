@@ -1,3 +1,4 @@
+use super::util::with_stderr_on_failure;
 use super::{FilterCtx, FilterOutput};
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -29,7 +30,7 @@ pub fn tree(ctx: &FilterCtx<'_>) -> FilterOutput {
         ));
     }
     FilterOutput {
-        text: out,
+        text: with_stderr_on_failure(ctx, out),
         filter_id: "tree",
     }
 }
@@ -38,7 +39,7 @@ pub fn tree(ctx: &FilterCtx<'_>) -> FilterOutput {
 /// so a deep prefix is printed once instead of on every sibling.
 pub fn fd(ctx: &FilterCtx<'_>) -> FilterOutput {
     FilterOutput {
-        text: group_paths_by_dir(ctx.stdout, MAX_LINES),
+        text: with_stderr_on_failure(ctx, group_paths_by_dir(ctx.stdout, MAX_LINES)),
         filter_id: "fd",
     }
 }
@@ -46,7 +47,7 @@ pub fn fd(ctx: &FilterCtx<'_>) -> FilterOutput {
 /// `find` — same flat path list as `fd` (often `./`-prefixed). Group by directory.
 pub fn find_cmd(ctx: &FilterCtx<'_>) -> FilterOutput {
     FilterOutput {
-        text: group_paths_by_dir(ctx.stdout, MAX_LINES),
+        text: with_stderr_on_failure(ctx, group_paths_by_dir(ctx.stdout, MAX_LINES)),
         filter_id: "find",
     }
 }
@@ -55,7 +56,7 @@ pub fn find_cmd(ctx: &FilterCtx<'_>) -> FilterOutput {
 /// cap the line count (grouping would collapse everything under one `./`).
 pub fn ls(ctx: &FilterCtx<'_>) -> FilterOutput {
     FilterOutput {
-        text: cap_lines(ctx.stdout, MAX_LINES, "paths"),
+        text: with_stderr_on_failure(ctx, cap_lines(ctx.stdout, MAX_LINES, "paths")),
         filter_id: "ls",
     }
 }
@@ -83,7 +84,8 @@ fn group_paths_by_dir(text: &str, max: usize) -> String {
         if line.is_empty() {
             continue;
         }
-        match line.rfind('/') {
+        // A directory entry (`fd`'s trailing `/`) is filed under its parent.
+        match line.strip_suffix('/').unwrap_or(line).rfind('/') {
             Some(i) => {
                 let dir = &line[..=i]; // keep the trailing slash
                 let file = &line[i + 1..];
@@ -184,6 +186,15 @@ mod tests {
         let o = fd(&ctx(stdout));
         assert_eq!(o.text, "src/filters/ (3): a.rs, b.rs, c.rs\nsrc/lib.rs\n");
         assert_eq!(o.filter_id, "fd");
+    }
+
+    #[test]
+    fn fd_directory_entries_group_under_their_parent() {
+        // fd prints directories with a trailing slash; the entry belongs to the
+        // parent, not to a group of its own with an empty file name.
+        let stdout = "/p/s/\n/p/s/a.jsonl\n/p/s/b.jsonl\nsub/\n";
+        let o = fd(&ctx(stdout));
+        assert_eq!(o.text, "/p/s/\n/p/s/ (2): a.jsonl, b.jsonl\nsub/\n");
     }
 
     #[test]

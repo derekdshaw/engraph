@@ -1,9 +1,9 @@
-use super::util::{combine, tail_lines, truncate_lines};
+use super::util::{combine, tail_lines, truncate_lines, with_stderr_on_failure};
 use super::{FilterCtx, FilterOutput};
 
 pub fn ps(ctx: &FilterCtx<'_>) -> FilterOutput {
     FilterOutput {
-        text: truncate_lines(ctx.stdout, 100, "rows"),
+        text: with_stderr_on_failure(ctx, truncate_lines(ctx.stdout, 100, "rows")),
         filter_id: "docker_ps",
     }
 }

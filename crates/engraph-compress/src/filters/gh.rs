@@ -1,9 +1,9 @@
-use super::util::truncate_lines;
+use super::util::{truncate_lines, with_stderr_on_failure};
 use super::{FilterCtx, FilterOutput};
 
 pub fn list(ctx: &FilterCtx<'_>) -> FilterOutput {
     FilterOutput {
-        text: truncate_lines(ctx.stdout, 50, "rows"),
+        text: with_stderr_on_failure(ctx, truncate_lines(ctx.stdout, 50, "rows")),
         filter_id: "gh_list",
     }
 }
@@ -30,7 +30,7 @@ pub fn view(ctx: &FilterCtx<'_>) -> FilterOutput {
         out.push_str(&format!("[engraph: hid {} comments]\n", comments_seen - 3));
     }
     FilterOutput {
-        text: out,
+        text: with_stderr_on_failure(ctx, out),
         filter_id: "gh_view",
     }
 }

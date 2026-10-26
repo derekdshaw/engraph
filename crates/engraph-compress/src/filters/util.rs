@@ -82,6 +82,25 @@ pub fn drop_matching(text: &str, drop_re: &Regex) -> (String, u32) {
     (out, dropped)
 }
 
+/// Cap on stderr lines appended by `with_stderr_on_failure`.
+const FAILURE_STDERR_LINES: usize = 50;
+
+/// For filters that shape stdout only: append the command's stderr when it
+/// failed. `engraph run` prints nothing but the filtered text, so without this
+/// the error (`fatal: not a git repository`, `No such file`) is lost. A
+/// successful run's stderr stays dropped, so success output is unchanged.
+pub fn with_stderr_on_failure(ctx: &super::FilterCtx<'_>, text: String) -> String {
+    if ctx.exit_code == 0 || ctx.stderr.trim().is_empty() {
+        return text;
+    }
+    let stderr = truncate_lines(
+        &strip_ansi(ctx.stderr),
+        FAILURE_STDERR_LINES,
+        "stderr lines",
+    );
+    combine(&text, &stderr)
+}
+
 /// Concatenate stdout + stderr with a separator if both are non-empty.
 pub fn combine(stdout: &str, stderr: &str) -> String {
     if stdout.is_empty() {

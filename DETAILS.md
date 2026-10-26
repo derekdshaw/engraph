@@ -47,7 +47,7 @@ crates/
 ├── engraph-core/          schema, db pool, telemetry, budget, tokens, embedding trait
 ├── engraph-compress/      compressor + per-command filters (git, cargo, npm, …)
 ├── engraph-retrieve/      FTS+scoping+KG, hybrid (feature-gated)
-├── engraph-ingest/        JSONL → SQLite, rotation guard, compress-existing sweep
+├── engraph-ingest/        JSONL → SQLite, rotation guard, compress-existing sweep, session digests
 ├── engraph-codegraph/     SCIP ingest → entities/relations, subgraph formatter, Bazel
 └── engraph-cli/           the `engraph` binary (subcommands + hooks)
 ```
@@ -269,6 +269,11 @@ Why this exact shape:
 `actually`, `basically`, `literally`, `simply`, `quite`, `rather`,
 `somewhat`, `perhaps`, `maybe`).
 
+Words are deleted in place and every other byte is copied verbatim. A word
+goes only when it stands alone in prose (after whitespace or at the start,
+followed by a space, outside backticks), so identifiers such as `foo(a, b)`
+and `a.b`, flags such as `--from-stdin`, and code spans survive.
+
 Opt-in per call, never per-kind default. Articles carry meaning in prose
 ("the foo" vs "a foo" is sometimes the whole point); we only apply this
 to inputs where verbatim grammar isn't preserved anyway, like noisy tool
@@ -325,6 +330,13 @@ arm to enforce this (`crates/engraph-compress/tests/filter_ratios.rs::picker_and
 The mismatch we paid for once was `cargo check` (picker said
 `cargo_check`, but the underlying `cargo::build` stamped `cargo_build`);
 the v2.1 fix introduced a thin `cargo::check` wrapper.
+
+`engraph run` prints only `FilterOutput::text`, so a filter that shapes
+stdout alone must still surface a failure's stderr. Filters that don't fold
+stderr in themselves wrap their text in `util::with_stderr_on_failure`, which
+appends it (capped at 50 lines) only when `exit_code != 0`; success output is
+unchanged. `tests/stderr_on_failure.rs` runs every `pick` arm with a failing
+stderr and fails if any filter drops it — add new arms there.
 
 ### 4.2 Filter taxonomy
 
@@ -511,6 +523,12 @@ the decision tree to Passthrough: any rewrite that re-shelled the
 command would terminate the heredoc body at the wrong place or pull
 the body lines into argv.
 
+`has_shell_expansion` uses the same loop to find words the shell would
+expand: `$` or a backtick outside single quotes, or an unquoted `*`, `?`,
+`[`, `{`, or word-leading `~`. `build_wrapped` re-quotes every argv word, so
+wrapping `fd . ~/x` or `rg foo src/*.rs` would hand the tool the literal
+`'~/x'` / `'src/*.rs'`. Any segment with an expansion passes through instead.
+
 `is_env_assignment` is a tight identifier-equals-anything
 check matching POSIX variable-name rules. Its only caller is the
 prefix-peeling logic in `strip_command_prefix`.
@@ -690,7 +708,9 @@ statements per message → 1 fsync for the whole file).
 `compress_existing(conn, batch)` (`engraph-ingest`) walks
 `messages` and `context_items`, compresses any row whose
 `content_compressed = 0` and whose token count exceeds the threshold,
-and writes the compressed text back. Idempotent: the sentinel fast-path
+and writes the compressed text back. Session digests and `compact_summary`
+messages are never touched, since they are already dense and kept
+verbatim. Idempotent: the sentinel fast-path
 makes a re-run a no-op even if `content_compressed` wasn't updated;
 rows are also marked `content_compressed = 1` to skip re-tokenization
 on the next sweep.
@@ -711,6 +731,32 @@ anchored to the same message after compression.
 Tested by `compress_existing_keeps_fts_pointed_at_original` which seeds
 a distinctive phrase, runs the sweep, and asserts FTS recall still
 hits the original phrase against the compressed message.
+
+### 6.5 Session digest
+
+After each `ingest_file` pass, every session that gained a row gets its
+digest rebuilt (`digest.rs`): one `session_digest` context item holding each
+real user prompt plus the final visible assistant reply of that turn, as
+`U: …` / `A: …` pairs. Selection is structural — no model, no prose rewriting
+— so the text is verbatim and the build is deterministic. On real sessions it
+runs 17–33% of the raw message tokens; caveman brevity manages ~94%.
+
+- **Prompts**: leading harness tag blocks (`<local-command-caveat>`,
+  `<command-name>`, `<task-notification>`, Codex `<environment_context>`, …)
+  and `[Request interrupted by user…` lines are stripped; a row with nothing
+  left, a skill body, or a sentinel-compressed row is not a turn. Claude Code
+  `isMeta` lines (expanded slash-command prompts, permission notices) are
+  ingested with role `meta` and never count. A slash command renders as typed
+  (`/name args`) and is dropped when no reply follows (local commands).
+- **Replies**: text before the first `[thinking] ` block; thinking never counts.
+- **Compaction**: Claude Code's `isCompactSummary` line is ingested with role
+  `compact_summary`. The digest starts with the last such summary verbatim
+  (`[compacted]` header) and only renders turns after it.
+
+The row id is `digest-<session_id>`, rebuilt by explicit DELETE + INSERT inside
+the ingest transaction so the FTS insert/delete triggers stay in sync. Digests
+are excluded from `recall`'s context-item search, since they only repeat
+message text.
 
 ---
 
@@ -762,6 +808,12 @@ FTS5's `bm25(messages_fts)` returns a *negative-is-better* number
 (SQLite convention so an `ORDER BY rank` ascending matches relevance
 descending). `Hit::score` flips the sign so all consumers can sort
 descending uniformly.
+
+`Hit::preview` for message and context-item hits is FTS5's
+`snippet(…, 32)`: a ~32-token window around the match, still capped at 240
+chars. A head-of-row cut missed matches deep in long messages. Rows rewritten
+by the `compress-existing` sweep snippet from their compressed text, which
+may no longer contain the matched term, so FTS5 falls back to the row head.
 
 ### 7.5 The hybrid path (Reciprocal Rank Fusion)
 
@@ -867,6 +919,13 @@ the underlying `TextEmbedding` matches fastembed's `&mut self`
 requirement on `embed`; for our workload (compress-existing sweep +
 ad-hoc recall) the lock contention is negligible.
 
+The model files live in `default_embed_cache_dir()`: `ENGRAPH_EMBED_CACHE`,
+else the platform cache dir + `engraph/fastembed` (`~/.cache/engraph/fastembed`
+on Linux). It is passed explicitly because fastembed's own default is the
+relative `./.fastembed_cache`, which put a full model copy into whichever
+project tree a command ran in. One cache serves every project: the model is
+identical, and the per-project data (vectors) is in the `embeddings` table.
+
 A cloud provider — call it `OpenAIEmbeddingProvider` — would slot in by
 implementing the same trait. No call site changes needed.
 
@@ -899,6 +958,11 @@ For the resolved `cwd`:
 
 - `## do-not-repeat` — top 5 rules from `do_not_repeat WHERE project = ?`.
 - `## open bugs` — top 5 unresolved rows from `bugs`.
+- `## last session` — from the most recently rebuilt `session_digest` (§6.5)
+  of another session, under either the canonical key or the raw `cwd`: its
+  timestamp, then the first line (≤160 chars) of the final prompt and reply.
+  It sits before decisions because those alone overflow the cap. The full
+  digest is printed on demand by `engraph resume`.
 - `## decisions` — top 5 `context_items` rows for the project whose `kind` is
   `decision`/`architecture`/`convention`/`performance`.
 

@@ -128,7 +128,7 @@ wrapped_cmd  output_filter      90      31090      22073       9017   29.0
 TOTAL_SAVED                                                   14753
 ```
 
-Savings come from three sources, partitioned by the `by source` table: **command** output compression (`wrapped_cmd`), **codegraph** retrieval (`subgraph` replacing a file-read+grep loop), and **memory** (message compression at ingest/sweep). Save% is computed only over these savings-bearing rows; rows where input/output carry no savings semantic — `recall`, `hook`, and `index` (which records millions of input tokens against 0 output) — show `-` and never inflate the totals. Flags add detail without changing the underlying numbers:
+Savings come from three sources, partitioned by the `by source` table: **command** output compression (`wrapped_cmd`), **codegraph** retrieval (`subgraph` replacing a file-read+grep loop), and **memory** (message compression by the `compress-existing` sweep). Save% is computed only over these savings-bearing rows; rows where input/output carry no savings semantic — `recall`, `hook`, and `index` (which records millions of input tokens against 0 output) — show `-` and never inflate the totals. Flags add detail without changing the underlying numbers:
 
 | Flag | Report |
 |---|---|
@@ -319,6 +319,9 @@ engraph subgraph run_migrations --json
 engraph recall "auth flow"
 engraph recall --hybrid "auth flow"    # requires --features embeddings
 
+# Print the last session's digest (each prompt + its final reply, verbatim)
+engraph resume
+
 # Ingest a transcript file (one path, or - for stdin)
 engraph ingest ~/.claude/projects/<project>/<session>.jsonl
 
@@ -341,7 +344,8 @@ engraph run git log -n 20
 engraph run cargo test
 
 # Embeddings (requires --features embeddings)
-engraph init-embeddings          # download model (~130MB)
+engraph init-embeddings          # download model (~130MB) to ~/.cache/engraph/fastembed
+                                 # (override with ENGRAPH_EMBED_CACHE); shared by all projects
 engraph reindex-embeddings       # embed all stored messages
 ```
 

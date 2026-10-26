@@ -1,15 +1,19 @@
 //! Claude Code / Codex JSONL transcript → SQLite ingestion.
 //!
 //! Parses the subset of events that carry textual content (user / assistant
-//! messages), populates `sessions` and `messages`, compresses oversized
-//! messages via `engraph-compress` during ingest, derives a project scope from
-//! `cwd`, and tracks file offsets in `ingestion_log` for incremental re-runs.
+//! messages), stores them verbatim in `sessions` and `messages`, derives a
+//! project scope from `cwd`, and tracks file offsets in `ingestion_log` for
+//! incremental re-runs. Oversized rows are compressed only by the explicit
+//! `compress_existing` sweep.
+//! Each session that gains rows gets its `session_digest` context item rebuilt.
 
 mod common;
+mod digest;
 mod ingest;
 mod sweep;
 
 pub use common::COMPRESS_THRESHOLD_TOKENS;
+pub use digest::{SessionDigest, latest_digest};
 pub use ingest::{IngestStats, ingest_file};
 pub use sweep::{SweepStats, compress_existing};
 #[cfg(test)]
@@ -206,6 +210,41 @@ mod tests {
         let stats2 = compress_existing(&conn, 100).unwrap();
         assert_eq!(stats2.rows_scanned, 0);
         assert_eq!(stats2.rows_compressed, 0);
+    }
+
+    #[test]
+    fn compress_existing_skips_digests_and_compaction_summaries() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("skip.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let large = "The digest keeps every prompt and reply verbatim for later.\n".repeat(400);
+        conn.execute(
+            "INSERT INTO sessions (id, project, cwd, started_at) VALUES ('s', '/p', '/p', 't')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, ts) \
+             VALUES ('m','s','compact_summary',?1,'t')",
+            [&large],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO context_items (id, session_id, kind, content) \
+             VALUES ('digest-s','s','session_digest',?1)",
+            [&large],
+        )
+        .unwrap();
+        let stats = compress_existing(&conn, 100).unwrap();
+        assert_eq!(stats.rows_compressed, 0);
+        let kept: String = conn
+            .query_row(
+                "SELECT content FROM context_items WHERE id = 'digest-s'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, large);
     }
 
     #[test]
@@ -409,5 +448,167 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    fn digests(conn: &engraph_core::db::PooledConn) -> Vec<(String, String)> {
+        let mut stmt = conn
+            .prepare("SELECT session_id, content FROM context_items WHERE kind = 'session_digest'")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    fn fts_hits(conn: &engraph_core::db::PooledConn, term: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM context_items_fts WHERE context_items_fts MATCH ?1",
+            [term],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn digest_rebuilds_in_place_on_append() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("d.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let jp = dir.path().join("t.jsonl");
+        write_jsonl(
+            &jp,
+            &[
+                r#"{"type":"user","sessionId":"s1","cwd":"/p","timestamp":"t1","uuid":"u1","message":{"role":"user","content":"why zebra"}}"#,
+                r#"{"type":"assistant","sessionId":"s1","cwd":"/p","timestamp":"t2","uuid":"a1","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hidden"}]}}"#,
+                r#"{"type":"assistant","sessionId":"s1","cwd":"/p","timestamp":"t3","uuid":"a2","message":{"role":"assistant","content":[{"type":"text","text":"interim walrus"}]}}"#,
+            ],
+        );
+        ingest_file(&conn, &jp).unwrap();
+        assert_eq!(
+            digests(&conn),
+            vec![(
+                "s1".to_string(),
+                "U: why zebra\nA: interim walrus".to_string()
+            )]
+        );
+
+        let mut f = std::fs::OpenOptions::new().append(true).open(&jp).unwrap();
+        let line = r#"{"type":"assistant","sessionId":"s1","cwd":"/p","timestamp":"t4","uuid":"a3","message":{"role":"assistant","content":[{"type":"text","text":"final answer"}]}}"#;
+        writeln!(f, "{line}").unwrap();
+        drop(f);
+        ingest_file(&conn, &jp).unwrap();
+
+        assert_eq!(
+            digests(&conn),
+            vec![(
+                "s1".to_string(),
+                "U: why zebra\nA: final answer".to_string()
+            )]
+        );
+        // The superseded digest must be gone from the FTS index, not just the table.
+        assert_eq!(fts_hits(&conn, "walrus"), 0);
+        assert_eq!(fts_hits(&conn, "final"), 1);
+        let members: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM scope_members WHERE target_id = 'digest-s1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(members, 1);
+
+        // A replay that inserts nothing leaves the digest untouched.
+        conn.execute("DELETE FROM ingestion_log", []).unwrap();
+        ingest_file(&conn, &jp).unwrap();
+        assert_eq!(digests(&conn).len(), 1);
+    }
+
+    #[test]
+    fn compact_summary_gets_its_own_role_and_leads_the_digest() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("c.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let jp = dir.path().join("t.jsonl");
+        write_jsonl(
+            &jp,
+            &[
+                r#"{"type":"user","sessionId":"s1","cwd":"/p","timestamp":"t1","uuid":"u1","message":{"role":"user","content":"before compaction"}}"#,
+                r#"{"type":"system","subtype":"compact_boundary","sessionId":"s1","content":"Conversation compacted","timestamp":"t2","uuid":"b1"}"#,
+                r#"{"type":"user","sessionId":"s1","cwd":"/p","timestamp":"t3","uuid":"u2","isCompactSummary":true,"message":{"role":"user","content":"Summary of the earlier work."}}"#,
+                r#"{"type":"user","sessionId":"s1","cwd":"/p","timestamp":"t4","uuid":"u3","message":{"role":"user","content":"next ask"}}"#,
+                r#"{"type":"user","sessionId":"s1","cwd":"/p","timestamp":"t4","uuid":"m1","isMeta":true,"message":{"role":"user","content":"Permission granted for: Run shell command."}}"#,
+                r#"{"type":"assistant","sessionId":"s1","cwd":"/p","timestamp":"t5","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}"#,
+            ],
+        );
+        ingest_file(&conn, &jp).unwrap();
+        let role = |id: &str| -> String {
+            conn.query_row("SELECT role FROM messages WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(role("u2"), "compact_summary");
+        assert_eq!(role("m1"), "meta");
+        assert_eq!(
+            digests(&conn)[0].1,
+            "[compacted]\nSummary of the earlier work.\n\nU: next ask\nA: done"
+        );
+    }
+
+    #[test]
+    fn codex_rollout_gets_a_digest() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("cx.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let jp = dir.path().join("rollout.jsonl");
+        write_jsonl(
+            &jp,
+            &[
+                r#"{"timestamp":"2025-09-24T18:20:50.392Z","type":"session_meta","payload":{"id":"cx1","cwd":"/proj"}}"#,
+                r#"{"timestamp":"2025-09-24T18:21:48.721Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n<cwd>/proj</cwd>\n</environment_context>"}]}}"#,
+                r#"{"timestamp":"2025-09-24T18:21:49.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"examine the file"}]}}"#,
+                r#"{"timestamp":"2025-09-24T18:22:08.851Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"nodes are heap-allocated"}]}}"#,
+            ],
+        );
+        ingest_file(&conn, &jp).unwrap();
+        assert_eq!(
+            digests(&conn),
+            vec![(
+                "cx1".to_string(),
+                "U: examine the file\nA: nodes are heap-allocated".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn latest_digest_picks_newest_for_project_and_skips_the_asker() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("l.db")).unwrap();
+        let conn = pool.get().unwrap();
+        for (sid, project, ts) in [
+            ("old", "/main", "2026-10-01 10:00:00"),
+            ("wt", "/main-wt", "2026-10-02 10:00:00"),
+            ("cur", "/main", "2026-10-03 10:00:00"),
+            ("other", "/elsewhere", "2026-10-04 10:00:00"),
+        ] {
+            conn.execute(
+                "INSERT INTO sessions (id, project, cwd, started_at) VALUES (?1, ?2, ?2, 't')",
+                [sid, project],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO context_items (id, session_id, kind, content, project, ts) \
+                 VALUES (?1, ?1, 'session_digest', ?2, ?3, ?4)",
+                [sid, &format!("U: from {sid}"), project, ts],
+            )
+            .unwrap();
+        }
+        let d = latest_digest(&conn, &["/main", "/main-wt"], Some("cur"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.session_id, "wt");
+        let d = latest_digest(&conn, &["/main"], None).unwrap().unwrap();
+        assert_eq!(d.session_id, "cur");
+        assert!(latest_digest(&conn, &["/none"], None).unwrap().is_none());
     }
 }

@@ -49,6 +49,36 @@ fn ingest_then_recall_finds_known_phrase() {
 }
 
 #[test]
+fn recall_preview_centers_on_a_late_match() {
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("snip.db")).unwrap();
+    let conn = pool.get().unwrap();
+
+    let filler = "lorem ipsum dolor sit amet ".repeat(30);
+    let jp = dir.path().join("t.jsonl");
+    let mut f = std::fs::File::create(&jp).unwrap();
+    write!(
+        f,
+        "{}",
+        jsonl_with_phrase(&format!("{filler}the quuxfrobnicate fix"), "/proj", "s1")
+    )
+    .unwrap();
+    drop(f);
+
+    ingest_file(&conn, &jp).unwrap();
+
+    let hits = search(&conn, &Query::new("quuxfrobnicate")).unwrap();
+    assert_eq!(hits.len(), 1);
+    // The match sits ~800 chars in, past the old head-of-message 240-char cut.
+    assert!(
+        hits[0].preview.contains("quuxfrobnicate"),
+        "{}",
+        hits[0].preview
+    );
+    assert!(hits[0].preview.chars().count() <= 241);
+}
+
+#[test]
 fn scoped_query_restricts_to_project() {
     let dir = tempdir().unwrap();
     let pool = open_pool(&dir.path().join("scope.db")).unwrap();
