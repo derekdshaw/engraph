@@ -75,6 +75,12 @@ fn first_ident(s: &str) -> Option<&str> {
 /// those still grep normally.
 fn extract_symbol(pattern: &str) -> Option<String> {
     let p = pattern.trim();
+    // A regex metachar is the documented "I really want grep" bypass, so it
+    // opts out in every shape — the keyword shape below would otherwise read
+    // `fn foo\b` as `foo`. Parens stay allowed for the call shape.
+    if p.contains(['\\', '.', '*', '+', '?', '[', ']', '{', '}', '^', '$', '|']) {
+        return None;
+    }
     if is_bareword(p) {
         return Some(p.to_string());
     }
@@ -231,6 +237,10 @@ mod tests {
         // Regex / metachars aren't barewords.
         assert_eq!(extract_symbol("parse.*"), None);
         assert_eq!(extract_symbol("^foo$"), None);
+        // The documented bypass (a regex metachar) must work in every shape.
+        assert_eq!(extract_symbol("fn ids_by_project\\b"), None);
+        assert_eq!(extract_symbol("pub fn parse.*"), None);
+        assert_eq!(extract_symbol("struct Foo\\s"), None);
         // Too short.
         assert_eq!(extract_symbol("id"), None);
         assert_eq!(extract_symbol("fn x"), None);
