@@ -6,29 +6,34 @@ use engraph_core::db;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-/// `git rev-parse HEAD` of the checkout at `repo`; `None` outside a git repo.
-fn git_head(repo: &Path) -> Option<String> {
+/// Trimmed stdout of `git -C repo <args>`; `None` on failure or empty output.
+fn git_stdout(repo: &Path, args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["rev-parse", "HEAD"])
+        .args(args)
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    let sha = String::from_utf8(out.stdout).ok()?;
-    let sha = sha.trim();
-    (!sha.is_empty()).then(|| sha.to_string())
+    let s = String::from_utf8(out.stdout).ok()?;
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_string())
 }
 
-/// Record `repo`'s HEAD as the commit `project` was just indexed at.
+/// Record the commit `project` was just indexed from. Indexers read the working
+/// tree, so with uncommitted edits HEAD would flag the very files just indexed;
+/// `git stash create` snapshots the tracked working tree as a commit without
+/// touching the stash list or the files (empty output when the tree is clean).
 pub(crate) fn record_index_commit(
     conn: &db::PooledConn,
     project: &str,
     repo: &Path,
 ) -> anyhow::Result<()> {
-    engraph_codegraph::record_indexed_commit(conn, project, git_head(repo).as_deref())
+    let commit =
+        git_stdout(repo, &["stash", "create"]).or_else(|| git_stdout(repo, &["rev-parse", "HEAD"]));
+    engraph_codegraph::record_indexed_commit(conn, project, commit.as_deref())
 }
 
 /// The subset of `files` (repo-relative, indexed under `project`) whose copy in

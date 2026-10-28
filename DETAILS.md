@@ -591,11 +591,16 @@ Shared with the native `PreToolUse(Grep)` path:
   changed. `engraph subgraph` runs the same check over every file in
   the neighborhood and prints a "Changed since the index" note naming
   them above the markdown (not in `--json`).
+  The recorded commit is `git stash create` when the tree is dirty, so
+  files indexed from uncommitted edits aren't flagged. Nothing
+  references that object, so `git gc` prunes it after `gc.pruneExpire`
+  (2 weeks by default). After that the diff fails and every file counts
+  as changed until the next `engraph index`.
 
 The gate matters: a permissive heuristic would deny on common
 identifiers like `new` / `run` / `parse` (any of which has dozens of
 entities in any real codebase) and Claude would burn turns hitting
-deny → subgraph → ambiguous → retry. The 1–3 cap correlates the
+deny → subgraph → ambiguous → retry. The 1–8 cap correlates the
 redirect with cases where subgraph actually has a useful neighborhood
 to show.
 
@@ -1165,7 +1170,7 @@ but logs a warning if it ever happens.
 | 6 | Codegraph: add `file_path`, `line_range`, `signature` columns to `entities` plus `idx_entities_file_path`. `relations.kind` is validated in Rust (`RelationKind` enum) rather than via DB CHECK; SQLite can't `ALTER ADD CHECK` and rebuilding the FK-referenced table risked dropping rows. |
 | 7 | Widen the `events.kind` CHECK constraint to admit `'index'` (codegraph-build telemetry). |
 | 8 | Add `context_items.project` column + `idx_context_items_project` so saved decisions scope to a project and surface in the SessionStart brief. |
-| 9 | `index_state` table: the commit each codegraph project was last indexed at (`engraph index` records `git rev-parse HEAD`, or clears the row outside git), so lookups can detect files a worktree's branch has changed since (§5.5). |
+| 9 | `index_state` table: the commit each codegraph project was last indexed at (`engraph index` records `git stash create`, a commit of the working tree it indexed, else HEAD; it clears the row outside git), so lookups can detect files a worktree's branch has changed since (§5.5). |
 
 (`SCHEMA_VERSION = 9`; the `MIGRATIONS` array has 9 entries.)
 

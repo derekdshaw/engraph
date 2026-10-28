@@ -272,3 +272,30 @@ fn subgraph_flags_a_file_changed_since_the_index() {
     assert!(out.contains("Changed since the index"), "{out}");
     assert!(out.contains("`src/lib.rs`"), "{out}");
 }
+
+#[test]
+fn indexing_a_dirty_tree_does_not_flag_the_files_it_indexed() {
+    let (dir, repo) = repo();
+    let db = dir.path().join("e.db");
+    // Edit, then index without committing: the graph reflects the edit.
+    std::fs::write(
+        repo.join("src/lib.rs"),
+        "fn widget_count() -> usize { 2 }\n",
+    )
+    .unwrap();
+    index_with_symbol(dir.path(), &repo, &db);
+    assert_eq!(
+        decision(&pre_grep(&db, &repo, "widget_count")).as_deref(),
+        Some("deny")
+    );
+    let out = engraph(&db, &repo, &["subgraph", "widget_count"]);
+    let out = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.contains("Changed since the index"), "{out}");
+    // A later edit still counts.
+    std::fs::write(
+        repo.join("src/lib.rs"),
+        "fn widget_count() -> usize { 3 }\n",
+    )
+    .unwrap();
+    assert_eq!(decision(&pre_grep(&db, &repo, "widget_count")), None);
+}
