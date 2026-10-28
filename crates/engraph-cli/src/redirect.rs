@@ -4,6 +4,7 @@ use engraph_core::{
     models::EventKind,
     telemetry::{self, EventInput},
 };
+use std::path::Path;
 
 /// Definition/visibility keywords that prefix a symbol in a search, across the
 /// languages engraph indexes. Stripped (one or more, e.g. `pub fn`) to reach the
@@ -108,17 +109,39 @@ fn extract_symbol(pattern: &str) -> Option<String> {
 /// Shared subgraph-redirect message generator. Returns Some(reason) when the
 /// pattern resolves to a symbol indexed with 1-8 matches in the codegraph; None
 /// otherwise (not a symbol shape, 0 matches, or 9+ matches — too ambiguous to
-/// be a useful neighborhood). The `LIMIT 9` inner scan caps the count work.
-pub(crate) fn try_subgraph_redirect(pattern: &str, conn: &db::PooledConn) -> Option<String> {
+/// be a useful neighborhood). The `LIMIT 9` scan caps the count work. Also None
+/// when the checkout at `cwd` has changed a matched symbol's file since the
+/// index: the graph would show the indexed version, not this branch's.
+pub(crate) fn try_subgraph_redirect(
+    pattern: &str,
+    conn: &db::PooledConn,
+    cwd: Option<&Path>,
+) -> Option<String> {
     let symbol = extract_symbol(pattern)?;
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM (SELECT 1 FROM entities WHERE name = ?1 OR id = ?1 LIMIT 9)",
-            rusqlite::params![symbol],
-            |r| r.get(0),
-        )
+    let mut stmt = conn
+        .prepare("SELECT project, file_path FROM entities WHERE name = ?1 OR id = ?1 LIMIT 9")
         .ok()?;
+    let rows = stmt
+        .query_map(rusqlite::params![symbol], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+            ))
+        })
+        .ok()?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .ok()?;
+    let count = rows.len();
     if !(1..=8).contains(&count) {
+        return None;
+    }
+    if let Some(cwd) = cwd
+        && crate::divergence::any_changed_since_index(
+            conn,
+            cwd,
+            rows.iter().map(|(p, f)| (p.as_deref(), f.as_deref())),
+        )
+    {
         return None;
     }
     let plural = if count == 1 { "" } else { "es" };
@@ -137,6 +160,7 @@ pub(crate) fn try_subgraph_redirect(pattern: &str, conn: &db::PooledConn) -> Opt
 pub(crate) fn try_subgraph_redirect_for_bash(
     command: &str,
     conn: &db::PooledConn,
+    cwd: Option<&Path>,
 ) -> Option<String> {
     if has_heredoc(command) || has_unquoted_shell_meta(command) {
         return None;
@@ -152,7 +176,7 @@ pub(crate) fn try_subgraph_redirect_for_bash(
     }
     // First non-flag token is the pattern. Handles `rg -i foo`, `grep -r foo .`.
     let pattern = argv.iter().skip(1).find(|a| !a.starts_with('-'))?;
-    try_subgraph_redirect(pattern, conn)
+    try_subgraph_redirect(pattern, conn, cwd)
 }
 
 pub(crate) fn emit_subgraph_deny(conn: &db::PooledConn, reason: &str, feature: &'static str) {

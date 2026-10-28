@@ -575,10 +575,22 @@ Shared with the native `PreToolUse(Grep)` path:
   `^[A-Za-z_][A-Za-z0-9_]*$` and length ≥ 3. Regex metachars and
   short tokens (`if`, `id`) skip the redirect.
 - `try_subgraph_redirect` does a
-  `SELECT COUNT(*) FROM (SELECT 1 FROM entities WHERE name = ?1
-  OR id = ?1 LIMIT 4)`. Only counts 1–3 trigger the deny; 0 is a
-  non-indexed name, 4+ would resolve as Ambiguous in
-  `subgraph_for` (`subgraph.rs`) and force a retry anyway.
+  `SELECT project, file_path FROM entities WHERE name = ?1
+  OR id = ?1 LIMIT 9`. Only 1–8 rows trigger the deny; 0 is a
+  non-indexed name, 9+ is too ambiguous to be a useful neighborhood.
+- **Branch divergence** (`divergence.rs`): before denying, it runs
+  `git diff --name-only <indexed commit> -- <matched files>` in the
+  session's checkout (the hook payload's `cwd`). If the checkout has
+  changed any matched symbol's file since the index (committed on its
+  branch or not), the grep passes through: the graph would show the
+  indexed version, not this branch's. The check applies only when the
+  `cwd` belongs to the indexed repo (`canonical_repo_key`, so a linked
+  worktree counts) and `index_state` (§12.1 v9) has a commit for it.
+  With no recorded commit the redirect behaves as before. If git can't
+  compare (the commit was rebased or gc'd away), every file counts as
+  changed. `engraph subgraph` runs the same check over every file in
+  the neighborhood and prints a "Changed since the index" note naming
+  them above the markdown (not in `--json`).
 
 The gate matters: a permissive heuristic would deny on common
 identifiers like `new` / `run` / `parse` (any of which has dozens of

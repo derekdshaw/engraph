@@ -451,10 +451,14 @@ async fn main() -> Result<()> {
             let body = if json {
                 serde_json::to_string_pretty(&neighborhood)?
             } else {
-                engraph_codegraph::format_markdown(
-                    &neighborhood,
-                    engraph_codegraph::subgraph::DEFAULT_BYTE_CAP,
-                )
+                let note = std::env::current_dir()
+                    .ok()
+                    .and_then(|c| divergence::stale_note(&conn, &c, &neighborhood));
+                note.unwrap_or_default()
+                    + &engraph_codegraph::format_markdown(
+                        &neighborhood,
+                        engraph_codegraph::subgraph::DEFAULT_BYTE_CAP,
+                    )
             };
             telemetry::record_event(
                 &conn,

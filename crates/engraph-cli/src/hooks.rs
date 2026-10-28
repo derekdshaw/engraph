@@ -414,7 +414,7 @@ pub(crate) fn run_pre_bash_hook(conn: &db::PooledConn) -> Result<()> {
     // `grep <symbol>` on an indexed bareword (1-3 matches) gets a deny+suggest
     // pointing at `engraph subgraph <symbol>`. That's an order of magnitude
     // smaller than even the compressed grep output, and gives structured edges.
-    if let Some(reason) = try_subgraph_redirect_for_bash(&command, conn) {
+    if let Some(reason) = try_subgraph_redirect_for_bash(&command, conn, hook_cwd(&v).as_deref()) {
         emit_subgraph_deny(conn, &reason, "grep_redirect");
         return Ok(());
     }
@@ -452,6 +452,15 @@ pub(crate) fn run_pre_bash_hook(conn: &db::PooledConn) -> Result<()> {
     Ok(())
 }
 
+/// The session's working directory from a PreToolUse payload, else this
+/// process's (Claude Code runs hooks from the session's directory).
+fn hook_cwd(v: &serde_json::Value) -> Option<PathBuf> {
+    v.get("cwd")
+        .and_then(|c| c.as_str())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+}
+
 /// PreToolUse(Grep) hook: redirect bareword Grep on an indexed symbol to
 /// `engraph subgraph`. See `try_subgraph_redirect` for the gate.
 pub(crate) fn run_pre_grep_hook(conn: &db::PooledConn) -> Result<()> {
@@ -471,7 +480,7 @@ pub(crate) fn run_pre_grep_hook(conn: &db::PooledConn) -> Result<()> {
         .unwrap_or("")
         .trim()
         .to_string();
-    if let Some(reason) = try_subgraph_redirect(&pattern, conn) {
+    if let Some(reason) = try_subgraph_redirect(&pattern, conn, hook_cwd(&v).as_deref()) {
         emit_subgraph_deny(conn, &reason, "grep_redirect");
     }
     Ok(())
