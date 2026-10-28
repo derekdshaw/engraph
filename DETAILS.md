@@ -455,7 +455,7 @@ command = tool_input.command;  empty? → Passthrough (no JSON)
 try_subgraph_redirect_for_bash(command, conn):
     has_heredoc OR has_unquoted_shell_meta? → skip
     shell_words::split → argv; strip_command_prefix; normalize_argv0
-    argv[0] in {rg, grep} AND first non-flag arg resolves to 1-3 indexed entities
+    argv[0] in {rg, grep} AND first non-flag arg resolves to 1-8 indexed entities
         → emit_subgraph_deny: permissionDecision "deny" pointing at
           `engraph subgraph <pattern>`, then return
 
@@ -571,9 +571,12 @@ candidate pattern. Heredocs and unquoted shell-meta commands skip the gate.
 
 Shared with the native `PreToolUse(Grep)` path:
 
-- `is_symbol_lookup` requires bareword shape
-  `^[A-Za-z_][A-Za-z0-9_]*$` and length ≥ 3. Regex metachars and
-  short tokens (`if`, `id`) skip the redirect.
+- `extract_symbol` pulls the symbol from the shapes a code search
+  takes: a bareword (`parse`), a call (`parse(`), a path
+  (`Foo::new` → `new`), or def/visibility keywords plus a name
+  (`pub fn parse` → `parse`). Identifiers must start with a letter or
+  `_` and be ≥ 3 characters. Multi-word free text, regexes, and short
+  tokens (`if`, `id`) skip the redirect.
 - `try_subgraph_redirect` does a
   `SELECT project, file_path FROM entities WHERE name = ?1
   OR id = ?1 LIMIT 9`. Only 1–8 rows trigger the deny; 0 is a
@@ -1189,7 +1192,7 @@ the modules they exercise; cross-cutting behavior lives under
 | `engraph-retrieve` | FTS query sanitization, scope filtering applied in WHERE not in Rust, recall end-to-end. Behind the `embeddings` feature: RRF re-ranking actually changes order vs FTS-only, recency tiebreaks toward newer items, missing embeddings produce zero contribution rather than worst-rank, and embedding upserts are idempotent. |
 | `engraph-ingest` | M2-style partial-trailing-line handling on every JSONL chunk; rotation/truncation detection that replays the new file from offset zero; sidechain events are dropped; the per-file transaction commits or rolls back atomically; the compress-existing sweep keeps FTS pointed at the original hash so recall doesn't lose pre-compression matches. |
 | `engraph-codegraph` | The SCIP loader's two-pass classifier emits CALLS edges, is idempotent under re-load, and scopes its DELETE to the current project (cross-repo loads don't trample each other). The subgraph renderer covers the four-section markdown shape, disambiguation on ambiguous names, byte-cap truncation, and the cross-repo `repo:<name>` annotation. Driver detection is unit-pinned per build system. Driver end-to-end tests under `tests/drivers_live.rs` soft-skip when the indexer or build tool is absent. Bazel coverage splits into target-level (JSON-proto parsing, location parser, idempotent re-index, target/dep round-trip) and symbol-level (SCIP byte-stream merge that preserves `documents` + `external_symbols`, lang-status display, and a triple-gated live Java integration test). |
-| `engraph-cli` | The four Claude Code hooks are integration-tested against the binary. Pre-bash covers every parser shape (sudo, env prefix, absolute path, `git -C`, heredoc, unquoted shell metachars). Pre-grep exercises the subgraph-redirect gate (1–3 match, regex shape, short patterns, ambiguous resolution). Post-read pins the `additionalContext` shape, the no-signature passthrough, and the unindexed-file no-op. Session-start tests the brief content + byte cap. `engraph run` is tested for budget charging, stdin inheritance, and concurrent pipe drain without deadlock under large output. |
+| `engraph-cli` | The four Claude Code hooks are integration-tested against the binary. Pre-bash covers every parser shape (sudo, env prefix, absolute path, `git -C`, heredoc, unquoted shell metachars). Pre-grep exercises the subgraph-redirect gate (1–8 match, regex shape, short patterns, ambiguous resolution), and `index_divergence.rs` covers the indexed commit plus the branch-divergence passthrough and subgraph note. Post-read pins the `additionalContext` shape, the no-signature passthrough, and the unindexed-file no-op. Session-start tests the brief content + byte cap. `engraph run` is tested for budget charging, stdin inheritance, and concurrent pipe drain without deadlock under large output. |
 
 Live-binary tests in `engraph-codegraph/tests/drivers_live.rs`,
 `bazel_live.rs`, and `bazel_symbols_live.rs` soft-skip when the external

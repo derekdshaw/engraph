@@ -1,7 +1,7 @@
 //! Integration tests for `engraph hook pre-grep`:
-//! - bareword + 1-3 matches in entities → deny + suggest
+//! - bareword + 1-8 matches in entities → deny + suggest
 //! - bareword + 0 matches → passthrough
-//! - bareword + 4+ matches (ambiguous) → passthrough
+//! - bareword + 9+ matches (ambiguous) → passthrough
 //! - regex pattern → passthrough
 //! - too-short pattern → passthrough
 //! - malformed/empty stdin → passthrough (no crash)

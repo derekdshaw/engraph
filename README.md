@@ -238,7 +238,7 @@ Display-sink pipelines (`git log | head`, `git diff | less`) are rewritten by wr
 
 ### How `pre-grep` redirects symbol lookups
 
-After `engraph index .` populates the codegraph, the PreToolUse hook on Grep watches for bareword patterns (`^[A-Za-z_][A-Za-z0-9_]*$`, length ≥ 3) that resolve to **1–3 entities** by `name` or moniker. On a hit, it returns `permissionDecision: "deny"` with a message pointing Claude at `engraph subgraph <symbol>` — typically orders of magnitude smaller than the file-read-and-grep loop Claude would otherwise run.
+After `engraph index .` populates the codegraph, the PreToolUse hook on Grep watches for symbol-shaped patterns (a bareword like `parse`, or `parse(`, `Foo::new`, `fn parse`; identifiers ≥ 3 characters) that resolve to **1–8 entities** by `name` or moniker. On a hit, it returns `permissionDecision: "deny"` with a message pointing Claude at `engraph subgraph <symbol>` — typically orders of magnitude smaller than the file-read-and-grep loop Claude would otherwise run.
 
 The gate is deliberately narrow:
 

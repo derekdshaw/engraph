@@ -249,7 +249,7 @@ pub(crate) enum HookCmd {
     /// suggesting `engraph run` as the replacement.
     PreBash,
     /// PreToolUse(Grep) redirect: when Claude greps a bareword that resolves
-    /// to 1-3 entities in the codegraph, deny and point at
+    /// to 1-8 entities in the codegraph, deny and point at
     /// `engraph subgraph <symbol>` for a 2-hop neighborhood instead.
     PreGrep,
     /// PostToolUse(Read) augment: when Claude reads a file we've indexed,

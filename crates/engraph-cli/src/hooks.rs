@@ -411,7 +411,7 @@ pub(crate) fn run_pre_bash_hook(conn: &db::PooledConn) -> Result<()> {
     }
 
     // Subgraph redirect wins over the compression rewrite: `rg <symbol>` or
-    // `grep <symbol>` on an indexed bareword (1-3 matches) gets a deny+suggest
+    // `grep <symbol>` on an indexed bareword (1-8 matches) gets a deny+suggest
     // pointing at `engraph subgraph <symbol>`. That's an order of magnitude
     // smaller than even the compressed grep output, and gives structured edges.
     if let Some(reason) = try_subgraph_redirect_for_bash(&command, conn, hook_cwd(&v).as_deref()) {
