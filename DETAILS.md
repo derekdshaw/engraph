@@ -1153,8 +1153,9 @@ but logs a warning if it ever happens.
 | 6 | Codegraph: add `file_path`, `line_range`, `signature` columns to `entities` plus `idx_entities_file_path`. `relations.kind` is validated in Rust (`RelationKind` enum) rather than via DB CHECK; SQLite can't `ALTER ADD CHECK` and rebuilding the FK-referenced table risked dropping rows. |
 | 7 | Widen the `events.kind` CHECK constraint to admit `'index'` (codegraph-build telemetry). |
 | 8 | Add `context_items.project` column + `idx_context_items_project` so saved decisions scope to a project and surface in the SessionStart brief. |
+| 9 | `index_state` table: the commit each codegraph project was last indexed at (`engraph index` records `git rev-parse HEAD`, or clears the row outside git), so lookups can detect files a worktree's branch has changed since (§5.5). |
 
-(`SCHEMA_VERSION = 8`; the `MIGRATIONS` array has 8 entries.)
+(`SCHEMA_VERSION = 9`; the `MIGRATIONS` array has 9 entries.)
 
 ---
 

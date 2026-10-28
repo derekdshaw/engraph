@@ -16,6 +16,7 @@ use std::process::Stdio;
 use std::time::Instant;
 
 mod cli;
+mod divergence;
 mod hooks;
 mod output;
 mod redirect;
@@ -315,6 +316,7 @@ async fn main() -> Result<()> {
                 for r in &stats.repos {
                     match &r.outcome {
                         Ok(s) => {
+                            divergence::record_index_commit(&conn, &r.project, &r.repo)?;
                             println!(
                                 "  ok  {} ({} entities, {} relations, driver={})",
                                 r.project, s.entities_inserted, s.relations_inserted, s.driver_name
@@ -362,6 +364,7 @@ async fn main() -> Result<()> {
                 let project_key = project.unwrap_or_else(|| canonical_repo_key(&repo));
                 let stats =
                     engraph_codegraph::index_scip_manifest(&conn, m, &project_key, effective_gc)?;
+                divergence::record_index_commit(&conn, &project_key, &repo)?;
                 telemetry::record_event(
                     &conn,
                     EventInput {
@@ -402,6 +405,7 @@ async fn main() -> Result<()> {
                     effective_bazel_symbols,
                     effective_gc,
                 )?;
+                divergence::record_index_commit(&conn, &project_key, &repo)?;
                 telemetry::record_event(
                     &conn,
                     EventInput {

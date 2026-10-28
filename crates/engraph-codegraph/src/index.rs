@@ -93,6 +93,34 @@ fn gc_pass(conn: &PooledConn, project: &str, gc: bool) -> Result<usize> {
     Ok(n)
 }
 
+/// Record the commit `project` was just indexed at. `None` (not a git repo, or
+/// HEAD unreadable) clears any earlier record rather than leaving a commit that
+/// no longer describes the graph.
+pub fn record_indexed_commit(conn: &PooledConn, project: &str, commit: Option<&str>) -> Result<()> {
+    match commit {
+        Some(sha) => conn.execute(
+            "INSERT INTO index_state (project, commit_sha) VALUES (?1, ?2)
+             ON CONFLICT(project) DO UPDATE
+             SET commit_sha = excluded.commit_sha, indexed_at = datetime('now')",
+            rusqlite::params![project, sha],
+        )?,
+        None => conn.execute("DELETE FROM index_state WHERE project = ?1", [project])?,
+    };
+    Ok(())
+}
+
+/// The commit `project` was last indexed at, if one was recorded.
+pub fn indexed_commit(conn: &PooledConn, project: &str) -> Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT commit_sha FROM index_state WHERE project = ?1",
+            [project],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// Drive a SCIP indexer (or accept a prebuilt index.scip) and load its output
 /// into the codegraph tables. `project` is the entity scope key (typically the
 /// canonical repo path). When `gc` is set, orphan entities for `project` are
@@ -939,5 +967,19 @@ mod tests {
         dir_with(root.path(), "sub", "go.mod");
         // Bazel covers the subtree → the nested go.mod is not a separate project.
         assert_eq!(recursive_roots(root.path()), vec![r]);
+    }
+
+    #[test]
+    fn indexed_commit_is_replaced_and_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = engraph_core::db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        assert_eq!(indexed_commit(&conn, "/p").unwrap(), None);
+        record_indexed_commit(&conn, "/p", Some("aaa")).unwrap();
+        record_indexed_commit(&conn, "/p", Some("bbb")).unwrap();
+        assert_eq!(indexed_commit(&conn, "/p").unwrap().as_deref(), Some("bbb"));
+        // An index run with no known commit must not leave the old one trusted.
+        record_indexed_commit(&conn, "/p", None).unwrap();
+        assert_eq!(indexed_commit(&conn, "/p").unwrap(), None);
     }
 }
