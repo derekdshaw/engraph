@@ -256,6 +256,15 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE context_items ADD COLUMN project TEXT;
     CREATE INDEX IF NOT EXISTS idx_context_items_project ON context_items(project);
     "#,
+    // v9 — the commit each codegraph project was last indexed at, so a lookup
+    // from a worktree can tell which indexed files its branch has since changed.
+    r#"
+    CREATE TABLE IF NOT EXISTS index_state (
+        project TEXT PRIMARY KEY,
+        commit_sha TEXT NOT NULL,
+        indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
@@ -364,6 +373,25 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn migrates_through_v9_index_state() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO index_state (project, commit_sha) VALUES ('/p', 'abc123')",
+            [],
+        )
+        .unwrap();
+        let at: String = conn
+            .query_row(
+                "SELECT indexed_at FROM index_state WHERE project = '/p'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!at.is_empty());
     }
 
     #[test]

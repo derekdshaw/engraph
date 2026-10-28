@@ -455,7 +455,7 @@ command = tool_input.command;  empty? → Passthrough (no JSON)
 try_subgraph_redirect_for_bash(command, conn):
     has_heredoc OR has_unquoted_shell_meta? → skip
     shell_words::split → argv; strip_command_prefix; normalize_argv0
-    argv[0] in {rg, grep} AND first non-flag arg resolves to 1-3 indexed entities
+    argv[0] in {rg, grep} AND first non-flag arg resolves to 1-8 indexed entities
         → emit_subgraph_deny: permissionDecision "deny" pointing at
           `engraph subgraph <pattern>`, then return
 
@@ -571,19 +571,39 @@ candidate pattern. Heredocs and unquoted shell-meta commands skip the gate.
 
 Shared with the native `PreToolUse(Grep)` path:
 
-- `is_symbol_lookup` requires bareword shape
-  `^[A-Za-z_][A-Za-z0-9_]*$` and length ≥ 3. Regex metachars and
-  short tokens (`if`, `id`) skip the redirect.
+- `extract_symbol` pulls the symbol from the shapes a code search
+  takes: a bareword (`parse`), a call (`parse(`), a path
+  (`Foo::new` → `new`), or def/visibility keywords plus a name
+  (`pub fn parse` → `parse`). Identifiers must start with a letter or
+  `_` and be ≥ 3 characters. Multi-word free text, regexes, and short
+  tokens (`if`, `id`) skip the redirect.
 - `try_subgraph_redirect` does a
-  `SELECT COUNT(*) FROM (SELECT 1 FROM entities WHERE name = ?1
-  OR id = ?1 LIMIT 4)`. Only counts 1–3 trigger the deny; 0 is a
-  non-indexed name, 4+ would resolve as Ambiguous in
-  `subgraph_for` (`subgraph.rs`) and force a retry anyway.
+  `SELECT project, file_path FROM entities WHERE name = ?1
+  OR id = ?1 LIMIT 9`. Only 1–8 rows trigger the deny; 0 is a
+  non-indexed name, 9+ is too ambiguous to be a useful neighborhood.
+- **Branch divergence** (`divergence.rs`): before denying, it runs
+  `git diff --name-only <indexed commit> -- <matched files>` in the
+  session's checkout (the hook payload's `cwd`). If the checkout has
+  changed any matched symbol's file since the index (committed on its
+  branch or not), the grep passes through: the graph would show the
+  indexed version, not this branch's. The check applies only when the
+  `cwd` belongs to the indexed repo (`canonical_repo_key`, so a linked
+  worktree counts) and `index_state` (§12.1 v9) has a commit for it.
+  With no recorded commit the redirect behaves as before. If git can't
+  compare (the commit was rebased or gc'd away), every file counts as
+  changed. `engraph subgraph` runs the same check over every file in
+  the neighborhood and prints a "Changed since the index" note naming
+  them above the markdown (not in `--json`).
+  The recorded commit is `git stash create` when the tree is dirty, so
+  files indexed from uncommitted edits aren't flagged. Nothing
+  references that object, so `git gc` prunes it after `gc.pruneExpire`
+  (2 weeks by default). After that the diff fails and every file counts
+  as changed until the next `engraph index`.
 
 The gate matters: a permissive heuristic would deny on common
 identifiers like `new` / `run` / `parse` (any of which has dozens of
 entities in any real codebase) and Claude would burn turns hitting
-deny → subgraph → ambiguous → retry. The 1–3 cap correlates the
+deny → subgraph → ambiguous → retry. The 1–8 cap correlates the
 redirect with cases where subgraph actually has a useful neighborhood
 to show.
 
@@ -1153,8 +1173,9 @@ but logs a warning if it ever happens.
 | 6 | Codegraph: add `file_path`, `line_range`, `signature` columns to `entities` plus `idx_entities_file_path`. `relations.kind` is validated in Rust (`RelationKind` enum) rather than via DB CHECK; SQLite can't `ALTER ADD CHECK` and rebuilding the FK-referenced table risked dropping rows. |
 | 7 | Widen the `events.kind` CHECK constraint to admit `'index'` (codegraph-build telemetry). |
 | 8 | Add `context_items.project` column + `idx_context_items_project` so saved decisions scope to a project and surface in the SessionStart brief. |
+| 9 | `index_state` table: the commit each codegraph project was last indexed at (`engraph index` records `git stash create`, a commit of the working tree it indexed, else HEAD; it clears the row outside git), so lookups can detect files a worktree's branch has changed since (§5.5). |
 
-(`SCHEMA_VERSION = 8`; the `MIGRATIONS` array has 8 entries.)
+(`SCHEMA_VERSION = 9`; the `MIGRATIONS` array has 9 entries.)
 
 ---
 
@@ -1171,7 +1192,7 @@ the modules they exercise; cross-cutting behavior lives under
 | `engraph-retrieve` | FTS query sanitization, scope filtering applied in WHERE not in Rust, recall end-to-end. Behind the `embeddings` feature: RRF re-ranking actually changes order vs FTS-only, recency tiebreaks toward newer items, missing embeddings produce zero contribution rather than worst-rank, and embedding upserts are idempotent. |
 | `engraph-ingest` | M2-style partial-trailing-line handling on every JSONL chunk; rotation/truncation detection that replays the new file from offset zero; sidechain events are dropped; the per-file transaction commits or rolls back atomically; the compress-existing sweep keeps FTS pointed at the original hash so recall doesn't lose pre-compression matches. |
 | `engraph-codegraph` | The SCIP loader's two-pass classifier emits CALLS edges, is idempotent under re-load, and scopes its DELETE to the current project (cross-repo loads don't trample each other). The subgraph renderer covers the four-section markdown shape, disambiguation on ambiguous names, byte-cap truncation, and the cross-repo `repo:<name>` annotation. Driver detection is unit-pinned per build system. Driver end-to-end tests under `tests/drivers_live.rs` soft-skip when the indexer or build tool is absent. Bazel coverage splits into target-level (JSON-proto parsing, location parser, idempotent re-index, target/dep round-trip) and symbol-level (SCIP byte-stream merge that preserves `documents` + `external_symbols`, lang-status display, and a triple-gated live Java integration test). |
-| `engraph-cli` | The four Claude Code hooks are integration-tested against the binary. Pre-bash covers every parser shape (sudo, env prefix, absolute path, `git -C`, heredoc, unquoted shell metachars). Pre-grep exercises the subgraph-redirect gate (1–3 match, regex shape, short patterns, ambiguous resolution). Post-read pins the `additionalContext` shape, the no-signature passthrough, and the unindexed-file no-op. Session-start tests the brief content + byte cap. `engraph run` is tested for budget charging, stdin inheritance, and concurrent pipe drain without deadlock under large output. |
+| `engraph-cli` | The four Claude Code hooks are integration-tested against the binary. Pre-bash covers every parser shape (sudo, env prefix, absolute path, `git -C`, heredoc, unquoted shell metachars). Pre-grep exercises the subgraph-redirect gate (1–8 match, regex shape, short patterns, ambiguous resolution), and `index_divergence.rs` covers the indexed commit plus the branch-divergence passthrough and subgraph note. Post-read pins the `additionalContext` shape, the no-signature passthrough, and the unindexed-file no-op. Session-start tests the brief content + byte cap. `engraph run` is tested for budget charging, stdin inheritance, and concurrent pipe drain without deadlock under large output. |
 
 Live-binary tests in `engraph-codegraph/tests/drivers_live.rs`,
 `bazel_live.rs`, and `bazel_symbols_live.rs` soft-skip when the external

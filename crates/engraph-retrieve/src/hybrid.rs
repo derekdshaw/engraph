@@ -94,7 +94,7 @@ pub fn search_hybrid(
     let vectors: std::collections::HashMap<(String, String), Vec<u8>> = {
         let pairs: Vec<(&str, &str)> = candidates
             .iter()
-            .map(|h| (target_kind_key(&h.target_kind), h.target_id.as_str()))
+            .map(|h| (h.target_kind.as_str(), h.target_id.as_str()))
             .collect();
         let placeholders = std::iter::repeat_n("(?,?)", pairs.len())
             .collect::<Vec<_>>()
@@ -125,10 +125,7 @@ pub fn search_hybrid(
         .iter()
         .enumerate()
         .map(|(idx, h)| {
-            let key = (
-                target_kind_key(&h.target_kind).to_string(),
-                h.target_id.clone(),
-            );
+            let key = (h.target_kind.clone(), h.target_id.clone());
             let cos = vectors
                 .get(&key)
                 .map(|b| cosine(&q_vec, &decode_f32_vec(b)) as f64)
@@ -195,21 +192,10 @@ pub fn search_hybrid(
     Ok(hits)
 }
 
-fn target_kind_key(s: &str) -> &str {
-    match s {
-        "message" => "message",
-        "context_item" => "context_item",
-        "entity" => "entity",
-        other => other,
-    }
-}
-
 fn decode_f32_vec(bytes: &[u8]) -> Vec<f32> {
     let mut out = Vec::with_capacity(bytes.len() / 4);
-    for chunk in bytes.chunks_exact(4) {
-        let mut buf = [0u8; 4];
-        buf.copy_from_slice(chunk);
-        out.push(f32::from_le_bytes(buf));
+    for chunk in bytes.as_chunks::<4>().0 {
+        out.push(f32::from_le_bytes(*chunk));
     }
     out
 }
@@ -268,4 +254,18 @@ pub fn reindex_messages(
         n += 1;
     }
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn f32_vec_round_trips_and_ignores_a_partial_tail() {
+        let v = [1.5_f32, -0.25, 0.0, f32::MAX];
+        let mut bytes = encode_f32_vec(&v);
+        assert_eq!(decode_f32_vec(&bytes), v);
+        bytes.push(0xff);
+        assert_eq!(decode_f32_vec(&bytes), v);
+    }
 }

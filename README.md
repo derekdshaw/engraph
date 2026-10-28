@@ -238,7 +238,7 @@ Display-sink pipelines (`git log | head`, `git diff | less`) are rewritten by wr
 
 ### How `pre-grep` redirects symbol lookups
 
-After `engraph index .` populates the codegraph, the PreToolUse hook on Grep watches for bareword patterns (`^[A-Za-z_][A-Za-z0-9_]*$`, length ≥ 3) that resolve to **1–3 entities** by `name` or moniker. On a hit, it returns `permissionDecision: "deny"` with a message pointing Claude at `engraph subgraph <symbol>` — typically orders of magnitude smaller than the file-read-and-grep loop Claude would otherwise run.
+After `engraph index .` populates the codegraph, the PreToolUse hook on Grep watches for symbol-shaped patterns (a bareword like `parse`, or `parse(`, `Foo::new`, `fn parse`; identifiers ≥ 3 characters) that resolve to **1–8 entities** by `name` or moniker. On a hit, it returns `permissionDecision: "deny"` with a message pointing Claude at `engraph subgraph <symbol>` — typically orders of magnitude smaller than the file-read-and-grep loop Claude would otherwise run.
 
 The gate is deliberately narrow:
 
@@ -249,8 +249,11 @@ The gate is deliberately narrow:
 | `unindexed_helper` | 0 entities | passthrough (not in graph) |
 | `process.*` | — | passthrough (regex metachar) |
 | `id` | — | passthrough (too short) |
+| `processOrder`, its file changed in this checkout since the index | 1 entity | passthrough (the graph shows the indexed version, not this branch's) |
 
 The same redirect fires for `rg <symbol>` and `grep <symbol>` invoked via the Bash tool — checked inside `pre-bash` before the compression rewrite, so subgraph wins over `engraph run rg <symbol>` when both apply.
+
+The redirect trusts the graph only where it still matches the code. `engraph index` records the commit it indexed; before denying, the hook runs `git diff --name-only <that commit>` in the session's checkout, so an agent in a worktree whose branch changed the symbol's file gets its grep, and `engraph subgraph` flags such files with a "Changed since the index" note.
 
 When Claude wants the raw grep anyway (e.g. to search for a literal occurrence in comments), adding a regex metachar like `\b` bypasses the redirect.
 
@@ -395,6 +398,7 @@ Key test locations:
 | Compress idempotency (fixed-point property) | `engraph-compress/src/lib.rs` |
 | Pre-bash hook branches (rewrite, deny, passthrough, parser shapes) | `engraph-cli/tests/pre_bash_hook.rs` |
 | Pre-grep subgraph redirect gate | `engraph-cli/tests/pre_grep_hook.rs` |
+| Indexed commit + branch-divergence redirect/subgraph | `engraph-cli/tests/index_divergence.rs` |
 | Post-read augment shape and passthrough on unindexed files | `engraph-cli/tests/post_read_hook.rs` |
 | Read-bucket filter (cat/head/tail) per-language strip + windowing | `engraph-compress/tests/read_filter.rs` |
 | SessionStart brief content and size cap | `engraph-cli/tests/session_start_hook.rs` |
