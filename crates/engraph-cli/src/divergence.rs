@@ -23,6 +23,20 @@ pub(crate) fn index_scope(repo: &Path) -> (String, String) {
     (crate::canonical_repo_key(repo), rel.unwrap_or_default())
 }
 
+/// Where the codegraph stores an absolute `file`: `(project, repo-relative
+/// path)` of the git checkout it's in — a linked worktree maps to its repo's
+/// key. `None` for relative paths or outside git.
+pub(crate) fn indexed_location(file: &Path) -> Option<(String, String)> {
+    if !file.is_absolute() {
+        return None;
+    }
+    let dir = file.parent()?;
+    let top = crate::git_current_toplevel(dir)?.canonicalize().ok()?;
+    let rel = file.canonicalize().ok()?;
+    let rel = rel.strip_prefix(&top).ok()?.to_string_lossy().into_owned();
+    Some((crate::canonical_repo_key(dir), rel))
+}
+
 /// Trimmed stdout of `git -C repo <args>`; `None` on failure or empty output.
 fn git_stdout(repo: &Path, args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("git")

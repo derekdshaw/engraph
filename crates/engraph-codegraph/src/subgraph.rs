@@ -166,22 +166,26 @@ fn query_edges(
     Ok(rows)
 }
 
-/// All entities defined in `file_path`, ordered by line. Used by the
-/// PostToolUse(Read) augment to enrich Claude's view of a just-read file
-/// with the indexed-symbol map.
+/// All entities defined in `file_path` (of `project`, when given), ordered by
+/// line. Used by the PostToolUse(Read) augment to enrich Claude's view of a
+/// just-read file with the indexed-symbol map.
 pub fn entities_in_file(
     conn: &PooledConn,
+    project: Option<&str>,
     file_path: &str,
     limit: usize,
 ) -> Result<Vec<EntityRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, project, file_path, line_range, signature FROM entities
-         WHERE file_path = ?1
+         WHERE file_path = ?1 AND (?2 IS NULL OR project = ?2)
          ORDER BY line_range
-         LIMIT ?2",
+         LIMIT ?3",
     )?;
     let rows = stmt
-        .query_map(rusqlite::params![file_path, limit as i64], row_to_entity)?
+        .query_map(
+            rusqlite::params![file_path, project, limit as i64],
+            row_to_entity,
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }

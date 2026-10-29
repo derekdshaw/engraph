@@ -155,3 +155,97 @@ fn empty_stdin_passes_through() {
     let out = run_hook_raw(&db, "");
     assert!(out.trim().is_empty());
 }
+
+fn git(repo: &std::path::Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A committed git repo at `<dir>/<name>` with `src/lib.rs`, canonicalized.
+fn git_repo(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let repo = dir.join(name);
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(
+        repo.join("src/lib.rs"),
+        "fn widget_count() -> usize { 1 }\n",
+    )
+    .unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    repo.canonicalize().unwrap()
+}
+
+/// `widget_count` in `src/lib.rs`, indexed under `project`.
+fn insert_in_project(db: &std::path::Path, project: &std::path::Path) {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .execute(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range, signature)
+             VALUES ('scheme cargo t 0.1.0 widget_count().', 'function', 'widget_count', ?1,
+                     'src/lib.rs', '1:1', 'fn widget_count() -> usize')",
+            [project.to_str().unwrap()],
+        )
+        .unwrap();
+}
+
+fn context(out: &str) -> String {
+    parse(out)
+        .and_then(|v| {
+            v.pointer("/hookSpecificOutput/additionalContext")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn absolute_path_in_an_indexed_repo_emits_context() {
+    // Claude's Read tool always sends absolute paths.
+    let (t, db) = db_dir();
+    let repo = git_repo(t.path(), "repo");
+    insert_in_project(&db, &repo);
+    let out = run_hook(&db, repo.join("src/lib.rs").to_str().unwrap());
+    assert!(context(&out).contains("widget_count"), "got: {out}");
+}
+
+#[test]
+fn absolute_path_in_another_repo_with_the_same_relative_path_passes_through() {
+    let (t, db) = db_dir();
+    let indexed = git_repo(t.path(), "indexed");
+    let other = git_repo(t.path(), "other");
+    insert_in_project(&db, &indexed);
+    let out = run_hook(&db, other.join("src/lib.rs").to_str().unwrap());
+    assert!(out.trim().is_empty(), "expected passthrough, got: {out}");
+}
+
+#[test]
+fn absolute_path_in_a_linked_worktree_emits_context() {
+    let (t, db) = db_dir();
+    let repo = git_repo(t.path(), "repo");
+    let wt = t.path().join("wt");
+    git(
+        &repo,
+        &["worktree", "add", "-q", "-b", "feat", wt.to_str().unwrap()],
+    );
+    insert_in_project(&db, &repo);
+    let out = run_hook(&db, wt.join("src/lib.rs").to_str().unwrap());
+    assert!(context(&out).contains("widget_count"), "got: {out}");
+}

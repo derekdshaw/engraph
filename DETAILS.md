@@ -622,11 +622,15 @@ output. PostToolUse **can** append, and that's enough leverage.
 Flow:
 
 1. Parse `tool_input.file_path` from the stdin JSON. Empty path →
-   Passthrough.
-2. `engraph_codegraph::subgraph::entities_in_file(conn, path, 30)` —
-   sibling of `query_siblings` (`subgraph.rs`), same predicate
-   `WHERE file_path = ?1 ORDER BY line_range LIMIT ?2` but without
-   the self-id exclusion. Empty result → Passthrough (file isn't
+   Passthrough. Claude's Read sends absolute paths, while the codegraph
+   stores repo-relative ones under the repo's key, so
+   `divergence::indexed_location` maps an absolute path to
+   `(canonical_repo_key, path relative to the git toplevel)`. A linked
+   worktree maps to its repo's key. A relative path, or one outside git,
+   is matched as given against any project.
+2. `engraph_codegraph::subgraph::entities_in_file(conn, project, path, 30)`
+   — `WHERE file_path = ?1 AND (?2 IS NULL OR project = ?2) ORDER BY
+   line_range LIMIT ?3`. Empty result → Passthrough (file isn't
    indexed).
 3. `build_read_context` renders each entity as
    `` - `name` @ line_range — `signature` `` (signatureless entities
