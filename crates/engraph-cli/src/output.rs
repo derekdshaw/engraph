@@ -47,6 +47,16 @@ fn describe_plan(plan: &engraph_codegraph::IndexPlan, indent: &str) {
     }
 }
 
+/// An index run's target for display: `project`, or `project/subtree` for a
+/// monorepo sub-project run.
+pub(crate) fn scope_label(project: &str, subtree: &str) -> String {
+    if subtree.is_empty() {
+        project.to_string()
+    } else {
+        format!("{project}/{subtree}")
+    }
+}
+
 /// Print the per-language outcome of the Bazel symbol-level pass so a run that
 /// produced 0 symbols doesn't read as a clean success. Multi-line failure
 /// messages (which carry a stderr tail) are collapsed to their first line.

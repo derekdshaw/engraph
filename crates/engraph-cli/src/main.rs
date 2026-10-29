@@ -29,7 +29,7 @@ use hooks::{
 use output::{
     csv_line, print_filter_gain_table, print_gain_summary, print_gain_table, print_graph,
     print_history, print_hits, print_repo_plan, print_scope_table, print_source_table,
-    print_symbol_langs, print_time_table, print_workspace_plan,
+    print_symbol_langs, print_time_table, print_workspace_plan, scope_label,
 };
 
 // `main` is async because the OTLP/gRPC metrics exporter (the `otel` feature)
@@ -315,7 +315,7 @@ async fn main() -> Result<()> {
                     .map(|s| s.scip_bytes)
                     .sum();
                 for r in &stats.repos {
-                    let shown = std::path::Path::new(&r.project).join(&r.subtree);
+                    let shown = scope_label(&r.project, &r.subtree);
                     match &r.outcome {
                         Ok(s) => {
                             divergence::record_index_commit(
@@ -323,14 +323,11 @@ async fn main() -> Result<()> {
                             )?;
                             println!(
                                 "  ok  {} ({} entities, {} relations, driver={})",
-                                shown.display(),
-                                s.entities_inserted,
-                                s.relations_inserted,
-                                s.driver_name
+                                shown, s.entities_inserted, s.relations_inserted, s.driver_name
                             );
                             print_symbol_langs(&s.symbol_langs, "      ");
                         }
-                        Err(e) => println!("  err {} :: {e:#}", shown.display()),
+                        Err(e) => println!("  err {shown} :: {e:#}"),
                     }
                 }
                 let pruned = stats.pruned_total();
@@ -398,7 +395,7 @@ async fn main() -> Result<()> {
                 };
                 println!(
                     "indexed {} ({} entities, {} relations, {} SCIP bytes, {}ms, driver={}){}",
-                    std::path::Path::new(&project_key).join(&subtree).display(),
+                    scope_label(&project_key, &subtree),
                     stats.entities_inserted,
                     stats.relations_inserted,
                     stats.scip_bytes,
@@ -447,7 +444,7 @@ async fn main() -> Result<()> {
                 };
                 println!(
                     "indexed {} ({} entities, {} relations, {} SCIP bytes, {}ms, driver={}){}",
-                    std::path::Path::new(&project_key).join(&subtree).display(),
+                    scope_label(&project_key, &subtree),
                     stats.entities_inserted,
                     stats.relations_inserted,
                     stats.scip_bytes,
