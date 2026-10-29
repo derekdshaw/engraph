@@ -386,3 +386,37 @@ fn each_subproject_is_checked_against_the_commit_it_was_indexed_at() {
         Some("deny")
     );
 }
+
+#[test]
+fn nested_subproject_subtree_uses_forward_slashes() {
+    // Windows `strip_prefix` yields `group\svc-c`; the codegraph stores `/`.
+    let (dir, mono) = mono();
+    std::fs::create_dir_all(mono.join("group/svc-c/src")).unwrap();
+    std::fs::write(
+        mono.join("group/svc-c/src/lib.rs"),
+        "pub fn gamma_handler() -> u32 { 1 }\n",
+    )
+    .unwrap();
+    git(&mono, &["add", "."]);
+    git(&mono, &["commit", "-q", "-m", "add svc-c"]);
+    let db = dir.path().join("e.db");
+    index_sub(
+        dir.path(),
+        &db,
+        &mono,
+        &mono,
+        "group/svc-c",
+        "gamma_handler",
+    );
+    let subtree: String = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT subtree FROM index_state", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(subtree, "group/svc-c");
+    std::fs::write(
+        mono.join("group/svc-c/src/lib.rs"),
+        "pub fn gamma_handler() -> u32 { 2 }\n",
+    )
+    .unwrap();
+    assert_eq!(pre_grep(&db, &mono, "gamma_handler"), None);
+}

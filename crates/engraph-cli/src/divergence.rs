@@ -15,11 +15,7 @@ pub(crate) fn index_scope(repo: &Path) -> (String, String) {
     let rel = crate::git_current_toplevel(repo)
         .and_then(|top| top.canonicalize().ok())
         .zip(repo.canonicalize().ok())
-        .and_then(|(top, repo)| {
-            repo.strip_prefix(&top)
-                .ok()
-                .map(|r| r.to_string_lossy().into_owned())
-        });
+        .and_then(|(top, repo)| repo.strip_prefix(&top).ok().map(slash_path));
     (crate::canonical_repo_key(repo), rel.unwrap_or_default())
 }
 
@@ -33,8 +29,17 @@ pub(crate) fn indexed_location(file: &Path) -> Option<(String, String)> {
     let dir = file.parent()?;
     let top = crate::git_current_toplevel(dir)?.canonicalize().ok()?;
     let rel = file.canonicalize().ok()?;
-    let rel = rel.strip_prefix(&top).ok()?.to_string_lossy().into_owned();
+    let rel = slash_path(rel.strip_prefix(&top).ok()?);
     Some((crate::canonical_repo_key(dir), rel))
+}
+
+/// A relative path as the codegraph stores it: `/`-separated on every platform
+/// (Windows `strip_prefix` yields `src\lib.rs`).
+fn slash_path(rel: &Path) -> String {
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Trimmed stdout of `git -C repo <args>`; `None` on failure or empty output.
