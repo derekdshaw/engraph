@@ -135,6 +135,12 @@ pub fn index_repo(
     gc: bool,
 ) -> Result<IndexStats> {
     let start = Instant::now();
+    // Drivers run inside `repo` and also pass it as an argument; a relative path
+    // would resolve against itself (`svc-a/svc-a`), yield an empty index, and
+    // the prune would then empty the project.
+    let repo = &repo
+        .canonicalize()
+        .with_context(|| format!("resolving repo path {}", repo.display()))?;
     let mut entities_pruned = gc_pass(conn, project, gc)?;
 
     // Phase 2.3: a Bazel workspace takes the bazel-query path unless the
