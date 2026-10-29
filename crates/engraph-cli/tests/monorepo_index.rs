@@ -2,9 +2,12 @@
 //! - a relative sub-project path indexes that sub-project (not an empty index)
 //! - each sub-project gets its own key, so indexing one doesn't prune another
 //! - a linked worktree's sub-project shares the main checkout's key
+//! - branch divergence works for sub-project keys (paths prefixed by the
+//!   sub-project's path in the repo)
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
 fn bin() -> &'static str {
@@ -123,6 +126,39 @@ fn entity_count(db: &Path, name: &str) -> i64 {
         .unwrap()
 }
 
+fn pre_grep(db: &Path, cwd: &Path, pattern: &str) -> Option<String> {
+    let payload = serde_json::json!({
+        "tool_name": "Grep",
+        "cwd": cwd,
+        "tool_input": { "pattern": pattern }
+    })
+    .to_string();
+    let mut child = Command::new(bin())
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("ENGRAPH_DB_PATH", db)
+        .args(["hook", "pre-grep"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let out = String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned();
+    if out.trim().is_empty() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    v.pointer("/hookSpecificOutput/permissionDecision")
+        .and_then(|s| s.as_str())
+        .map(str::to_string)
+}
+
 #[test]
 fn relative_subproject_path_indexes_the_subproject() {
     let probe = Command::new("rust-analyzer").arg("--version").output();
@@ -178,4 +214,101 @@ fn linked_worktree_subproject_shares_the_main_checkouts_key() {
     let a = key(&mono.join("svc-a"));
     index_sub(dir.path(), &db, &wt, "svc-a", &a, "alpha_handler");
     assert_eq!(index_state_keys(&db), vec![a]);
+}
+
+#[test]
+fn divergence_checks_the_subprojects_own_file() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let a = key(&mono.join("svc-a"));
+    index_sub(dir.path(), &db, &mono, "svc-a", &a, "alpha_handler");
+    assert_eq!(
+        pre_grep(&db, &mono, "alpha_handler").as_deref(),
+        Some("deny")
+    );
+    // Same relative path, other sub-project: not alpha_handler's file.
+    std::fs::write(
+        mono.join("svc-b/src/lib.rs"),
+        "pub fn beta_handler() -> u32 { 2 }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pre_grep(&db, &mono, "alpha_handler").as_deref(),
+        Some("deny")
+    );
+    std::fs::write(
+        mono.join("svc-a/src/lib.rs"),
+        "pub fn alpha_handler() -> u32 { 2 }\n",
+    )
+    .unwrap();
+    assert_eq!(pre_grep(&db, &mono, "alpha_handler"), None);
+    assert_eq!(pre_grep(&db, &mono.join("svc-a"), "alpha_handler"), None);
+}
+
+#[test]
+fn divergence_for_a_subproject_in_a_linked_worktree() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let a = key(&mono.join("svc-a"));
+    index_sub(dir.path(), &db, &mono, "svc-a", &a, "alpha_handler");
+    let wt = dir.path().join("wt");
+    git(
+        &mono,
+        &["worktree", "add", "-q", "-b", "feat", wt.to_str().unwrap()],
+    );
+    std::fs::write(
+        wt.join("svc-a/src/lib.rs"),
+        "pub fn alpha_handler(n: u32) -> u32 { n }\n",
+    )
+    .unwrap();
+    git(&wt, &["commit", "-q", "-am", "change alpha_handler"]);
+    assert_eq!(pre_grep(&db, &wt.join("svc-a"), "alpha_handler"), None);
+    assert_eq!(
+        pre_grep(&db, &mono, "alpha_handler").as_deref(),
+        Some("deny")
+    );
+}
+
+#[test]
+fn subgraph_note_names_the_repo_relative_path() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let a = key(&mono.join("svc-a"));
+    index_sub(dir.path(), &db, &mono, "svc-a", &a, "alpha_handler");
+    std::fs::write(
+        mono.join("svc-a/src/lib.rs"),
+        "pub fn alpha_handler() -> u32 { 2 }\n",
+    )
+    .unwrap();
+    let out = engraph(&db, &mono, &["subgraph", "alpha_handler"]);
+    let out = String::from_utf8_lossy(&out.stdout);
+    assert!(out.contains("Changed since the index"), "{out}");
+    assert!(out.contains("`svc-a/src/lib.rs`"), "{out}");
+}
+
+#[test]
+fn divergence_covers_workspace_indexed_subprojects() {
+    let probe = Command::new("rust-analyzer").arg("--version").output();
+    if !probe.map(|o| o.status.success()).unwrap_or(false) {
+        eprintln!("skip: rust-analyzer not installed");
+        return;
+    }
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let out = engraph(&db, &mono, &["index", "--workspace", "."]);
+    assert!(
+        out.status.success(),
+        "index: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        pre_grep(&db, &mono, "alpha_handler").as_deref(),
+        Some("deny")
+    );
+    std::fs::write(
+        mono.join("svc-a/src/lib.rs"),
+        "pub fn alpha_handler() -> u32 { 2 }\n",
+    )
+    .unwrap();
+    assert_eq!(pre_grep(&db, &mono, "alpha_handler"), None);
 }

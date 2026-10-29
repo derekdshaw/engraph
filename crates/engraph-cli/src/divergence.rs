@@ -56,12 +56,14 @@ pub(crate) fn record_index_commit(
     engraph_codegraph::record_indexed_commit(conn, project, commit.as_deref())
 }
 
-/// The subset of `files` (repo-relative, indexed under `project`) whose copy in
-/// the checkout containing `cwd` differs from the commit `project` was indexed
-/// at — committed on this branch or not. Empty when no commit was recorded or
-/// `cwd` is in another repo: the graph is trusted as before. When git can't
-/// compare (the commit was rebased or gc'd away) every file counts as changed,
-/// since an unneeded grep costs less than a stale graph.
+/// The subset of `files` (relative to `project`'s directory) whose copy in the
+/// checkout containing `cwd` differs from the commit `project` was indexed at —
+/// committed on this branch or not — as repo-relative paths. A sub-project key
+/// (`<repo>/svc-a`, see `index_project_key`) prefixes its files with `svc-a/`.
+/// Empty when no commit was recorded or `project` isn't in `cwd`'s repo: the
+/// graph is trusted as before. When git can't compare (the commit was rebased
+/// or gc'd away) every file counts as changed, since an unneeded grep costs
+/// less than a stale graph.
 fn changed_since_index(
     conn: &db::PooledConn,
     project: &str,
@@ -74,24 +76,29 @@ fn changed_since_index(
     let Ok(Some(sha)) = engraph_codegraph::indexed_commit(conn, project) else {
         return Vec::new();
     };
-    if crate::canonical_repo_key(cwd) != project {
+    let repo_key = crate::canonical_repo_key(cwd);
+    let Ok(prefix) = Path::new(project).strip_prefix(&repo_key) else {
         return Vec::new();
-    }
+    };
     let Some(top) = crate::git_current_toplevel(cwd) else {
         return Vec::new();
     };
+    let paths: Vec<String> = files
+        .iter()
+        .map(|f| prefix.join(f).to_string_lossy().into_owned())
+        .collect();
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(&top)
         .args(["diff", "--name-only", &sha, "--"])
-        .args(files)
+        .args(&paths)
         .output();
     match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
             .lines()
             .map(str::to_string)
             .collect(),
-        _ => files.iter().map(|f| f.to_string()).collect(),
+        _ => paths,
     }
 }
 

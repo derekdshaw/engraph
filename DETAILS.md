@@ -587,8 +587,12 @@ Shared with the native `PreToolUse(Grep)` path:
   changed any matched symbol's file since the index (committed on its
   branch or not), the grep passes through: the graph would show the
   indexed version, not this branch's. The check applies only when the
-  `cwd` belongs to the indexed repo (`canonical_repo_key`, so a linked
-  worktree counts) and `index_state` (§12.1 v9) has a commit for it.
+  project is in `cwd`'s repo (its key is the repo's `canonical_repo_key`,
+  so a linked worktree counts, or a sub-project path under it, §14) and
+  `index_state` (§12.1 v9) has a commit for it. A sub-project's files are
+  prefixed with its path in the repo (`svc-a/src/lib.rs`) before the
+  diff; this also covers `--workspace` children indexed from the main
+  checkout.
   With no recorded commit the redirect behaves as before. If git can't
   compare (the commit was rebased or gc'd away), every file counts as
   changed. `engraph subgraph` runs the same check over every file in
