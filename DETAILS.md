@@ -587,12 +587,9 @@ Shared with the native `PreToolUse(Grep)` path:
   changed any matched symbol's file since the index (committed on its
   branch or not), the grep passes through: the graph would show the
   indexed version, not this branch's. The check applies only when the
-  project is in `cwd`'s repo (its key is the repo's `canonical_repo_key`,
-  so a linked worktree counts, or a sub-project path under it, §14) and
-  `index_state` (§12.1 v9) has a commit for it. A sub-project's files are
-  prefixed with its path in the repo (`svc-a/src/lib.rs`) before the
-  diff; this also covers `--workspace` children indexed from the main
-  checkout.
+  project key is `cwd`'s repo (`canonical_repo_key`, so a linked
+  worktree counts; monorepo sub-projects index into it, §14) and
+  `index_state` (§12.1 v9) has a commit for it.
   With no recorded commit the redirect behaves as before. If git can't
   compare (the commit was rebased or gc'd away), every file counts as
   changed. `engraph subgraph` runs the same check over every file in
@@ -1216,16 +1213,30 @@ tables. `engraph subgraph <symbol>` then returns a 2-hop markdown
 neighborhood that typically compresses 100× against the file-Read +
 grep loop Claude would otherwise run.
 
-**Project key.** Entities are stored under a project key
-(`index_project_key`, `divergence.rs`): the repo's main-worktree path,
-so every linked worktree updates one shared index, plus the indexed
-directory's path below the git root when it's a sub-project. So
-`engraph index services/svc-a` in a monorepo is keyed
-`<repo>/services/svc-a`. Indexers emit file paths relative to the
-directory they ran in, so sub-projects sharing one key would collide
-(`src/lib.rs` in each), and the stale-symbol prune would delete every
-other sub-project's symbols on each run. Indexing sub-projects one at a
-time is how to index part of a monorepo. `--project` overrides the key.
+**Project key and partial refreshes.** Entities are stored under the
+repo's main-worktree path (`index_scope`, `divergence.rs`), so every
+linked worktree updates one shared index, with file paths relative to
+the repo root. `engraph index services/svc-a` in a monorepo indexes
+into that same project with `services/svc-a` as its *subtree*
+(`IndexScope`): the indexer's paths are rebased under it, and the load
+replaces only what the run could have produced. The pre-load orphan GC,
+the relations delete, and the stale-symbol prune (`IN_SCOPE`,
+`scip_loader.rs`) are limited to
+- symbols from the SCIP schemes in this load (the first word of a
+  symbol id names its indexer: `rust-analyzer cargo svc-a 0.1.0 …`), so
+  a Rust-only run keeps TypeScript symbols another run indexed, whichever
+  level each language's manifest lives at; and
+- files under the subtree (whole project for a root run).
+
+Scheme-less legacy/placeholder rows stay in scope. The relations delete
+also covers every source symbol the load defines, wherever it's filed,
+so a root `[workspace]` index and a member index of the same code
+converge instead of duplicating edges. `--workspace` children inside one
+repo index the same way. So indexing sub-projects one at a time is how
+to index part of a monorepo. Tradeoffs: an empty or failed index prunes
+nothing, but a language removed from the repo keeps its symbols until
+it is deleted by hand. The Bazel path ignores the subtree and refreshes
+the whole project. `--project` overrides the key (whole-project scope).
 
 ### 14.1 Crate boundary
 

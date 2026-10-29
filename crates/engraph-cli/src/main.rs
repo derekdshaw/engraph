@@ -306,6 +306,7 @@ async fn main() -> Result<()> {
                     effective_bazel_symbols,
                     recursive,
                     effective_gc,
+                    &|p| divergence::index_scope(p),
                 )?;
                 let total_bytes: usize = stats
                     .repos
@@ -314,16 +315,20 @@ async fn main() -> Result<()> {
                     .map(|s| s.scip_bytes)
                     .sum();
                 for r in &stats.repos {
+                    let shown = std::path::Path::new(&r.project).join(&r.subtree);
                     match &r.outcome {
                         Ok(s) => {
                             divergence::record_index_commit(&conn, &r.project, &r.repo)?;
                             println!(
                                 "  ok  {} ({} entities, {} relations, driver={})",
-                                r.project, s.entities_inserted, s.relations_inserted, s.driver_name
+                                shown.display(),
+                                s.entities_inserted,
+                                s.relations_inserted,
+                                s.driver_name
                             );
                             print_symbol_langs(&s.symbol_langs, "      ");
                         }
-                        Err(e) => println!("  err {} :: {e:#}", r.project),
+                        Err(e) => println!("  err {} :: {e:#}", shown.display()),
                     }
                 }
                 let pruned = stats.pruned_total();
@@ -359,12 +364,18 @@ async fn main() -> Result<()> {
                     anyhow::bail!("every repo in the workspace failed to index");
                 }
             } else if let Some(m) = &scip_manifest {
-                // Key by the repo's canonical identity (main worktree, plus the
-                // sub-project path in a monorepo) so indexing from any git
-                // worktree updates one shared project.
-                let project_key = project.unwrap_or_else(|| divergence::index_project_key(&repo));
-                let stats =
-                    engraph_codegraph::index_scip_manifest(&conn, m, &project_key, effective_gc)?;
+                // Key by the repo's canonical identity (main worktree) so
+                // indexing from any git worktree updates one shared project; a
+                // monorepo sub-project refreshes its subtree of it.
+                let (project_key, subtree) = match project {
+                    Some(p) => (p, String::new()),
+                    None => divergence::index_scope(&repo),
+                };
+                let scope = engraph_codegraph::IndexScope {
+                    project: &project_key,
+                    subtree: &subtree,
+                };
+                let stats = engraph_codegraph::index_scip_manifest(&conn, m, scope, effective_gc)?;
                 divergence::record_index_commit(&conn, &project_key, &repo)?;
                 telemetry::record_event(
                     &conn,
@@ -385,7 +396,7 @@ async fn main() -> Result<()> {
                 };
                 println!(
                     "indexed {} ({} entities, {} relations, {} SCIP bytes, {}ms, driver={}){}",
-                    project_key,
+                    std::path::Path::new(&project_key).join(&subtree).display(),
                     stats.entities_inserted,
                     stats.relations_inserted,
                     stats.scip_bytes,
@@ -394,16 +405,23 @@ async fn main() -> Result<()> {
                     pruned_note
                 );
             } else {
-                // Key by the repo's canonical identity (main worktree, plus the
-                // sub-project path in a monorepo) so indexing from any git
-                // worktree updates one shared project.
-                let project_key = project.unwrap_or_else(|| divergence::index_project_key(&repo));
-                let stats = engraph_codegraph::index_repo(
+                // Key by the repo's canonical identity (main worktree) so
+                // indexing from any git worktree updates one shared project; a
+                // monorepo sub-project refreshes its subtree of it.
+                let (project_key, subtree) = match project {
+                    Some(p) => (p, String::new()),
+                    None => divergence::index_scope(&repo),
+                };
+                let scope = engraph_codegraph::IndexScope {
+                    project: &project_key,
+                    subtree: &subtree,
+                };
+                let stats = engraph_codegraph::index_repo_in(
                     &conn,
                     &repo,
                     scip.as_deref(),
                     lang.as_deref(),
-                    &project_key,
+                    scope,
                     effective_bazel_symbols,
                     effective_gc,
                 )?;
@@ -427,7 +445,7 @@ async fn main() -> Result<()> {
                 };
                 println!(
                     "indexed {} ({} entities, {} relations, {} SCIP bytes, {}ms, driver={}){}",
-                    project_key,
+                    std::path::Path::new(&project_key).join(&subtree).display(),
                     stats.entities_inserted,
                     stats.relations_inserted,
                     stats.scip_bytes,

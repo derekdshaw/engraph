@@ -7,23 +7,20 @@ use engraph_core::db;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-/// Codegraph project key for an index of `repo`: the repo's canonical key (its
-/// main worktree, shared by linked worktrees), plus `repo`'s path below its git
-/// root when it's a sub-project of a monorepo. Indexers emit paths relative to
-/// `repo`, so each sub-project needs its own key or their files collide and
-/// indexing one prunes the others.
-pub(crate) fn index_project_key(repo: &Path) -> String {
-    let key = crate::canonical_repo_key(repo);
+/// Codegraph `(project, subtree)` for an index of `repo`: the repo's canonical
+/// key (its main worktree, shared by linked worktrees), and `repo`'s path below
+/// its git root — empty at the root. A monorepo sub-project thus refreshes its
+/// part of the one repo index, with paths rebased under its directory.
+pub(crate) fn index_scope(repo: &Path) -> (String, String) {
     let rel = crate::git_current_toplevel(repo)
         .and_then(|top| top.canonicalize().ok())
         .zip(repo.canonicalize().ok())
-        .and_then(|(top, repo)| repo.strip_prefix(&top).ok().map(Path::to_path_buf));
-    match rel {
-        Some(rel) if !rel.as_os_str().is_empty() => {
-            Path::new(&key).join(rel).to_string_lossy().into_owned()
-        }
-        _ => key,
-    }
+        .and_then(|(top, repo)| {
+            repo.strip_prefix(&top)
+                .ok()
+                .map(|r| r.to_string_lossy().into_owned())
+        });
+    (crate::canonical_repo_key(repo), rel.unwrap_or_default())
 }
 
 /// Trimmed stdout of `git -C repo <args>`; `None` on failure or empty output.
@@ -56,14 +53,12 @@ pub(crate) fn record_index_commit(
     engraph_codegraph::record_indexed_commit(conn, project, commit.as_deref())
 }
 
-/// The subset of `files` (relative to `project`'s directory) whose copy in the
-/// checkout containing `cwd` differs from the commit `project` was indexed at —
-/// committed on this branch or not — as repo-relative paths. A sub-project key
-/// (`<repo>/svc-a`, see `index_project_key`) prefixes its files with `svc-a/`.
-/// Empty when no commit was recorded or `project` isn't in `cwd`'s repo: the
-/// graph is trusted as before. When git can't compare (the commit was rebased
-/// or gc'd away) every file counts as changed, since an unneeded grep costs
-/// less than a stale graph.
+/// The subset of `files` (repo-relative, indexed under `project`) whose copy in
+/// the checkout containing `cwd` differs from the commit `project` was indexed
+/// at — committed on this branch or not. Empty when no commit was recorded or
+/// `cwd` is in another repo: the graph is trusted as before. When git can't
+/// compare (the commit was rebased or gc'd away) every file counts as changed,
+/// since an unneeded grep costs less than a stale graph.
 fn changed_since_index(
     conn: &db::PooledConn,
     project: &str,
@@ -76,29 +71,24 @@ fn changed_since_index(
     let Ok(Some(sha)) = engraph_codegraph::indexed_commit(conn, project) else {
         return Vec::new();
     };
-    let repo_key = crate::canonical_repo_key(cwd);
-    let Ok(prefix) = Path::new(project).strip_prefix(&repo_key) else {
+    if crate::canonical_repo_key(cwd) != project {
         return Vec::new();
-    };
+    }
     let Some(top) = crate::git_current_toplevel(cwd) else {
         return Vec::new();
     };
-    let paths: Vec<String> = files
-        .iter()
-        .map(|f| prefix.join(f).to_string_lossy().into_owned())
-        .collect();
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(&top)
         .args(["diff", "--name-only", &sha, "--"])
-        .args(&paths)
+        .args(files)
         .output();
     match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
             .lines()
             .map(str::to_string)
             .collect(),
-        _ => paths,
+        _ => files.iter().map(|f| f.to_string()).collect(),
     }
 }
 

@@ -1,9 +1,8 @@
-//! Indexing sub-projects of a monorepo one at a time:
-//! - a relative sub-project path indexes that sub-project (not an empty index)
-//! - each sub-project gets its own key, so indexing one doesn't prune another
-//! - a linked worktree's sub-project shares the main checkout's key
-//! - branch divergence works for sub-project keys (paths prefixed by the
-//!   sub-project's path in the repo)
+//! Indexing sub-projects of a monorepo: each run refreshes its directory of the
+//! one repo index (repo key, repo-relative paths), so runs don't prune each
+//! other, a root index and a member index converge, linked worktrees share the
+//! key, and branch divergence checks the sub-project's own files. Tests that
+//! need a real indexer skip when rust-analyzer isn't installed.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -85,8 +84,8 @@ fn key(p: &Path) -> String {
 }
 
 /// `engraph index <sub> --scip empty.scip` from `cwd`, then insert `name` in
-/// `src/lib.rs` under `project` the way a real index would.
-fn index_sub(dir: &Path, db: &Path, cwd: &Path, sub: &str, project: &str, name: &str) {
+/// `<sub>/src/lib.rs` under the repo's project the way a real index would.
+fn index_sub(dir: &Path, db: &Path, cwd: &Path, mono: &Path, sub: &str, name: &str) {
     let scip = dir.join("empty.scip");
     let out = engraph(db, cwd, &["index", sub, "--scip", scip.to_str().unwrap()]);
     assert!(
@@ -98,8 +97,13 @@ fn index_sub(dir: &Path, db: &Path, cwd: &Path, sub: &str, project: &str, name: 
         .unwrap()
         .execute(
             "INSERT INTO entities (id, kind, name, project, file_path, line_range, signature)
-             VALUES (?1, 'symbol', ?2, ?3, 'src/lib.rs', '1:1', 'fn ()')",
-            rusqlite::params![format!("scheme cargo t 0.1.0 {name}()."), name, project],
+             VALUES (?1, 'symbol', ?2, ?3, ?4, '1:1', 'fn ()')",
+            rusqlite::params![
+                format!("scheme cargo t 0.1.0 {name}()."),
+                name,
+                key(mono),
+                format!("{sub}/src/lib.rs")
+            ],
         )
         .unwrap();
 }
@@ -115,13 +119,14 @@ fn index_state_keys(db: &Path) -> Vec<String> {
         .collect()
 }
 
-fn entity_count(db: &Path, name: &str) -> i64 {
+/// `(project, file_path)` of the entity named `name`.
+fn entity(db: &Path, name: &str) -> (String, String) {
     rusqlite::Connection::open(db)
         .unwrap()
         .query_row(
-            "SELECT COUNT(*) FROM entities WHERE name = ?1",
+            "SELECT project, file_path FROM entities WHERE name = ?1",
             [name],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap()
 }
@@ -159,51 +164,44 @@ fn pre_grep(db: &Path, cwd: &Path, pattern: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-#[test]
-fn relative_subproject_path_indexes_the_subproject() {
+fn rust_analyzer_present() -> bool {
     let probe = Command::new("rust-analyzer").arg("--version").output();
-    if !probe.map(|o| o.status.success()).unwrap_or(false) {
+    let ok = probe.map(|o| o.status.success()).unwrap_or(false);
+    if !ok {
         eprintln!("skip: rust-analyzer not installed");
+    }
+    ok
+}
+
+#[test]
+fn subprojects_indexed_one_at_a_time_merge_into_the_repo_index() {
+    if !rust_analyzer_present() {
         return;
     }
     let (dir, mono) = mono();
     let db = dir.path().join("e.db");
-    let out = engraph(&db, &mono, &["index", "svc-a"]);
-    assert!(
-        out.status.success(),
-        "index: {}",
-        String::from_utf8_lossy(&out.stderr)
+    // Relative paths, from the repo root: each run indexes only its crate.
+    for sub in ["svc-a", "svc-b"] {
+        let out = engraph(&db, &mono, &["index", sub]);
+        assert!(
+            out.status.success(),
+            "index {sub}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    // svc-b's run (GC and prune on) leaves svc-a's symbols in place.
+    assert_eq!(
+        entity(&db, "alpha_handler"),
+        (key(&mono), "svc-a/src/lib.rs".into())
     );
     assert_eq!(
-        entity_count(&db, "alpha_handler"),
-        1,
-        "{}",
-        String::from_utf8_lossy(&out.stdout)
+        entity(&db, "beta_handler"),
+        (key(&mono), "svc-b/src/lib.rs".into())
     );
 }
 
 #[test]
-fn subprojects_get_their_own_keys_and_survive_each_other() {
-    let (dir, mono) = mono();
-    let db = dir.path().join("e.db");
-    let (a, b) = (key(&mono.join("svc-a")), key(&mono.join("svc-b")));
-    index_sub(dir.path(), &db, &mono, "svc-a", &a, "alpha_handler");
-    index_sub(dir.path(), &db, &mono, "svc-b", &b, "beta_handler");
-    assert_eq!(index_state_keys(&db), vec![a, b]);
-    // Indexing svc-b must not prune svc-a's symbols.
-    assert_eq!(entity_count(&db, "alpha_handler"), 1);
-}
-
-#[test]
-fn repo_root_index_keeps_the_repo_key() {
-    let (dir, mono) = mono();
-    let db = dir.path().join("e.db");
-    index_sub(dir.path(), &db, &mono, ".", &key(&mono), "alpha_handler");
-    assert_eq!(index_state_keys(&db), vec![key(&mono)]);
-}
-
-#[test]
-fn linked_worktree_subproject_shares_the_main_checkouts_key() {
+fn subproject_index_from_a_linked_worktree_uses_the_repo_key() {
     let (dir, mono) = mono();
     let db = dir.path().join("e.db");
     let wt = dir.path().join("wt");
@@ -211,17 +209,15 @@ fn linked_worktree_subproject_shares_the_main_checkouts_key() {
         &mono,
         &["worktree", "add", "-q", "-b", "feat", wt.to_str().unwrap()],
     );
-    let a = key(&mono.join("svc-a"));
-    index_sub(dir.path(), &db, &wt, "svc-a", &a, "alpha_handler");
-    assert_eq!(index_state_keys(&db), vec![a]);
+    index_sub(dir.path(), &db, &wt, &mono, "svc-a", "alpha_handler");
+    assert_eq!(index_state_keys(&db), vec![key(&mono)]);
 }
 
 #[test]
 fn divergence_checks_the_subprojects_own_file() {
     let (dir, mono) = mono();
     let db = dir.path().join("e.db");
-    let a = key(&mono.join("svc-a"));
-    index_sub(dir.path(), &db, &mono, "svc-a", &a, "alpha_handler");
+    index_sub(dir.path(), &db, &mono, &mono, "svc-a", "alpha_handler");
     assert_eq!(
         pre_grep(&db, &mono, "alpha_handler").as_deref(),
         Some("deny")
@@ -249,8 +245,7 @@ fn divergence_checks_the_subprojects_own_file() {
 fn divergence_for_a_subproject_in_a_linked_worktree() {
     let (dir, mono) = mono();
     let db = dir.path().join("e.db");
-    let a = key(&mono.join("svc-a"));
-    index_sub(dir.path(), &db, &mono, "svc-a", &a, "alpha_handler");
+    index_sub(dir.path(), &db, &mono, &mono, "svc-a", "alpha_handler");
     let wt = dir.path().join("wt");
     git(
         &mono,
@@ -273,8 +268,7 @@ fn divergence_for_a_subproject_in_a_linked_worktree() {
 fn subgraph_note_names_the_repo_relative_path() {
     let (dir, mono) = mono();
     let db = dir.path().join("e.db");
-    let a = key(&mono.join("svc-a"));
-    index_sub(dir.path(), &db, &mono, "svc-a", &a, "alpha_handler");
+    index_sub(dir.path(), &db, &mono, &mono, "svc-a", "alpha_handler");
     std::fs::write(
         mono.join("svc-a/src/lib.rs"),
         "pub fn alpha_handler() -> u32 { 2 }\n",
@@ -284,13 +278,12 @@ fn subgraph_note_names_the_repo_relative_path() {
     let out = String::from_utf8_lossy(&out.stdout);
     assert!(out.contains("Changed since the index"), "{out}");
     assert!(out.contains("`svc-a/src/lib.rs`"), "{out}");
+    assert!(out.contains("defined in svc-a/src/lib.rs"), "{out}");
 }
 
 #[test]
-fn divergence_covers_workspace_indexed_subprojects() {
-    let probe = Command::new("rust-analyzer").arg("--version").output();
-    if !probe.map(|o| o.status.success()).unwrap_or(false) {
-        eprintln!("skip: rust-analyzer not installed");
+fn workspace_run_merges_subprojects_and_tracks_divergence() {
+    if !rust_analyzer_present() {
         return;
     }
     let (dir, mono) = mono();
@@ -302,6 +295,14 @@ fn divergence_covers_workspace_indexed_subprojects() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(
+        entity(&db, "alpha_handler"),
+        (key(&mono), "svc-a/src/lib.rs".into())
+    );
+    assert_eq!(
+        entity(&db, "beta_handler"),
+        (key(&mono), "svc-b/src/lib.rs".into())
+    );
+    assert_eq!(
         pre_grep(&db, &mono, "alpha_handler").as_deref(),
         Some("deny")
     );
@@ -311,4 +312,44 @@ fn divergence_covers_workspace_indexed_subprojects() {
     )
     .unwrap();
     assert_eq!(pre_grep(&db, &mono, "alpha_handler"), None);
+}
+
+#[test]
+fn root_workspace_and_member_indexes_converge() {
+    if !rust_analyzer_present() {
+        return;
+    }
+    let (dir, mono) = mono();
+    std::fs::write(
+        mono.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"svc-a\", \"svc-b\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    let db = dir.path().join("e.db");
+    let counts = || -> (i64, i64) {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let n = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        (
+            n("SELECT COUNT(*) FROM entities"),
+            n("SELECT COUNT(*) FROM relations"),
+        )
+    };
+    let run = |sub: &str| {
+        let out = engraph(&db, &mono, &["index", sub]);
+        assert!(
+            out.status.success(),
+            "index {sub}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run(".");
+    let first = counts();
+    run("svc-a");
+    assert_eq!(counts(), first);
+    run(".");
+    assert_eq!(counts(), first);
+    assert_eq!(
+        entity(&db, "alpha_handler"),
+        (key(&mono), "svc-a/src/lib.rs".into())
+    );
 }

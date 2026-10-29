@@ -15,9 +15,9 @@ pub use bazel_symbols::{
 pub use driver::{Driver, registry};
 pub use gc::collect_orphans;
 pub use index::{
-    IndexPlan, IndexStats, SymbolLangSummary, WorkspaceRepoResult, WorkspaceStats,
-    discover_workspace_repos, index_repo, index_scip_manifest, index_workspace, indexed_commit,
-    plan_repo, plan_workspace, record_indexed_commit,
+    IndexPlan, IndexScope, IndexStats, SymbolLangSummary, WorkspaceRepoResult, WorkspaceStats,
+    discover_workspace_repos, index_repo, index_repo_in, index_scip_manifest, index_workspace,
+    indexed_commit, plan_repo, plan_workspace, record_indexed_commit,
 };
 pub use relation_kind::RelationKind;
 pub use scip_loader::{LoadStats, load};

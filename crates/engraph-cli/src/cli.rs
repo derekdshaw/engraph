@@ -134,7 +134,7 @@ pub(crate) enum Cmd {
         #[arg(long)]
         lang: Option<String>,
         /// Project key for the indexed entities (default: the main worktree's
-        /// path, plus the sub-project path when indexing a monorepo subdirectory)
+        /// path; a monorepo subdirectory refreshes its part of that project)
         #[arg(long)]
         project: Option<String>,
         /// Index every sub-repo under this directory (Phase 2.2 cross-repo).
@@ -153,10 +153,8 @@ pub(crate) enum Cmd {
         #[arg(long, conflicts_with = "bazel_symbols")]
         no_bazel_symbols: bool,
         /// Prune orphan entities before indexing and stale SCIP symbols after
-        /// loading. On by default; use --no-gc to disable. Note: after a
-        /// partial load (a --scip-manifest covering only some of a project's
-        /// languages), GC will delete the other languages' now-orphaned rows —
-        /// re-index all languages to restore them.
+        /// loading, limited to the indexers that ran and the indexed
+        /// directory. On by default; use --no-gc to disable.
         #[arg(long, conflicts_with = "no_gc")]
         gc: bool,
         /// Disable index GC/stale-symbol pruning (see --gc).

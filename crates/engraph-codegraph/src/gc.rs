@@ -11,10 +11,9 @@
 //! absent from the new index — i.e. genuinely deleted source. GC-after would
 //! drop valid-but-unreferenced symbols until the next index.
 //!
-//! Caveat: with a partial load — a `--scip-manifest` covering only some of a
-//! project's languages — the loader wipes the *other* languages' relations under
-//! the same project, orphaning their entities; a later GC then deletes those
-//! rows, recoverable only by a full all-language re-index.
+//! SCIP loads run their own orphan pass inside the loader, limited to the
+//! indexers and subtree they cover (`scip_loader::IN_SCOPE`); this
+//! whole-project pass runs before Bazel indexing.
 
 use anyhow::Result;
 use engraph_core::db::PooledConn;

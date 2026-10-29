@@ -302,7 +302,7 @@ The code-graph step is opt-in: a bare invocation only touches embeddings. The re
 engraph index .
 # indexed /home/me/project (2416 entities, 1236 relations, 14s, driver=rust-analyzer)
 
-# Index one sub-project of a monorepo (keyed separately, so others are untouched)
+# Index one sub-project of a monorepo (refreshes just that directory of the repo's index)
 engraph index services/svc-a
 
 # Index a workspace (multiple repos)
