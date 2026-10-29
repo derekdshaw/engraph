@@ -1182,7 +1182,7 @@ but logs a warning if it ever happens.
 | 7 | Widen the `events.kind` CHECK constraint to admit `'index'` (codegraph-build telemetry). |
 | 8 | Add `context_items.project` column + `idx_context_items_project` so saved decisions scope to a project and surface in the SessionStart brief. |
 | 9 | `index_state` table: the commit each codegraph project was last indexed at (`engraph index` records `git stash create`, a commit of the working tree it indexed, else HEAD; it clears the row outside git), so lookups can detect files a worktree's branch has changed since (§5.5). |
-| 10 | `index_state` keyed by `(project, subtree)`: a monorepo sub-project index (§14) records its own commit; a run replaces the commits of subtrees nested under it. Table rebuilt (SQLite can't change a primary key); v9 rows become subtree `''`. |
+| 10 | `index_state` keyed by `(project, subtree)`: a monorepo sub-project index (§14) records its own commit; a run replaces the commits of subtrees nested under it. Table rebuilt (SQLite can't change a primary key); v9 rows become subtree `''`. Known gap: the commit is per subtree, not per indexer, so after a Rust-only root run a sub-project's TypeScript symbols (indexed by an earlier sub-project run) are checked against the root's newer commit, and a TypeScript change between the two runs goes unflagged. |
 
 (`SCHEMA_VERSION = 10`; the `MIGRATIONS` array has 10 entries.)
 
@@ -1475,7 +1475,8 @@ of them would be deleted to satisfy the FK, silently destroying app_b's
 graph. v2.2 narrows the cleanup to *outgoing* relations only
 (`WHERE src_entity IN (… project = ?)`) and stops bulk-deleting
 entities. The loader then prunes only stale project-owned symbols absent
-from the new SCIP blob and unreferenced by remaining relations. The
+from the new SCIP blob and unreferenced by remaining relations (both
+since narrowed further to the load's indexers and subtree, §14). The
 UPSERT now also updates `project` on conflict so a real definition takes
 ownership from any earlier placeholder a referrer had planted.
 
@@ -1502,8 +1503,11 @@ fallback every cross-repo call goes missing.
 carries a build manifest, indexes just `<dir>`. Otherwise, walks
 immediate children and indexes each whose `Driver::detect()` matches.
 Per-repo failures are reported but don't abort the run; the CLI prints
-per-repo results plus a workspace summary. Deeper recursion is
-intentionally out of scope; tracked as a follow-up in §15.
+per-repo results plus a workspace summary. Each discovered root's
+`(project, subtree)` comes from the caller (`scope_for`; the CLI passes
+`index_scope`): separate git repos get their own key, and roots inside
+one git repo index into that repo's key as subtrees (§14). Deeper
+recursion is intentionally out of scope; tracked as a follow-up in §15.
 
 **Cross-repo subgraph annotation.** `format_markdown` now compares the
 queried entity's `project` with each related entity's. When they

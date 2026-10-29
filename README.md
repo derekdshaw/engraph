@@ -305,7 +305,8 @@ engraph index .
 # Index one sub-project of a monorepo (refreshes just that directory of the repo's index)
 engraph index services/svc-a
 
-# Index a workspace (multiple repos)
+# Index a workspace (separate repos get their own index; sub-projects of
+# one repo merge into its index)
 engraph index --workspace /path/to/monorepo
 
 # Query the code graph
