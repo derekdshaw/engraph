@@ -41,6 +41,7 @@ pub struct SymbolLangSummary {
 pub struct WorkspaceRepoResult {
     pub repo: PathBuf,
     pub project: String,
+    pub subtree: String,
     pub outcome: Result<IndexStats>,
 }
 
@@ -80,8 +81,9 @@ impl WorkspaceStats {
 }
 
 /// Run the pre-index orphan GC for `project` when `gc` is set, logging and
-/// returning the pruned count (0 when disabled). Called at the top of each
-/// indexing entry point, before any load re-populates the project.
+/// returning the pruned count (0 when disabled). Called at the top of the
+/// Bazel path, before any load re-populates the project; SCIP loads run a
+/// scoped orphan pass of their own.
 fn gc_pass(conn: &PooledConn, project: &str, gc: bool) -> Result<usize> {
     if !gc {
         return Ok(0);
@@ -93,38 +95,54 @@ fn gc_pass(conn: &PooledConn, project: &str, gc: bool) -> Result<usize> {
     Ok(n)
 }
 
-/// Record the commit `project` was just indexed at. `None` (not a git repo, or
-/// HEAD unreadable) clears any earlier record rather than leaving a commit that
-/// no longer describes the graph.
-pub fn record_indexed_commit(conn: &PooledConn, project: &str, commit: Option<&str>) -> Result<()> {
-    match commit {
-        Some(sha) => conn.execute(
-            "INSERT INTO index_state (project, commit_sha) VALUES (?1, ?2)
-             ON CONFLICT(project) DO UPDATE
-             SET commit_sha = excluded.commit_sha, indexed_at = datetime('now')",
-            rusqlite::params![project, sha],
-        )?,
-        None => conn.execute("DELETE FROM index_state WHERE project = ?1", [project])?,
-    };
+/// Record the commit `subtree` of `project` was just indexed at (`""` for the
+/// whole project). It replaces the commits of subtrees nested under it, which
+/// this run re-indexed. `None` (not a git repo, or HEAD unreadable) leaves no
+/// commit rather than one that no longer describes the graph.
+pub fn record_indexed_commit(
+    conn: &PooledConn,
+    project: &str,
+    subtree: &str,
+    commit: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM index_state
+         WHERE project = ?1
+           AND (?2 = '' OR subtree = ?2 OR substr(subtree, 1, length(?2) + 1) = ?2 || '/')",
+        rusqlite::params![project, subtree],
+    )?;
+    if let Some(sha) = commit {
+        conn.execute(
+            "INSERT INTO index_state (project, subtree, commit_sha) VALUES (?1, ?2, ?3)",
+            rusqlite::params![project, subtree, sha],
+        )?;
+    }
     Ok(())
 }
 
-/// The commit `project` was last indexed at, if one was recorded.
-pub fn indexed_commit(conn: &PooledConn, project: &str) -> Result<Option<String>> {
-    use rusqlite::OptionalExtension;
-    Ok(conn
-        .query_row(
-            "SELECT commit_sha FROM index_state WHERE project = ?1",
-            [project],
-            |r| r.get(0),
-        )
-        .optional()?)
+/// `(subtree, commit)` for each part of `project` with a recorded index commit.
+pub fn indexed_commits(conn: &PooledConn, project: &str) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT subtree, commit_sha FROM index_state WHERE project = ?1 ORDER BY subtree",
+    )?;
+    let rows = stmt
+        .query_map([project], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
-/// Drive a SCIP indexer (or accept a prebuilt index.scip) and load its output
-/// into the codegraph tables. `project` is the entity scope key (typically the
-/// canonical repo path). When `gc` is set, orphan entities for `project` are
-/// pruned before the load and stale SCIP symbols are pruned after the load.
+/// Where an index run's output lands: the `project` key, and the repo-relative
+/// directory (`subtree`) the run covers — empty for the whole project. A
+/// sub-project of a monorepo indexes into its repo's project with its
+/// directory as the subtree, so its paths are rebased under it and the load
+/// replaces only that part of the project.
+#[derive(Debug, Clone, Copy)]
+pub struct IndexScope<'a> {
+    pub project: &'a str,
+    pub subtree: &'a str,
+}
+
+/// `index_repo_in` for the whole of `project`.
 pub fn index_repo(
     conn: &PooledConn,
     repo: &Path,
@@ -134,8 +152,46 @@ pub fn index_repo(
     bazel_symbols: bool,
     gc: bool,
 ) -> Result<IndexStats> {
+    let scope = IndexScope {
+        project,
+        subtree: "",
+    };
+    index_repo_in(
+        conn,
+        repo,
+        scip_override,
+        lang_override,
+        scope,
+        bazel_symbols,
+        gc,
+    )
+}
+
+/// Drive a SCIP indexer (or accept a prebuilt index.scip) and load its output
+/// into the codegraph tables under `scope`. When `gc` is set, orphan entities
+/// in scope are pruned before the load and stale SCIP symbols after it. The
+/// Bazel path ignores `scope.subtree` and refreshes the whole project.
+pub fn index_repo_in(
+    conn: &PooledConn,
+    repo: &Path,
+    scip_override: Option<&Path>,
+    lang_override: Option<&str>,
+    scope: IndexScope,
+    bazel_symbols: bool,
+    gc: bool,
+) -> Result<IndexStats> {
+    let IndexScope { project, subtree } = scope;
+    let load_opts = LoadOptions {
+        prune_stale: gc,
+        subtree,
+    };
     let start = Instant::now();
-    let mut entities_pruned = gc_pass(conn, project, gc)?;
+    // Drivers run inside `repo` and also pass it as an argument; a relative path
+    // would resolve against itself (`svc-a/svc-a`), yield an empty index, and
+    // the prune would then empty the project.
+    let repo = &repo
+        .canonicalize()
+        .with_context(|| format!("resolving repo path {}", repo.display()))?;
 
     // Phase 2.3: a Bazel workspace takes the bazel-query path unless the
     // caller explicitly passed --scip <path> (which says "load this SCIP
@@ -144,6 +200,7 @@ pub fn index_repo(
     // on top when --bazel-symbols is set.
     if scip_override.is_none() && lang_override.is_none() && bazel::detect_bazel(repo) {
         tracing::info!("Bazel workspace detected; running target-level index");
+        let mut entities_pruned = gc_pass(conn, project, gc)?;
         let target_stats = bazel::index_bazel_workspace(conn, repo, project)?;
         let mut entities = target_stats.targets_inserted;
         let mut relations = target_stats.deps_inserted;
@@ -182,9 +239,12 @@ pub fn index_repo(
     // Prebuilt SCIP path: load the provided file as-is.
     if let Some(p) = scip_override {
         let bytes = std::fs::read(p).with_context(|| format!("reading SCIP at {}", p.display()))?;
-        let load_stats =
-            scip_loader::load_with_options(conn, project, &bytes, LoadOptions { prune_stale: gc })?;
-        entities_pruned += load_stats.entities_pruned;
+        let load_stats = scip_loader::load_with_options(
+            conn,
+            project,
+            &bazel_symbols::rebase_documents(&bytes, Path::new(subtree))?,
+            load_opts,
+        )?;
         return Ok(IndexStats {
             entities_inserted: load_stats.entities_inserted,
             relations_inserted: load_stats.relations_inserted,
@@ -192,7 +252,7 @@ pub fn index_repo(
             elapsed_ms: start.elapsed().as_millis() as i64,
             driver_name: "prebuilt",
             symbol_langs: Vec::new(),
-            entities_pruned,
+            entities_pruned: load_stats.entities_pruned,
         });
     }
 
@@ -200,9 +260,12 @@ pub fn index_repo(
     if let Some(name) = lang_override {
         let drv = driver::by_name(name).ok_or_else(|| anyhow::anyhow!("unknown driver: {name}"))?;
         let bytes = run_driver_to_scip(repo, &*drv)?;
-        let load_stats =
-            scip_loader::load_with_options(conn, project, &bytes, LoadOptions { prune_stale: gc })?;
-        entities_pruned += load_stats.entities_pruned;
+        let load_stats = scip_loader::load_with_options(
+            conn,
+            project,
+            &bazel_symbols::rebase_documents(&bytes, Path::new(subtree))?,
+            load_opts,
+        )?;
         return Ok(IndexStats {
             entities_inserted: load_stats.entities_inserted,
             relations_inserted: load_stats.relations_inserted,
@@ -210,7 +273,7 @@ pub fn index_repo(
             elapsed_ms: start.elapsed().as_millis() as i64,
             driver_name: driver_static_name(drv.name()),
             symbol_langs: Vec::new(),
-            entities_pruned,
+            entities_pruned: load_stats.entities_pruned,
         });
     }
 
@@ -262,9 +325,12 @@ pub fn index_repo(
     } else {
         bazel_symbols::merge_scip_bytes(&all_bytes)?
     };
-    let load_stats =
-        scip_loader::load_with_options(conn, project, &merged, LoadOptions { prune_stale: gc })?;
-    entities_pruned += load_stats.entities_pruned;
+    let load_stats = scip_loader::load_with_options(
+        conn,
+        project,
+        &bazel_symbols::rebase_documents(&merged, Path::new(subtree))?,
+        load_opts,
+    )?;
     let driver_name: &'static str = if succeeded_names.len() == 1 {
         succeeded_names[0]
     } else {
@@ -277,7 +343,7 @@ pub fn index_repo(
         elapsed_ms: start.elapsed().as_millis() as i64,
         driver_name,
         symbol_langs: Vec::new(),
-        entities_pruned,
+        entities_pruned: load_stats.entities_pruned,
     })
 }
 
@@ -290,19 +356,25 @@ pub fn index_repo(
 /// Manifest format: one entry per line, `<repo-relative-root>\t<scip-file>`.
 /// Blank lines and lines starting with `#` are ignored. A root of `.` or empty
 /// means repo-root (no rebase). Relative `<scip-file>` paths resolve against the
-/// manifest's own directory.
+/// manifest's own directory. Under a `scope.subtree`, the manifest's repo is
+/// that directory of the project, and paths are rebased under it too.
 pub fn index_scip_manifest(
     conn: &PooledConn,
     manifest: &Path,
-    project: &str,
+    scope: IndexScope,
     gc: bool,
 ) -> Result<IndexStats> {
     let start = Instant::now();
-    let mut entities_pruned = gc_pass(conn, project, gc)?;
     let (merged, scip_bytes_in) = build_manifest_scip(manifest)?;
-    let load_stats =
-        scip_loader::load_with_options(conn, project, &merged, LoadOptions { prune_stale: gc })?;
-    entities_pruned += load_stats.entities_pruned;
+    let load_stats = scip_loader::load_with_options(
+        conn,
+        scope.project,
+        &bazel_symbols::rebase_documents(&merged, Path::new(scope.subtree))?,
+        LoadOptions {
+            prune_stale: gc,
+            subtree: scope.subtree,
+        },
+    )?;
     Ok(IndexStats {
         entities_inserted: load_stats.entities_inserted,
         relations_inserted: load_stats.relations_inserted,
@@ -310,7 +382,7 @@ pub fn index_scip_manifest(
         elapsed_ms: start.elapsed().as_millis() as i64,
         driver_name: "scip-manifest",
         symbol_langs: Vec::new(),
-        entities_pruned,
+        entities_pruned: load_stats.entities_pruned,
     })
 }
 
@@ -583,17 +655,19 @@ fn walk_recursive(
     }
 }
 
-/// Index every repo discovered under `workspace_root`. Each repo's
-/// canonical path becomes its `project` key, so the loader's
-/// per-project DELETE doesn't trample others. Failures are captured
-/// per-repo rather than fatal — a broken indexer for one language
-/// shouldn't block the rest of the workspace.
+/// Index every repo discovered under `workspace_root`. `scope_for` maps each
+/// discovered root to its `(project, subtree)` — separate repos get their own
+/// project, sub-projects of one repo its subtrees — and the scoped load keeps
+/// runs from trampling each other. Failures are captured per-repo rather than
+/// fatal — a broken indexer for one language shouldn't block the rest of the
+/// workspace.
 pub fn index_workspace(
     conn: &PooledConn,
     workspace_root: &Path,
     bazel_symbols: bool,
     recursive: bool,
     gc: bool,
+    scope_for: &dyn Fn(&Path) -> (String, String),
 ) -> Result<WorkspaceStats> {
     let repos = if recursive {
         discover_repos_recursive(workspace_root)?
@@ -613,12 +687,16 @@ pub fn index_workspace(
     }
     let mut stats = WorkspaceStats::default();
     for repo in repos {
-        let canonical = repo.canonicalize().unwrap_or_else(|_| repo.clone());
-        let project = canonical.to_string_lossy().into_owned();
-        let outcome = index_repo(conn, &repo, None, None, &project, bazel_symbols, gc);
+        let (project, subtree) = scope_for(&repo);
+        let scope = IndexScope {
+            project: &project,
+            subtree: &subtree,
+        };
+        let outcome = index_repo_in(conn, &repo, None, None, scope, bazel_symbols, gc);
         stats.repos.push(WorkspaceRepoResult {
             repo,
             project,
+            subtree,
             outcome,
         });
     }
@@ -970,16 +1048,27 @@ mod tests {
     }
 
     #[test]
-    fn indexed_commit_is_replaced_and_cleared() {
+    fn indexed_commits_are_per_subtree() {
         let dir = tempfile::tempdir().unwrap();
         let pool = engraph_core::db::open_pool(&dir.path().join("t.db")).unwrap();
         let conn = pool.get().unwrap();
-        assert_eq!(indexed_commit(&conn, "/p").unwrap(), None);
-        record_indexed_commit(&conn, "/p", Some("aaa")).unwrap();
-        record_indexed_commit(&conn, "/p", Some("bbb")).unwrap();
-        assert_eq!(indexed_commit(&conn, "/p").unwrap().as_deref(), Some("bbb"));
+        let commits = |c: &PooledConn| indexed_commits(c, "/p").unwrap();
+        assert!(commits(&conn).is_empty());
+        record_indexed_commit(&conn, "/p", "svc-a", Some("aaa")).unwrap();
+        record_indexed_commit(&conn, "/p", "svc-b", Some("bbb")).unwrap();
+        record_indexed_commit(&conn, "/p", "svc-b", Some("ccc")).unwrap();
+        assert_eq!(
+            commits(&conn),
+            [
+                ("svc-a".into(), "aaa".into()),
+                ("svc-b".into(), "ccc".into())
+            ]
+        );
         // An index run with no known commit must not leave the old one trusted.
-        record_indexed_commit(&conn, "/p", None).unwrap();
-        assert_eq!(indexed_commit(&conn, "/p").unwrap(), None);
+        record_indexed_commit(&conn, "/p", "svc-b", None).unwrap();
+        assert_eq!(commits(&conn), [("svc-a".into(), "aaa".into())]);
+        // A root run covers every subtree, so it replaces their commits.
+        record_indexed_commit(&conn, "/p", "", Some("ddd")).unwrap();
+        assert_eq!(commits(&conn), [(String::new(), "ddd".into())]);
     }
 }

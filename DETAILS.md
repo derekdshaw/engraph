@@ -587,8 +587,12 @@ Shared with the native `PreToolUse(Grep)` path:
   changed any matched symbol's file since the index (committed on its
   branch or not), the grep passes through: the graph would show the
   indexed version, not this branch's. The check applies only when the
-  `cwd` belongs to the indexed repo (`canonical_repo_key`, so a linked
-  worktree counts) and `index_state` (§12.1 v9) has a commit for it.
+  project key is `cwd`'s repo (`canonical_repo_key`, so a linked
+  worktree counts; monorepo sub-projects index into it, §14) and
+  `index_state` (§12.1 v9/v10) has a commit for it. Each file is
+  compared with the commit of the most specific indexed subtree covering
+  it, so a sub-project indexed earlier than its siblings is checked
+  against its own index commit.
   With no recorded commit the redirect behaves as before. If git can't
   compare (the commit was rebased or gc'd away), every file counts as
   changed. `engraph subgraph` runs the same check over every file in
@@ -618,11 +622,15 @@ output. PostToolUse **can** append, and that's enough leverage.
 Flow:
 
 1. Parse `tool_input.file_path` from the stdin JSON. Empty path →
-   Passthrough.
-2. `engraph_codegraph::subgraph::entities_in_file(conn, path, 30)` —
-   sibling of `query_siblings` (`subgraph.rs`), same predicate
-   `WHERE file_path = ?1 ORDER BY line_range LIMIT ?2` but without
-   the self-id exclusion. Empty result → Passthrough (file isn't
+   Passthrough. Claude's Read sends absolute paths, while the codegraph
+   stores repo-relative ones under the repo's key, so
+   `divergence::indexed_location` maps an absolute path to
+   `(canonical_repo_key, path relative to the git toplevel)`. A linked
+   worktree maps to its repo's key. A relative path, or one outside git,
+   is matched as given against any project.
+2. `engraph_codegraph::subgraph::entities_in_file(conn, project, path, 30)`
+   — `WHERE file_path = ?1 AND (?2 IS NULL OR project = ?2) ORDER BY
+   line_range LIMIT ?3`. Empty result → Passthrough (file isn't
    indexed).
 3. `build_read_context` renders each entity as
    `` - `name` @ line_range — `signature` `` (signatureless entities
@@ -1174,8 +1182,9 @@ but logs a warning if it ever happens.
 | 7 | Widen the `events.kind` CHECK constraint to admit `'index'` (codegraph-build telemetry). |
 | 8 | Add `context_items.project` column + `idx_context_items_project` so saved decisions scope to a project and surface in the SessionStart brief. |
 | 9 | `index_state` table: the commit each codegraph project was last indexed at (`engraph index` records `git stash create`, a commit of the working tree it indexed, else HEAD; it clears the row outside git), so lookups can detect files a worktree's branch has changed since (§5.5). |
+| 10 | `index_state` keyed by `(project, subtree)`: a monorepo sub-project index (§14) records its own commit; a run replaces the commits of subtrees nested under it. Table rebuilt (SQLite can't change a primary key); v9 rows become subtree `''`. Known gap: the commit is per subtree, not per indexer, so after a Rust-only root run a sub-project's TypeScript symbols (indexed by an earlier sub-project run) are checked against the root's newer commit, and a TypeScript change between the two runs goes unflagged. |
 
-(`SCHEMA_VERSION = 9`; the `MIGRATIONS` array has 9 entries.)
+(`SCHEMA_VERSION = 10`; the `MIGRATIONS` array has 10 entries.)
 
 ---
 
@@ -1211,6 +1220,31 @@ symbols and references into the existing `entities`/`relations`
 tables. `engraph subgraph <symbol>` then returns a 2-hop markdown
 neighborhood that typically compresses 100× against the file-Read +
 grep loop Claude would otherwise run.
+
+**Project key and partial refreshes.** Entities are stored under the
+repo's main-worktree path (`index_scope`, `divergence.rs`), so every
+linked worktree updates one shared index, with file paths relative to
+the repo root. `engraph index services/svc-a` in a monorepo indexes
+into that same project with `services/svc-a` as its *subtree*
+(`IndexScope`): the indexer's paths are rebased under it, and the load
+replaces only what the run could have produced. The pre-load orphan GC,
+the relations delete, and the stale-symbol prune (`IN_SCOPE`,
+`scip_loader.rs`) are limited to
+- symbols from the SCIP schemes in this load (the first word of a
+  symbol id names its indexer: `rust-analyzer cargo svc-a 0.1.0 …`), so
+  a Rust-only run keeps TypeScript symbols another run indexed, whichever
+  level each language's manifest lives at; and
+- files under the subtree (whole project for a root run).
+
+Scheme-less legacy/placeholder rows stay in scope. The relations delete
+also covers every source symbol the load defines, wherever it's filed,
+so a root `[workspace]` index and a member index of the same code
+converge instead of duplicating edges. `--workspace` children inside one
+repo index the same way. So indexing sub-projects one at a time is how
+to index part of a monorepo. Tradeoffs: an empty or failed index prunes
+nothing, but a language removed from the repo keeps its symbols until
+it is deleted by hand. The Bazel path ignores the subtree and refreshes
+the whole project. `--project` overrides the key (whole-project scope).
 
 ### 14.1 Crate boundary
 
@@ -1441,7 +1475,8 @@ of them would be deleted to satisfy the FK, silently destroying app_b's
 graph. v2.2 narrows the cleanup to *outgoing* relations only
 (`WHERE src_entity IN (… project = ?)`) and stops bulk-deleting
 entities. The loader then prunes only stale project-owned symbols absent
-from the new SCIP blob and unreferenced by remaining relations. The
+from the new SCIP blob and unreferenced by remaining relations (both
+since narrowed further to the load's indexers and subtree, §14). The
 UPSERT now also updates `project` on conflict so a real definition takes
 ownership from any earlier placeholder a referrer had planted.
 
@@ -1468,8 +1503,11 @@ fallback every cross-repo call goes missing.
 carries a build manifest, indexes just `<dir>`. Otherwise, walks
 immediate children and indexes each whose `Driver::detect()` matches.
 Per-repo failures are reported but don't abort the run; the CLI prints
-per-repo results plus a workspace summary. Deeper recursion is
-intentionally out of scope; tracked as a follow-up in §15.
+per-repo results plus a workspace summary. Each discovered root's
+`(project, subtree)` comes from the caller (`scope_for`; the CLI passes
+`index_scope`): separate git repos get their own key, and roots inside
+one git repo index into that repo's key as subtrees (§14). Deeper
+recursion is intentionally out of scope; tracked as a follow-up in §15.
 
 **Cross-repo subgraph annotation.** `format_markdown` now compares the
 queried entity's `project` with each related entity's. When they

@@ -265,6 +265,22 @@ const MIGRATIONS: &[&str] = &[
         indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     "#,
+    // v10 — index_state per subtree: a monorepo sub-project index refreshes only
+    // its directory of the repo's project, at its own commit. SQLite can't
+    // change a primary key in place, so rebuild; v9 rows become subtree ''.
+    r#"
+    CREATE TABLE index_state_new (
+        project TEXT NOT NULL,
+        subtree TEXT NOT NULL DEFAULT '',
+        commit_sha TEXT NOT NULL,
+        indexed_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (project, subtree)
+    );
+    INSERT INTO index_state_new (project, commit_sha, indexed_at)
+        SELECT project, commit_sha, indexed_at FROM index_state;
+    DROP TABLE index_state;
+    ALTER TABLE index_state_new RENAME TO index_state;
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
@@ -370,6 +386,42 @@ mod tests {
         conn.execute(
             "INSERT INTO context_items (id, kind, content, project)
              VALUES ('c1', 'decision', 'use rusqlite pool', '/p')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn migrates_v9_index_state_rows_to_v10_subtrees() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // Apply through v9 (v1 creates `migrations`), with a v9-era row.
+        let tx = conn.transaction().unwrap();
+        for (i, sql) in MIGRATIONS[..9].iter().enumerate() {
+            tx.execute_batch(sql).unwrap();
+            tx.execute(
+                "INSERT INTO migrations (version) VALUES (?1)",
+                [i as i64 + 1],
+            )
+            .unwrap();
+        }
+        tx.execute(
+            "INSERT INTO index_state (project, commit_sha) VALUES ('/p', 'abc123')",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let row: (String, String) = conn
+            .query_row(
+                "SELECT subtree, commit_sha FROM index_state WHERE project = '/p'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (String::new(), "abc123".into()));
+        // Two subtrees of one project.
+        conn.execute(
+            "INSERT INTO index_state (project, subtree, commit_sha) VALUES ('/p', 'svc-a', 'x')",
             [],
         )
         .unwrap();

@@ -31,17 +31,42 @@ pub struct LoadStats {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct LoadOptions {
-    /// Delete project-owned symbol rows absent from the new SCIP blob after the
-    /// load replaces relations. Safe current edgeless symbols are kept because
-    /// they are present in the new symbol set.
+pub struct LoadOptions<'a> {
+    /// Garbage-collect in-scope entities no relation references before the
+    /// load, and delete in-scope symbol rows absent from the new SCIP blob
+    /// after it replaces relations. Safe current edgeless symbols are kept
+    /// because the load re-creates them.
     pub prune_stale: bool,
+    /// Repo-relative directory this load refreshes; empty for the whole
+    /// project. Document paths must already carry it as a prefix.
+    pub subtree: &'a str,
 }
 
-impl Default for LoadOptions {
+impl Default for LoadOptions<'_> {
     fn default() -> Self {
-        Self { prune_stale: true }
+        Self {
+            prune_stale: true,
+            subtree: "",
+        }
     }
+}
+
+/// The rows of `?1`'s project that a load may replace: symbols from the SCIP
+/// schemes (indexers) in this load — so another indexer's symbols survive —
+/// plus scheme-less legacy/placeholder rows, under the `?2` path prefix (empty
+/// for the whole project). Unqualified columns, for `entities` statements.
+const IN_SCOPE: &str = "project = ?1
+    AND (instr(id, ' ') = 0
+         OR substr(id, 1, instr(id, ' ') - 1) IN (SELECT s FROM current_scip_schemes))
+    AND (?2 = '' OR substr(file_path, 1, length(?2)) = ?2)";
+
+/// The SCIP scheme (indexer name) a symbol starts with; `None` for
+/// document-local symbols.
+fn scheme(symbol: &str) -> Option<&str> {
+    symbol
+        .split_once(' ')
+        .map(|(s, _)| s)
+        .filter(|s| *s != "local")
 }
 
 /// Cross-machine moniker normalization. SCIP monikers are stable
@@ -95,6 +120,49 @@ pub fn load_with_options(
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let mut guard = TxGuard { conn, done: false };
 
+    conn.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS current_scip_symbols (
+            id TEXT PRIMARY KEY
+        ) WITHOUT ROWID;
+        CREATE TEMP TABLE IF NOT EXISTS current_scip_schemes (
+            s TEXT PRIMARY KEY
+        ) WITHOUT ROWID;
+        DELETE FROM current_scip_symbols;
+        DELETE FROM current_scip_schemes;",
+    )?;
+    {
+        let mut ins_sym =
+            conn.prepare_cached("INSERT OR IGNORE INTO current_scip_symbols (id) VALUES (?1)")?;
+        let mut ins_scheme =
+            conn.prepare_cached("INSERT OR IGNORE INTO current_scip_schemes (s) VALUES (?1)")?;
+        for sym in &current_symbols {
+            ins_sym.execute([sym.as_str()])?;
+            if let Some(s) = scheme(sym) {
+                ins_scheme.execute([s])?;
+            }
+        }
+    }
+    let prefix = if options.subtree.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", options.subtree.trim_end_matches('/'))
+    };
+
+    let mut stats = LoadStats::default();
+    // Pre-load GC: in-scope rows nothing references. The load re-creates any
+    // that are still current, so this only removes genuinely deleted ones.
+    if options.prune_stale {
+        stats.entities_pruned = conn.execute(
+            &format!(
+                "DELETE FROM entities
+                 WHERE {IN_SCOPE}
+                   AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.src_entity = entities.id)
+                   AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.dst_entity = entities.id)"
+            ),
+            rusqlite::params![project, prefix],
+        )?;
+    }
+
     // Phase 2.2: scope the relations DELETE to outgoing edges only (src in
     // this project). Deleting inbound edges from other projects would break
     // cross-repo CALLS like app_b → lib_a::foo when lib_a re-indexes.
@@ -111,57 +179,50 @@ pub fn load_with_options(
     // path below refreshes current symbols in place, and the stale-prune pass
     // below deletes only symbols absent from this SCIP blob and unreferenced by
     // any remaining relation.
+    //
+    // Only in-scope sources (IN_SCOPE: this load's indexers and subtree), so a
+    // partial refresh keeps the rest of the project's edges — plus every
+    // source this blob defines, wherever it's filed now, so a symbol another
+    // run filed under another key or path doesn't keep its old edges too.
     conn.execute(
-        "DELETE FROM relations
-         WHERE src_entity IN (SELECT id FROM entities WHERE project = ?1)
-           AND kind != 'BAZEL_DEPENDS_ON'",
-        [project],
+        &format!(
+            "DELETE FROM relations
+             WHERE kind != 'BAZEL_DEPENDS_ON'
+               AND (src_entity IN (SELECT id FROM current_scip_symbols)
+                    OR src_entity IN (SELECT id FROM entities WHERE {IN_SCOPE}))"
+        ),
+        rusqlite::params![project, prefix],
     )?;
 
-    let mut stats = LoadStats::default();
     for doc in &index.documents {
         stats.documents_seen += 1;
         load_document(conn, project, doc, &sym_kind, &mut stats)?;
     }
     if options.prune_stale {
-        stats.entities_pruned = prune_stale_symbols(conn, project, &current_symbols)?;
+        stats.entities_pruned += prune_stale_symbols(conn, project, &prefix)?;
     }
+    conn.execute_batch("DELETE FROM current_scip_symbols; DELETE FROM current_scip_schemes;")?;
 
     guard.commit()?;
     Ok(stats)
 }
 
-fn prune_stale_symbols(
-    conn: &PooledConn,
-    project: &str,
-    current_symbols: &HashSet<String>,
-) -> Result<usize> {
-    conn.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS current_scip_symbols (
-            id TEXT PRIMARY KEY
-        ) WITHOUT ROWID;
-        DELETE FROM current_scip_symbols;",
-    )?;
-
-    let mut insert_current =
-        conn.prepare_cached("INSERT OR IGNORE INTO current_scip_symbols (id) VALUES (?1)")?;
-    for sym in current_symbols {
-        insert_current.execute([sym.as_str()])?;
-    }
-    drop(insert_current);
-
+/// Delete in-scope symbols absent from the load's `current_scip_symbols` that
+/// no relation references.
+fn prune_stale_symbols(conn: &PooledConn, project: &str, prefix: &str) -> Result<usize> {
     let pruned = conn.execute(
-        "DELETE FROM entities
-         WHERE project = ?1
-           AND kind = 'symbol'
-           AND NOT EXISTS (
-             SELECT 1 FROM current_scip_symbols c WHERE c.id = entities.id
-           )
-           AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.src_entity = entities.id)
-           AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.dst_entity = entities.id)",
-        [project],
+        &format!(
+            "DELETE FROM entities
+             WHERE {IN_SCOPE}
+               AND kind = 'symbol'
+               AND NOT EXISTS (
+                 SELECT 1 FROM current_scip_symbols c WHERE c.id = entities.id
+               )
+               AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.src_entity = entities.id)
+               AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.dst_entity = entities.id)"
+        ),
+        rusqlite::params![project, prefix],
     )?;
-    conn.execute("DELETE FROM current_scip_symbols", [])?;
     Ok(pruned)
 }
 

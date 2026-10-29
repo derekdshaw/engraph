@@ -242,8 +242,15 @@ pub fn index_bazel_symbols(
 
     if !parts.is_empty() {
         let merged = merge_scip_bytes(&parts)?;
-        let load_stats =
-            scip_loader::load_with_options(conn, project, &merged, LoadOptions { prune_stale })?;
+        let load_stats = scip_loader::load_with_options(
+            conn,
+            project,
+            &merged,
+            LoadOptions {
+                prune_stale,
+                ..Default::default()
+            },
+        )?;
         stats.entities_inserted = load_stats.entities_inserted;
         stats.relations_inserted = load_stats.relations_inserted;
         stats.entities_pruned = load_stats.entities_pruned;

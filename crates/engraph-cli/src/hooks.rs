@@ -509,7 +509,14 @@ pub(crate) fn run_post_read_hook(conn: &db::PooledConn) -> Result<()> {
     if file_path.is_empty() {
         return Ok(());
     }
-    let entities = engraph_codegraph::subgraph::entities_in_file(conn, file_path, 30)?;
+    // Claude's Read sends absolute paths; the codegraph stores repo-relative
+    // ones under the repo's key. Relative paths match any project as before.
+    let (project, indexed_path) = match crate::divergence::indexed_location(Path::new(file_path)) {
+        Some((project, rel)) => (Some(project), rel),
+        None => (None, file_path.to_string()),
+    };
+    let entities =
+        engraph_codegraph::subgraph::entities_in_file(conn, project.as_deref(), &indexed_path, 30)?;
     if entities.is_empty() {
         return Ok(());
     }
