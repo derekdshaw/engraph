@@ -62,7 +62,7 @@ pub fn subgraph_for(conn: &PooledConn, symbol: &str, max_nodes: usize) -> Result
     let remaining_for_in = max_nodes.saturating_sub(outgoing.len()).max(1);
     let incoming = query_edges(conn, &target.id, EdgeDir::In, remaining_for_in)?;
     let siblings = match target.file_path.as_deref() {
-        Some(path) => query_siblings(conn, path, &target.id, DEFAULT_SIBLINGS_LIMIT)?,
+        Some(path) => query_siblings(conn, target, path, DEFAULT_SIBLINGS_LIMIT)?,
         None => Vec::new(),
     };
 
@@ -186,21 +186,23 @@ pub fn entities_in_file(
     Ok(rows)
 }
 
+/// Other entities in the target's file — the same `file_path` in the same
+/// project, since another repo can have a file at the same relative path.
 fn query_siblings(
     conn: &PooledConn,
+    target: &EntityRow,
     file_path: &str,
-    self_id: &str,
     limit: usize,
 ) -> Result<Vec<EntityRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, project, file_path, line_range, signature FROM entities
-         WHERE file_path = ?1 AND id != ?2
+         WHERE file_path = ?1 AND project IS ?2 AND id != ?3
          ORDER BY line_range
-         LIMIT ?3",
+         LIMIT ?4",
     )?;
     let rows = stmt
         .query_map(
-            rusqlite::params![file_path, self_id, limit as i64],
+            rusqlite::params![file_path, target.project, target.id, limit as i64],
             row_to_entity,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -463,6 +465,24 @@ mod tests {
             "{md}"
         );
         assert!(md.contains("fn foo() -> i32"), "signature missing: {md}");
+    }
+
+    #[test]
+    fn siblings_come_from_the_targets_own_project() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        seed(&conn);
+        // Another repo with a file at the same relative path.
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range)
+             VALUES ('e_qux', 'symbol', 'qux', '/other', 'src/lib.rs', '1:2')",
+            [],
+        )
+        .unwrap();
+        let n = subgraph_for(&conn, "foo", 30).unwrap();
+        let names: Vec<&str> = n.siblings.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["bar"]);
     }
 
     #[test]
