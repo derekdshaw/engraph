@@ -39,26 +39,27 @@ fn git_stdout(repo: &Path, args: &[&str]) -> Option<String> {
     (!s.is_empty()).then(|| s.to_string())
 }
 
-/// Record the commit `project` was just indexed from. Indexers read the working
-/// tree, so with uncommitted edits HEAD would flag the very files just indexed;
-/// `git stash create` snapshots the tracked working tree as a commit without
-/// touching the stash list or the files (empty output when the tree is clean).
+/// Record the commit `subtree` of `project` was just indexed from. Indexers
+/// read the working tree, so with uncommitted edits HEAD would flag the very
+/// files just indexed; `git stash create` snapshots the tracked working tree as
+/// a commit without touching the stash list or the files (empty output when the
+/// tree is clean).
 pub(crate) fn record_index_commit(
     conn: &db::PooledConn,
     project: &str,
+    subtree: &str,
     repo: &Path,
 ) -> anyhow::Result<()> {
     let commit =
         git_stdout(repo, &["stash", "create"]).or_else(|| git_stdout(repo, &["rev-parse", "HEAD"]));
-    engraph_codegraph::record_indexed_commit(conn, project, commit.as_deref())
+    engraph_codegraph::record_indexed_commit(conn, project, subtree, commit.as_deref())
 }
 
 /// The subset of `files` (repo-relative, indexed under `project`) whose copy in
-/// the checkout containing `cwd` differs from the commit `project` was indexed
-/// at — committed on this branch or not. Empty when no commit was recorded or
-/// `cwd` is in another repo: the graph is trusted as before. When git can't
-/// compare (the commit was rebased or gc'd away) every file counts as changed,
-/// since an unneeded grep costs less than a stale graph.
+/// the checkout containing `cwd` differs from the commit they were indexed at —
+/// committed on this branch or not. Each file is compared with the commit of
+/// the most specific indexed subtree covering it. Empty when no commit was
+/// recorded or `cwd` is in another repo: the graph is trusted as before.
 fn changed_since_index(
     conn: &db::PooledConn,
     project: &str,
@@ -68,8 +69,9 @@ fn changed_since_index(
     if files.is_empty() {
         return Vec::new();
     }
-    let Ok(Some(sha)) = engraph_codegraph::indexed_commit(conn, project) else {
-        return Vec::new();
+    let commits = match engraph_codegraph::indexed_commits(conn, project) {
+        Ok(c) if !c.is_empty() => c,
+        _ => return Vec::new(),
     };
     if crate::canonical_repo_key(cwd) != project {
         return Vec::new();
@@ -77,10 +79,34 @@ fn changed_since_index(
     let Some(top) = crate::git_current_toplevel(cwd) else {
         return Vec::new();
     };
+    let mut by_commit: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for &f in files {
+        let covering = commits
+            .iter()
+            .filter(|(sub, _)| {
+                sub.is_empty()
+                    || f.strip_prefix(sub.as_str())
+                        .is_some_and(|r| r.starts_with('/'))
+            })
+            .max_by_key(|(sub, _)| sub.len());
+        if let Some((_, sha)) = covering {
+            by_commit.entry(sha).or_default().push(f);
+        }
+    }
+    by_commit
+        .into_iter()
+        .flat_map(|(sha, files)| diff_names(&top, sha, &files))
+        .collect()
+}
+
+/// `git diff --name-only <sha> -- <files>` in `top`. When git can't compare
+/// (the commit was rebased or gc'd away) every file counts as changed, since an
+/// unneeded grep costs less than a stale graph.
+fn diff_names(top: &Path, sha: &str, files: &[&str]) -> Vec<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
-        .arg(&top)
-        .args(["diff", "--name-only", &sha, "--"])
+        .arg(top)
+        .args(["diff", "--name-only", sha, "--"])
         .args(files)
         .output();
     match out {

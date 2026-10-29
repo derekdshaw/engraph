@@ -95,32 +95,40 @@ fn gc_pass(conn: &PooledConn, project: &str, gc: bool) -> Result<usize> {
     Ok(n)
 }
 
-/// Record the commit `project` was just indexed at. `None` (not a git repo, or
-/// HEAD unreadable) clears any earlier record rather than leaving a commit that
-/// no longer describes the graph.
-pub fn record_indexed_commit(conn: &PooledConn, project: &str, commit: Option<&str>) -> Result<()> {
-    match commit {
-        Some(sha) => conn.execute(
-            "INSERT INTO index_state (project, commit_sha) VALUES (?1, ?2)
-             ON CONFLICT(project) DO UPDATE
-             SET commit_sha = excluded.commit_sha, indexed_at = datetime('now')",
-            rusqlite::params![project, sha],
-        )?,
-        None => conn.execute("DELETE FROM index_state WHERE project = ?1", [project])?,
-    };
+/// Record the commit `subtree` of `project` was just indexed at (`""` for the
+/// whole project). It replaces the commits of subtrees nested under it, which
+/// this run re-indexed. `None` (not a git repo, or HEAD unreadable) leaves no
+/// commit rather than one that no longer describes the graph.
+pub fn record_indexed_commit(
+    conn: &PooledConn,
+    project: &str,
+    subtree: &str,
+    commit: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM index_state
+         WHERE project = ?1
+           AND (?2 = '' OR subtree = ?2 OR substr(subtree, 1, length(?2) + 1) = ?2 || '/')",
+        rusqlite::params![project, subtree],
+    )?;
+    if let Some(sha) = commit {
+        conn.execute(
+            "INSERT INTO index_state (project, subtree, commit_sha) VALUES (?1, ?2, ?3)",
+            rusqlite::params![project, subtree, sha],
+        )?;
+    }
     Ok(())
 }
 
-/// The commit `project` was last indexed at, if one was recorded.
-pub fn indexed_commit(conn: &PooledConn, project: &str) -> Result<Option<String>> {
-    use rusqlite::OptionalExtension;
-    Ok(conn
-        .query_row(
-            "SELECT commit_sha FROM index_state WHERE project = ?1",
-            [project],
-            |r| r.get(0),
-        )
-        .optional()?)
+/// `(subtree, commit)` for each part of `project` with a recorded index commit.
+pub fn indexed_commits(conn: &PooledConn, project: &str) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT subtree, commit_sha FROM index_state WHERE project = ?1 ORDER BY subtree",
+    )?;
+    let rows = stmt
+        .query_map([project], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 /// Where an index run's output lands: the `project` key, and the repo-relative
@@ -1040,16 +1048,27 @@ mod tests {
     }
 
     #[test]
-    fn indexed_commit_is_replaced_and_cleared() {
+    fn indexed_commits_are_per_subtree() {
         let dir = tempfile::tempdir().unwrap();
         let pool = engraph_core::db::open_pool(&dir.path().join("t.db")).unwrap();
         let conn = pool.get().unwrap();
-        assert_eq!(indexed_commit(&conn, "/p").unwrap(), None);
-        record_indexed_commit(&conn, "/p", Some("aaa")).unwrap();
-        record_indexed_commit(&conn, "/p", Some("bbb")).unwrap();
-        assert_eq!(indexed_commit(&conn, "/p").unwrap().as_deref(), Some("bbb"));
+        let commits = |c: &PooledConn| indexed_commits(c, "/p").unwrap();
+        assert!(commits(&conn).is_empty());
+        record_indexed_commit(&conn, "/p", "svc-a", Some("aaa")).unwrap();
+        record_indexed_commit(&conn, "/p", "svc-b", Some("bbb")).unwrap();
+        record_indexed_commit(&conn, "/p", "svc-b", Some("ccc")).unwrap();
+        assert_eq!(
+            commits(&conn),
+            [
+                ("svc-a".into(), "aaa".into()),
+                ("svc-b".into(), "ccc".into())
+            ]
+        );
         // An index run with no known commit must not leave the old one trusted.
-        record_indexed_commit(&conn, "/p", None).unwrap();
-        assert_eq!(indexed_commit(&conn, "/p").unwrap(), None);
+        record_indexed_commit(&conn, "/p", "svc-b", None).unwrap();
+        assert_eq!(commits(&conn), [("svc-a".into(), "aaa".into())]);
+        // A root run covers every subtree, so it replaces their commits.
+        record_indexed_commit(&conn, "/p", "", Some("ddd")).unwrap();
+        assert_eq!(commits(&conn), [(String::new(), "ddd".into())]);
     }
 }

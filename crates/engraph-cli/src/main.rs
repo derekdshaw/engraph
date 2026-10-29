@@ -318,7 +318,9 @@ async fn main() -> Result<()> {
                     let shown = std::path::Path::new(&r.project).join(&r.subtree);
                     match &r.outcome {
                         Ok(s) => {
-                            divergence::record_index_commit(&conn, &r.project, &r.repo)?;
+                            divergence::record_index_commit(
+                                &conn, &r.project, &r.subtree, &r.repo,
+                            )?;
                             println!(
                                 "  ok  {} ({} entities, {} relations, driver={})",
                                 shown.display(),
@@ -376,7 +378,7 @@ async fn main() -> Result<()> {
                     subtree: &subtree,
                 };
                 let stats = engraph_codegraph::index_scip_manifest(&conn, m, scope, effective_gc)?;
-                divergence::record_index_commit(&conn, &project_key, &repo)?;
+                divergence::record_index_commit(&conn, &project_key, &subtree, &repo)?;
                 telemetry::record_event(
                     &conn,
                     EventInput {
@@ -425,7 +427,7 @@ async fn main() -> Result<()> {
                     effective_bazel_symbols,
                     effective_gc,
                 )?;
-                divergence::record_index_commit(&conn, &project_key, &repo)?;
+                divergence::record_index_commit(&conn, &project_key, &subtree, &repo)?;
                 telemetry::record_event(
                     &conn,
                     EventInput {

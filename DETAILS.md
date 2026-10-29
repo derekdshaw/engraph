@@ -589,7 +589,10 @@ Shared with the native `PreToolUse(Grep)` path:
   indexed version, not this branch's. The check applies only when the
   project key is `cwd`'s repo (`canonical_repo_key`, so a linked
   worktree counts; monorepo sub-projects index into it, §14) and
-  `index_state` (§12.1 v9) has a commit for it.
+  `index_state` (§12.1 v9/v10) has a commit for it. Each file is
+  compared with the commit of the most specific indexed subtree covering
+  it, so a sub-project indexed earlier than its siblings is checked
+  against its own index commit.
   With no recorded commit the redirect behaves as before. If git can't
   compare (the commit was rebased or gc'd away), every file counts as
   changed. `engraph subgraph` runs the same check over every file in
@@ -1175,8 +1178,9 @@ but logs a warning if it ever happens.
 | 7 | Widen the `events.kind` CHECK constraint to admit `'index'` (codegraph-build telemetry). |
 | 8 | Add `context_items.project` column + `idx_context_items_project` so saved decisions scope to a project and surface in the SessionStart brief. |
 | 9 | `index_state` table: the commit each codegraph project was last indexed at (`engraph index` records `git stash create`, a commit of the working tree it indexed, else HEAD; it clears the row outside git), so lookups can detect files a worktree's branch has changed since (§5.5). |
+| 10 | `index_state` keyed by `(project, subtree)`: a monorepo sub-project index (§14) records its own commit; a run replaces the commits of subtrees nested under it. Table rebuilt (SQLite can't change a primary key); v9 rows become subtree `''`. |
 
-(`SCHEMA_VERSION = 9`; the `MIGRATIONS` array has 9 entries.)
+(`SCHEMA_VERSION = 10`; the `MIGRATIONS` array has 10 entries.)
 
 ---
 

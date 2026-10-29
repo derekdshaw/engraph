@@ -353,3 +353,36 @@ fn root_workspace_and_member_indexes_converge() {
         (key(&mono), "svc-a/src/lib.rs".into())
     );
 }
+
+#[test]
+fn each_subproject_is_checked_against_the_commit_it_was_indexed_at() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    index_sub(dir.path(), &db, &mono, &mono, "svc-a", "alpha_handler");
+    // svc-a changes and is committed, but only svc-b is re-indexed.
+    std::fs::write(
+        mono.join("svc-a/src/lib.rs"),
+        "pub fn alpha_handler() -> u32 { 2 }\n",
+    )
+    .unwrap();
+    git(&mono, &["commit", "-q", "-am", "change alpha_handler"]);
+    index_sub(dir.path(), &db, &mono, &mono, "svc-b", "beta_handler");
+    // The graph still has svc-a as first indexed: don't trust it.
+    assert_eq!(pre_grep(&db, &mono, "alpha_handler"), None);
+    assert_eq!(
+        pre_grep(&db, &mono, "beta_handler").as_deref(),
+        Some("deny")
+    );
+    // A root run re-indexes everything, svc-a included.
+    let scip = dir.path().join("empty.scip");
+    let out = engraph(
+        &db,
+        &mono,
+        &["index", ".", "--scip", scip.to_str().unwrap()],
+    );
+    assert!(out.status.success());
+    assert_eq!(
+        pre_grep(&db, &mono, "alpha_handler").as_deref(),
+        Some("deny")
+    );
+}
