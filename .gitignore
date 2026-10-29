@@ -1,6 +1,7 @@
-/target
-Cargo.lock.bak
+target/
 *.swp
 .DS_Store
 *.scip
 .fastembed_cache/
+.claude/
+.orca/
