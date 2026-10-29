@@ -1,5 +1,7 @@
 //! Indexing sub-projects of a monorepo one at a time:
 //! - a relative sub-project path indexes that sub-project (not an empty index)
+//! - each sub-project gets its own key, so indexing one doesn't prune another
+//! - a linked worktree's sub-project shares the main checkout's key
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -75,6 +77,41 @@ fn mono() -> (tempfile::TempDir, PathBuf) {
     (dir, mono)
 }
 
+fn key(p: &Path) -> String {
+    p.to_string_lossy().into_owned()
+}
+
+/// `engraph index <sub> --scip empty.scip` from `cwd`, then insert `name` in
+/// `src/lib.rs` under `project` the way a real index would.
+fn index_sub(dir: &Path, db: &Path, cwd: &Path, sub: &str, project: &str, name: &str) {
+    let scip = dir.join("empty.scip");
+    let out = engraph(db, cwd, &["index", sub, "--scip", scip.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "index: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .execute(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range, signature)
+             VALUES (?1, 'symbol', ?2, ?3, 'src/lib.rs', '1:1', 'fn ()')",
+            rusqlite::params![format!("scheme cargo t 0.1.0 {name}()."), name, project],
+        )
+        .unwrap();
+}
+
+fn index_state_keys(db: &Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT project FROM index_state ORDER BY project")
+        .unwrap();
+    stmt.query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
 fn entity_count(db: &Path, name: &str) -> i64 {
     rusqlite::Connection::open(db)
         .unwrap()
@@ -107,4 +144,38 @@ fn relative_subproject_path_indexes_the_subproject() {
         "{}",
         String::from_utf8_lossy(&out.stdout)
     );
+}
+
+#[test]
+fn subprojects_get_their_own_keys_and_survive_each_other() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let (a, b) = (key(&mono.join("svc-a")), key(&mono.join("svc-b")));
+    index_sub(dir.path(), &db, &mono, "svc-a", &a, "alpha_handler");
+    index_sub(dir.path(), &db, &mono, "svc-b", &b, "beta_handler");
+    assert_eq!(index_state_keys(&db), vec![a, b]);
+    // Indexing svc-b must not prune svc-a's symbols.
+    assert_eq!(entity_count(&db, "alpha_handler"), 1);
+}
+
+#[test]
+fn repo_root_index_keeps_the_repo_key() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    index_sub(dir.path(), &db, &mono, ".", &key(&mono), "alpha_handler");
+    assert_eq!(index_state_keys(&db), vec![key(&mono)]);
+}
+
+#[test]
+fn linked_worktree_subproject_shares_the_main_checkouts_key() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let wt = dir.path().join("wt");
+    git(
+        &mono,
+        &["worktree", "add", "-q", "-b", "feat", wt.to_str().unwrap()],
+    );
+    let a = key(&mono.join("svc-a"));
+    index_sub(dir.path(), &db, &wt, "svc-a", &a, "alpha_handler");
+    assert_eq!(index_state_keys(&db), vec![a]);
 }

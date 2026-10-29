@@ -1,10 +1,30 @@
-//! Tie the codegraph to the commit it was indexed at, so a lookup from a
-//! worktree on another branch can tell which indexed files no longer match.
+//! Tie the codegraph to the checkout it was indexed from — its project key
+//! and commit — so a lookup from a worktree on another branch can tell which
+//! indexed files no longer match.
 
 use engraph_codegraph::Neighborhood;
 use engraph_core::db;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+
+/// Codegraph project key for an index of `repo`: the repo's canonical key (its
+/// main worktree, shared by linked worktrees), plus `repo`'s path below its git
+/// root when it's a sub-project of a monorepo. Indexers emit paths relative to
+/// `repo`, so each sub-project needs its own key or their files collide and
+/// indexing one prunes the others.
+pub(crate) fn index_project_key(repo: &Path) -> String {
+    let key = crate::canonical_repo_key(repo);
+    let rel = crate::git_current_toplevel(repo)
+        .and_then(|top| top.canonicalize().ok())
+        .zip(repo.canonicalize().ok())
+        .and_then(|(top, repo)| repo.strip_prefix(&top).ok().map(Path::to_path_buf));
+    match rel {
+        Some(rel) if !rel.as_os_str().is_empty() => {
+            Path::new(&key).join(rel).to_string_lossy().into_owned()
+        }
+        _ => key,
+    }
+}
 
 /// Trimmed stdout of `git -C repo <args>`; `None` on failure or empty output.
 fn git_stdout(repo: &Path, args: &[&str]) -> Option<String> {

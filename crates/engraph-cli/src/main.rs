@@ -359,9 +359,10 @@ async fn main() -> Result<()> {
                     anyhow::bail!("every repo in the workspace failed to index");
                 }
             } else if let Some(m) = &scip_manifest {
-                // Key by the repo's canonical identity (main worktree) so
-                // indexing from any git worktree updates one shared project.
-                let project_key = project.unwrap_or_else(|| canonical_repo_key(&repo));
+                // Key by the repo's canonical identity (main worktree, plus the
+                // sub-project path in a monorepo) so indexing from any git
+                // worktree updates one shared project.
+                let project_key = project.unwrap_or_else(|| divergence::index_project_key(&repo));
                 let stats =
                     engraph_codegraph::index_scip_manifest(&conn, m, &project_key, effective_gc)?;
                 divergence::record_index_commit(&conn, &project_key, &repo)?;
@@ -393,9 +394,10 @@ async fn main() -> Result<()> {
                     pruned_note
                 );
             } else {
-                // Key by the repo's canonical identity (main worktree) so
-                // indexing from any git worktree updates one shared project.
-                let project_key = project.unwrap_or_else(|| canonical_repo_key(&repo));
+                // Key by the repo's canonical identity (main worktree, plus the
+                // sub-project path in a monorepo) so indexing from any git
+                // worktree updates one shared project.
+                let project_key = project.unwrap_or_else(|| divergence::index_project_key(&repo));
                 let stats = engraph_codegraph::index_repo(
                     &conn,
                     &repo,

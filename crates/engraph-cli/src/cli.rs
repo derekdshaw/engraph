@@ -133,7 +133,8 @@ pub(crate) enum Cmd {
         /// Force a driver: rust-analyzer, scip-python, scip-go, scip-typescript, scip-java
         #[arg(long)]
         lang: Option<String>,
-        /// Project key for the indexed entities (default: canonical repo path)
+        /// Project key for the indexed entities (default: the main worktree's
+        /// path, plus the sub-project path when indexing a monorepo subdirectory)
         #[arg(long)]
         project: Option<String>,
         /// Index every sub-repo under this directory (Phase 2.2 cross-repo).

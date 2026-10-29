@@ -1212,6 +1212,17 @@ tables. `engraph subgraph <symbol>` then returns a 2-hop markdown
 neighborhood that typically compresses 100× against the file-Read +
 grep loop Claude would otherwise run.
 
+**Project key.** Entities are stored under a project key
+(`index_project_key`, `divergence.rs`): the repo's main-worktree path,
+so every linked worktree updates one shared index, plus the indexed
+directory's path below the git root when it's a sub-project. So
+`engraph index services/svc-a` in a monorepo is keyed
+`<repo>/services/svc-a`. Indexers emit file paths relative to the
+directory they ran in, so sub-projects sharing one key would collide
+(`src/lib.rs` in each), and the stale-symbol prune would delete every
+other sub-project's symbols on each run. Indexing sub-projects one at a
+time is how to index part of a monorepo. `--project` overrides the key.
+
 ### 14.1 Crate boundary
 
 `crates/engraph-codegraph/` is its own workspace member. Seven modules:
