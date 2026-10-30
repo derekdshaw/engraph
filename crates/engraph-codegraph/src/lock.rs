@@ -172,34 +172,42 @@ mod tests {
         }
     }
 
+    /// Release `lock`, then read what it wrote. Not before: on Windows the
+    /// lock also blocks reads, from this process too.
+    fn released_contents(lock: IndexLock) -> String {
+        let path = lock.path().to_path_buf();
+        drop(lock);
+        std::fs::read_to_string(path).unwrap()
+    }
+
     #[test]
     fn acquire_is_exclusive_and_released_on_drop() {
         with_temp_data_dir(|| {
             let lock = acquired("/p");
-            assert!(lock.path().starts_with(lock_dir()));
-            let contents = std::fs::read_to_string(lock.path()).unwrap();
+            let path = lock.path().to_path_buf();
+            assert!(path.starts_with(lock_dir()));
+
+            let held_info = match acquire("/p").unwrap() {
+                Acquire::Held { path: held, info } => {
+                    assert_eq!(held, path);
+                    info
+                }
+                other => panic!("{other:?}"),
+            };
+            // A different project is independent.
+            let _q = acquired("/q");
+
+            // Released, and the file stays (see the module doc).
+            let contents = released_contents(lock);
             assert!(contents.contains("project=/p\n"), "{contents}");
             assert!(
                 contents.contains(&format!("pid={}\n", std::process::id())),
                 "{contents}"
             );
-
-            match acquire("/p").unwrap() {
-                Acquire::Held { path, info } => {
-                    assert_eq!(path, lock.path());
-                    #[cfg(unix)]
-                    assert_eq!(info, contents);
-                    let _ = info;
-                }
-                other => panic!("{other:?}"),
+            // Windows can't read a held lock, so the holder's info is empty there.
+            if cfg!(unix) {
+                assert_eq!(held_info, contents);
             }
-            // A different project is independent.
-            let _q = acquired("/q");
-
-            let path = lock.path().to_path_buf();
-            drop(lock);
-            // Released, and the file stays (see the module doc).
-            assert!(path.exists());
             let _again = acquired("/p");
         });
     }
@@ -211,8 +219,7 @@ mod tests {
             let path = lock_path("/p");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, "project=/p\npid=0\nstarted=2026-01-01T00:00:00Z\n").unwrap();
-            let lock = acquired("/p");
-            let contents = std::fs::read_to_string(lock.path()).unwrap();
+            let contents = released_contents(acquired("/p"));
             assert!(!contents.contains("pid=0\n"), "{contents}");
         });
     }
@@ -230,7 +237,7 @@ mod tests {
             let lock = acquire_wait("/p").unwrap();
             assert!(start.elapsed() >= hold / 2, "{:?}", start.elapsed());
             holder.join().unwrap();
-            let contents = std::fs::read_to_string(lock.path()).unwrap();
+            let contents = released_contents(lock);
             assert!(contents.contains("project=/p\n"), "{contents}");
         });
     }
