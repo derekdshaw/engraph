@@ -344,6 +344,25 @@ async fn main() -> Result<()> {
                                 );
                                 continue;
                             }
+                            // Re-indexing a parent replaces what is under it,
+                            // and records over the sub-projects' rows, so a
+                            // prebuilt sub-project would be rebuilt by local
+                            // indexers and lose its mode.
+                            let prebuilt_below = modes.iter().find(|(t, m)| {
+                                m.source != engraph_codegraph::IndexSource::Drivers
+                                    && t.as_str() != subtree
+                                    && (subtree.is_empty()
+                                        || t.strip_prefix(subtree.as_str())
+                                            .is_some_and(|r| r.starts_with('/')))
+                            });
+                            if let Some((below, _)) = prebuilt_below {
+                                println!(
+                                    "  skip {shown} :: covers {}, indexed from prebuilt SCIP; \
+                                     a re-index here would replace it",
+                                    scope_label(&project_key, below)
+                                );
+                                continue;
+                            }
                             // Explicit --bazel-symbols / --no-bazel-symbols on
                             // this run win over what was recorded.
                             let bazel = if bazel_symbols {
@@ -1102,7 +1121,7 @@ fn warn_if_linked_worktree(repo: &std::path::Path) {
     if divergence::in_linked_worktree(repo) {
         eprintln!(
             "warning: {} is a linked worktree; this replaces the index that every worktree of \
-             the repo shares with this branch's code (pass --project to keep a separate index)",
+             the repo shares with this branch's code",
             repo.display()
         );
     }

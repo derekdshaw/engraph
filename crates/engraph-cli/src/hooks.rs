@@ -99,10 +99,10 @@ pub(crate) fn run_session_start_hook(conn: &db::PooledConn, client: HookClient) 
         // of the repo, so a refresh from a linked one would swap in its
         // branch for all of them.
         if auto_index_enabled()
-            && !crate::divergence::in_linked_worktree(Path::new(cwd))
             && engraph_codegraph::indexed_commits(conn, project)
                 .map(|c| !c.is_empty())
                 .unwrap_or(false)
+            && !crate::divergence::in_linked_worktree(Path::new(cwd))
         {
             spawn_detached_index(Path::new(cwd));
         }

@@ -541,3 +541,36 @@ fn a_refresh_repeats_the_recorded_lang_pin() {
         "{s}"
     );
 }
+
+#[test]
+fn a_refresh_does_not_reindex_a_parent_over_a_prebuilt_subproject() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let scip = dir.path().join("empty.scip");
+    let scip = scip.to_str().unwrap();
+    // The whole repo by drivers (emulated), then svc-a from prebuilt SCIP.
+    let out = engraph(&db, &mono, &["index", ".", "--scip", scip]);
+    assert!(out.status.success());
+    set_mode(&db, "drivers", None);
+    let out = engraph(&db, &mono, &["index", "svc-a", "--scip", scip]);
+    assert!(out.status.success());
+    let before = index_state(&db);
+    assert_eq!(before.len(), 2, "{before:?}");
+
+    // An edit in svc-a changes both rows; only the root is outermost.
+    std::fs::write(mono.join("svc-a/src/lib.rs"), "pub fn alpha_handler() {}\n").unwrap();
+    for extra in [&["--dry-run"][..], &[]] {
+        let mut args = vec!["index", "--if-changed", "."];
+        args.extend_from_slice(extra);
+        let out = engraph(&db, &mono, &args);
+        assert!(out.status.success(), "{extra:?}");
+        let s = stdout(&out);
+        assert!(
+            s.contains("skip ") && s.contains("covers") && s.contains("svc-a"),
+            "{s}"
+        );
+        assert!(!s.contains("would re-index"), "{s}");
+        assert!(!s.lines().any(|l| l.starts_with("indexed ")), "{s}");
+    }
+    assert_eq!(index_state(&db), before, "the sub-project keeps its row");
+}

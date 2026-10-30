@@ -1005,7 +1005,10 @@ different worktrees would then keep re-indexing over each other. Linked
 worktrees rely on the per-file divergence check instead: greps on symbols
 whose files their branch changed pass through, and `subgraph` flags those
 files. An explicit `engraph index` from a linked worktree still runs, with a
-warning that it replaces the shared index.
+warning that it replaces the shared index. In a bare-repo layout (`git clone
+--bare` plus `git worktree add`) git lists the bare directory as the main
+worktree, so every checkout counts as linked and no session refreshes the
+index automatically; run `engraph index` by hand there.
 
 `--if-changed` itself (`Cmd::Index`, `main.rs`) resolves the project key with
 `index_scope`, lists the subtrees `divergence::changed_subtrees` reports — one
@@ -1018,7 +1021,9 @@ commit. It repeats how the subtree was indexed (`index_state.source`, `lang`,
 are run again (an explicit `--bazel-symbols` / `--no-bazel-symbols` on the
 refresh wins), and a subtree indexed from prebuilt SCIP (`--scip`,
 `--scip-manifest`) is skipped with a note, since only its producer can rebuild
-it. In a linked worktree it prints `skipped: …` and records nothing. A repo
+it. So is a changed subtree that covers such a prebuilt sub-project: re-indexing
+the parent would rebuild the sub-project with local indexers and record over
+its row. In a linked worktree it prints `skipped: …` and records nothing. A repo
 with no rows prints a hint and exits 0. It composes with `--dry-run` (lists the
 subtrees it would re-index and with which flags) and `--gc`/`--no-gc`, and
 conflicts with everything that pins a source (`--scip`, `--scip-manifest`,
@@ -1041,8 +1046,10 @@ Every index run — explicit, `--if-changed`, manifest, or each project of a
 (`engraph-codegraph::lock`; the data dir is the database's, so
 `ENGRAPH_DB_PATH` moves the locks with it). The holder writes `project=`,
 `pid=`, `started=` lines into it for a run that finds it held. A workspace
-run keeps one lock per project for the whole run, so another run can't slip
-in between two sub-projects of a monorepo.
+run takes the lock of every project it covers before indexing anything, in
+sorted key order, and holds them until it is done: another run can't slip in
+between two sub-projects of a monorepo, and two workspace runs that share
+projects can't each hold a lock the other is waiting for.
 
 A run that finds the lock held: an explicit run (single repo, manifest,
 workspace) logs the holder's start time and the lock path and waits for it,

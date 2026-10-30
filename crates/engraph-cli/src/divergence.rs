@@ -353,6 +353,29 @@ mod tests {
         assert!(!in_linked_worktree(plain.path()));
     }
 
+    /// A bare repo with worktrees has no main checkout: git lists the bare
+    /// directory first, so every worktree counts as linked and none refreshes
+    /// the shared index automatically (DETAILS §8.0.1).
+    #[test]
+    fn in_a_bare_repo_layout_every_worktree_is_linked() {
+        let (dir, repo, _) = repo();
+        let bare = dir.path().join("bare.git");
+        let out = Command::new("git")
+            .args(["clone", "-q", "--bare"])
+            .arg(&repo)
+            .arg(&bare)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let wt = dir.path().join("main-wt");
+        git(&bare, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        assert!(in_linked_worktree(&wt));
+    }
+
     #[test]
     fn outermost_subtrees_drops_nested_entries() {
         let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();

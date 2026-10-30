@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -760,20 +760,35 @@ pub fn index_workspace(
         );
     }
     let mut stats = WorkspaceStats::default();
-    // One lock per project, held until the whole run is done — sub-projects
-    // of a monorepo share a project, and another run mustn't slip in between
-    // them. A workspace run is explicit, so it waits for a run that holds a
-    // project's lock instead of skipping that project.
-    let mut locks: HashMap<String, crate::lock::IndexLock> = HashMap::new();
-    for repo in repos {
-        let (project, subtree) = scope_for(&repo);
+    let scoped: Vec<(PathBuf, String, String)> = repos
+        .into_iter()
+        .map(|repo| {
+            let (project, subtree) = scope_for(&repo);
+            (repo, project, subtree)
+        })
+        .collect();
+    // Take every project's lock before indexing anything, in sorted key
+    // order, and hold them all until the run is done. Sub-projects of a
+    // monorepo share a project, so another run mustn't slip in between them;
+    // and two workspace runs that share projects take their locks in the same
+    // order, so neither can hold one the other waits for while waiting on
+    // the other. A workspace run is explicit, so it waits for a held lock.
+    let projects: BTreeSet<&str> = scoped.iter().map(|(_, p, _)| p.as_str()).collect();
+    let locks: HashMap<String, std::result::Result<crate::lock::IndexLock, String>> = projects
+        .into_iter()
+        .map(|p| {
+            let lock = crate::lock::acquire_wait(p).map_err(|e| format!("{e:#}"));
+            (p.to_string(), lock)
+        })
+        .collect();
+    for (repo, project, subtree) in scoped {
         let scope = IndexScope {
             project: &project,
             subtree: &subtree,
         };
-        let outcome = match hold_lock(&mut locks, &project) {
-            Ok(()) => index_repo_in(conn, &repo, None, None, scope, bazel_symbols, gc),
-            Err(e) => Err(e),
+        let outcome = match &locks[&project] {
+            Ok(_) => index_repo_in(conn, &repo, None, None, scope, bazel_symbols, gc),
+            Err(e) => Err(anyhow::anyhow!("{e}")),
         };
         stats.repos.push(WorkspaceRepoResult {
             repo,
@@ -783,15 +798,6 @@ pub fn index_workspace(
         });
     }
     Ok(stats)
-}
-
-/// Make sure `locks` holds `project`'s index lock, taking it — and waiting for
-/// a run that has it — if this is the first repo of that project.
-fn hold_lock(locks: &mut HashMap<String, crate::lock::IndexLock>, project: &str) -> Result<()> {
-    if let std::collections::hash_map::Entry::Vacant(e) = locks.entry(project.to_string()) {
-        e.insert(crate::lock::acquire_wait(project)?);
-    }
-    Ok(())
 }
 
 /// What `index_repo` *would* do, without doing it. Used by `engraph index
