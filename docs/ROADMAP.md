@@ -30,6 +30,12 @@ engraph indexes all Go modules of a repo, with correct relations between the mod
 
 Plan: [`docs/plans/03-all-go-modules-plan.md`](plans/03-all-go-modules-plan.md)
 
+## 10. Separate code graphs for worktrees
+
+An agent in a worktree sees the base graph together with the changes of that worktree, and not the changes of other worktrees. A merge to the base branch updates the base graph and each overlay.
+
+Plan: [`docs/plans/10-worktree-overlays-plan.md`](plans/10-worktree-overlays-plan.md)
+
 ## 4. Measurement of file reads
 
 Telemetry shows the tokens that file reads use. It also shows the tokens of reads of a file that the session read before. With these data, you can decide if a change to file reads is worth the work.
