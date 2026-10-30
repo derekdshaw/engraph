@@ -360,16 +360,12 @@ mod tests {
     fn in_a_bare_repo_layout_every_worktree_is_linked() {
         let (dir, repo, _) = repo();
         let bare = dir.path().join("bare.git");
-        let out = Command::new("git")
-            .args(["clone", "-q", "--bare"])
-            .arg(&repo)
-            .arg(&bare)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
+        // Clone `.` from inside the repo: on Windows `repo` is canonicalized to
+        // a `\\?\C:\…` path, which git would parse as `host:path` if passed as
+        // the clone source.
+        git(
+            &repo,
+            &["clone", "-q", "--bare", ".", bare.to_str().unwrap()],
         );
         let wt = dir.path().join("main-wt");
         git(&bare, &["worktree", "add", "-q", wt.to_str().unwrap()]);
