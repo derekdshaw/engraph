@@ -1,8 +1,11 @@
 # Design: Bazel-resolved symbol indexing
 
-Status: **proposed / not started.** Scoping doc for a later session. Captures the
-problem, the per-language approach, integration points in this codebase, risks,
-and a phased plan.
+Status: **Phases A (Go) and C (Java) shipped; B (TypeScript) and D (Python)
+open.** Kept as the original design record: the problem, the per-language
+approach, integration points, risks, and the phased plan. Line references and
+the "Problem & evidence" section describe the codebase as of the 2026-06-02
+diagnosis, not today. Current behavior lives in `DETAILS.md` §14.9; remaining
+work in `ROADMAP.md` → "Codegraph follow-ups".
 
 Related: `ROADMAP.md` → "Codegraph follow-ups" (the bullet-level precursors);
 `crates/engraph-codegraph/src/bazel.rs:8` defers this ("symbol-level half … is

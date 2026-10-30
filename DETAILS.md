@@ -54,8 +54,7 @@ crates/
 
 The dependency graph is strictly downward: `engraph-cli` consumes everything.
 `engraph-retrieve` consumes only `engraph-core`. `engraph-ingest` consumes
-`engraph-core`, `engraph-compress`, and `engraph-retrieve` (the retrieve→ingest
-edge is dev-only, so the build graph stays acyclic). `engraph-codegraph`
+`engraph-core`, `engraph-compress`, and `engraph-retrieve`. `engraph-codegraph`
 consumes `engraph-core`. There are no cycles. `engraph-core` has no
 dependencies on the other engraph crates — it's where shared types
 (database pool, telemetry, error type, token counter, embedding trait) live.
@@ -154,7 +153,7 @@ backup-and-restore story trivial.
 | `events`, `session_budget` | The telemetry + budget surface. |
 | `entities`, `relations` | Knowledge-graph tables with `provenance ∈ {extracted, inferred, ambiguous, generated}`. The codegraph populates these from SCIP per-language indexers; `entities` carries `file_path`, `line_range`, `signature` (v6). |
 | `scopes`, `scope_members` | Mempalace-style hierarchical scoping (project / topic / time-window / custom). Used by recall to restrict results to a `cwd` or named scope. |
-| `ingestion_log` | One row per JSONL path with `(last_offset, last_inode, last_size, last_mtime)` so we can detect rotation/truncation (§5.1). |
+| `ingestion_log` | One row per JSONL path with `(last_offset, last_inode, last_size, last_mtime)` so we can detect rotation/truncation (§6.1). |
 
 ---
 
@@ -1198,10 +1197,10 @@ the modules they exercise; cross-cutting behavior lives under
 |---|---|
 | `engraph-core` | UP-only schema migrations are idempotent and refuse a binary older than the on-disk schema; the connection-acquire pragmas apply correctly; the budget gate's escalation thresholds and atomicity under concurrent writers; cosine math and length-mismatch handling for the embedding trait. |
 | `engraph-compress` | The compress pipeline is idempotent (a second pass is a no-op), stamps the sentinel header, and reduces ratio below 1 on realistic input. The ranker is deterministic. Per-filter tests pin token-reduction ratios for every command in the dispatcher and check picker↔FilterOutput id agreement. A separate golden-fixture pass guards byte-exact output drift for high-signal filters (git log, cargo check, cargo-nextest). The read-bucket tests cover per-language comment stripping, no head/tail re-windowing, and the empty-filter fallback. |
-| `engraph-retrieve` | FTS query sanitization, scope filtering applied in WHERE not in Rust, recall end-to-end. Behind the `embeddings` feature: RRF re-ranking actually changes order vs FTS-only, recency tiebreaks toward newer items, missing embeddings produce zero contribution rather than worst-rank, and embedding upserts are idempotent. |
-| `engraph-ingest` | M2-style partial-trailing-line handling on every JSONL chunk; rotation/truncation detection that replays the new file from offset zero; sidechain events are dropped; the per-file transaction commits or rolls back atomically; the compress-existing sweep keeps FTS pointed at the original hash so recall doesn't lose pre-compression matches. |
+| `engraph-retrieve` | FTS query sanitization, scope filtering applied in WHERE not in Rust. Behind the `embeddings` feature: RRF re-ranking actually changes order vs FTS-only, recency tiebreaks toward newer items, missing embeddings produce zero contribution rather than worst-rank, and embedding upserts are idempotent. |
+| `engraph-ingest` | M2-style partial-trailing-line handling on every JSONL chunk; rotation/truncation detection that replays the new file from offset zero; sidechain events are dropped; the per-file transaction commits or rolls back atomically; the compress-existing sweep keeps FTS pointed at the original hash so recall doesn't lose pre-compression matches; an ingest → recall round-trip (`tests/ingest_retrieve_roundtrip.rs`) covers scoped queries and entity search. |
 | `engraph-codegraph` | The SCIP loader's two-pass classifier emits CALLS edges, is idempotent under re-load, and scopes its DELETE to the current project (cross-repo loads don't trample each other). The subgraph renderer covers the four-section markdown shape, disambiguation on ambiguous names, byte-cap truncation, and the cross-repo `repo:<name>` annotation. Driver detection is unit-pinned per build system. Driver end-to-end tests under `tests/drivers_live.rs` soft-skip when the indexer or build tool is absent. Bazel coverage splits into target-level (JSON-proto parsing, location parser, idempotent re-index, target/dep round-trip) and symbol-level (SCIP byte-stream merge that preserves `documents` + `external_symbols`, lang-status display, and a triple-gated live Java integration test). |
-| `engraph-cli` | The four Claude Code hooks are integration-tested against the binary. Pre-bash covers every parser shape (sudo, env prefix, absolute path, `git -C`, heredoc, unquoted shell metachars). Pre-grep exercises the subgraph-redirect gate (1–8 match, regex shape, short patterns, ambiguous resolution), and `index_divergence.rs` covers the indexed commit plus the branch-divergence passthrough and subgraph note. Post-read pins the `additionalContext` shape, the no-signature passthrough, and the unindexed-file no-op. Session-start tests the brief content + byte cap. `engraph run` is tested for budget charging, stdin inheritance, and concurrent pipe drain without deadlock under large output. |
+| `engraph-cli` | The Claude Code hooks are integration-tested against the binary. Pre-bash covers every parser shape (sudo, env prefix, absolute path, `git -C`, heredoc, unquoted shell metachars). Pre-grep exercises the subgraph-redirect gate (1–8 match, regex shape, short patterns, ambiguous resolution), and `index_divergence.rs` covers the indexed commit plus the branch-divergence passthrough and subgraph note. Post-read pins the `additionalContext` shape, the no-signature passthrough, and the unindexed-file no-op. Session-start tests the brief content + byte cap. `engraph run` is tested for budget charging, stdin inheritance, and concurrent pipe drain without deadlock under large output. |
 
 Live-binary tests in `engraph-codegraph/tests/drivers_live.rs`,
 `bazel_live.rs`, and `bazel_symbols_live.rs` soft-skip when the external
@@ -1248,7 +1247,7 @@ the whole project. `--project` overrides the key (whole-project scope).
 
 ### 14.1 Crate boundary
 
-`crates/engraph-codegraph/` is its own workspace member. Seven modules:
+`crates/engraph-codegraph/` is its own workspace member. Eight modules:
 
 | Module | Role |
 |---|---|
@@ -1259,6 +1258,7 @@ the whole project. `--project` overrides the key (whole-project scope).
 | `subgraph.rs` | `subgraph_for()` + `format_markdown()` (§14.4) |
 | `bazel.rs` | target-level Bazel indexing via `bazel query` (§14.8) |
 | `bazel_symbols.rs` | symbol-level Bazel indexing via per-language SCIP indexers (§14.9) |
+| `gc.rs` | `collect_orphans`: pre-index pruning of orphan entities left by older DBs, target-level Bazel rows, or placeholders |
 
 The crate depends on `scip = "0.7"` and `protobuf = "3.7"` (rust-protobuf;
 scip ships pre-generated message code so no `protoc` is needed at build
@@ -1506,8 +1506,10 @@ Per-repo failures are reported but don't abort the run; the CLI prints
 per-repo results plus a workspace summary. Each discovered root's
 `(project, subtree)` comes from the caller (`scope_for`; the CLI passes
 `index_scope`): separate git repos get their own key, and roots inside
-one git repo index into that repo's key as subtrees (§14). Deeper
-recursion is intentionally out of scope; tracked as a follow-up in §15.
+one git repo index into that repo's key as subtrees (§14). `--recursive`
+extends discovery below immediate children (to `RECURSIVE_MAX_DEPTH` = 16),
+pruning build/dep dirs (`node_modules`, `target`, …) and stopping at Bazel
+roots.
 
 **Cross-repo subgraph annotation.** `format_markdown` now compares the
 queried entity's `project` with each related entity's. When they
