@@ -1390,7 +1390,7 @@ callers (`open_pool` etc.) instead of nearby variable names.
 4. `COMMIT`.
 
 Readers see the prior snapshot until commit. Staging-tables-then-swap
-(the heavier pattern ROADMAP.md mentions) is overkill below ~10M
+(the heavier pattern) is overkill below ~10M
 edges; a single `BEGIN…COMMIT` is sufficient at SQLite scale.
 
 Entity-ID collision across the target-level (§14.8) and symbol-level
@@ -1727,12 +1727,12 @@ breaking the target-level pass.
 `pub(crate)` so this module reuses them without restructuring the
 target-level module into a directory.
 
-**Known limitations / followups** (`ROADMAP.md`, deferred until a real
+**Known limitations / followups** (`docs/ROADMAP.md`, deferred until a real
 workload trips them):
 - **Go gazelle bulk**: `go_library` targets without a `go.mod` are
   unreachable by scip-go; the `IndexedModules` `targets` count makes the
   gap visible. The shipped `ENGRAPH_BAZEL_SCIP_GO_CMD` delegate reaches
-  them per repo; "All Go modules in the code graph" in `ROADMAP.md` scopes the in-engraph
+  them per repo; `docs/plans/03-all-go-modules-plan.md` scopes the in-engraph
   alternative (synthesized go.mod).
 - **scip-typescript + rules_ts node_modules**: cold runs may fail until a
   prior `bazel build //...` populates the package-local `node_modules`
@@ -1748,8 +1748,8 @@ workload trips them):
 
 ## 15. Forward pointers
 
-The roadmap (`ROADMAP.md`) tracks features that aren't built, ranked by
-expected impact. The codegraph is shipped (target-level §14.8,
+The roadmap (`docs/ROADMAP.md`, one plan per item in `docs/plans/`)
+tracks features that aren't built, ranked by expected impact. The codegraph is shipped (target-level §14.8,
 symbol-level §14.9); its open items there are automatic index runs,
 deeper workspace discovery, all Go modules in the code graph, Bazel
 symbols for TypeScript and Python, and stable symbol ids (normalization
