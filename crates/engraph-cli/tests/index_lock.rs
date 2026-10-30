@@ -151,6 +151,12 @@ fn the_background_refresh_skips_a_held_lock() {
     let (dir, mono, db) = mono();
     let out = engraph(&db, &mono, &args(&scip_args(dir.path())));
     assert!(out.status.success(), "{}", text(&out));
+    // Record it as a driver run, which a refresh repeats (a `--scip` subtree
+    // it skips without needing the lock).
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute("UPDATE index_state SET source = 'drivers'", [])
+        .unwrap();
     let lock = lock_file(&db, &mono);
     let _held = hold(&lock);
 

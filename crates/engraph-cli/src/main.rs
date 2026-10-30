@@ -283,6 +283,7 @@ async fn main() -> Result<()> {
                     anyhow::bail!("--if-changed needs a git checkout: {}", repo.display());
                 };
                 let recorded = engraph_codegraph::indexed_commits(&conn, &project_key)?;
+                let modes = engraph_codegraph::index_modes(&conn, &project_key)?;
                 // The shared index follows the main worktree; a linked one
                 // relies on the per-file divergence check (see
                 // `in_linked_worktree`).
@@ -325,11 +326,47 @@ async fn main() -> Result<()> {
                                 recorded.len()
                             );
                         }
-                        let mut failed = 0usize;
+                        let (mut attempted, mut failed) = (0usize, 0usize);
                         for subtree in &changed {
                             let shown = scope_label(&project_key, subtree);
+                            // Repeat how this subtree was indexed. Prebuilt
+                            // SCIP can only be rebuilt by whatever produced it.
+                            let mode = modes.get(subtree).cloned().unwrap_or_default();
+                            let flag = match mode.source {
+                                engraph_codegraph::IndexSource::Drivers => None,
+                                engraph_codegraph::IndexSource::Scip => Some("--scip"),
+                                engraph_codegraph::IndexSource::Manifest => Some("--scip-manifest"),
+                            };
+                            if let Some(flag) = flag {
+                                println!(
+                                    "  skip {shown} :: indexed from prebuilt SCIP ({flag}); \
+                                     re-run that index to refresh it"
+                                );
+                                continue;
+                            }
+                            // Explicit --bazel-symbols / --no-bazel-symbols on
+                            // this run win over what was recorded.
+                            let bazel = if bazel_symbols {
+                                true
+                            } else if no_bazel_symbols {
+                                false
+                            } else {
+                                mode.bazel_symbols
+                            };
                             if dry_run {
-                                println!("dry-run: would re-index {shown}");
+                                let mut how = Vec::new();
+                                if let Some(l) = &mode.lang {
+                                    how.push(format!("--lang {l}"));
+                                }
+                                if bazel {
+                                    how.push("--bazel-symbols".to_string());
+                                }
+                                let how = if how.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" ({})", how.join(" "))
+                                };
+                                println!("dry-run: would re-index {shown}{how}");
                                 continue;
                             }
                             let sub_repo = if subtree.is_empty() {
@@ -337,14 +374,15 @@ async fn main() -> Result<()> {
                             } else {
                                 top.join(subtree)
                             };
+                            attempted += 1;
                             let outcome = index_single(
                                 &conn,
                                 &sub_repo,
                                 None,
-                                None,
+                                mode.lang.as_deref(),
                                 &project_key,
                                 subtree,
-                                effective_bazel_symbols,
+                                bazel,
                                 effective_gc,
                             );
                             match outcome {
@@ -355,7 +393,7 @@ async fn main() -> Result<()> {
                                 }
                             }
                         }
-                        all_failed = failed > 0 && failed == changed.len();
+                        all_failed = failed > 0 && failed == attempted;
                     }
                 }
                 if !dry_run {
@@ -427,7 +465,14 @@ async fn main() -> Result<()> {
                     match &r.outcome {
                         Ok(s) => {
                             divergence::record_index_commit(
-                                &conn, &r.project, &r.subtree, &r.repo,
+                                &conn,
+                                &r.project,
+                                &r.subtree,
+                                &r.repo,
+                                &engraph_codegraph::IndexMode {
+                                    bazel_symbols: effective_bazel_symbols,
+                                    ..Default::default()
+                                },
                             )?;
                             println!(
                                 "  ok  {} ({} entities, {} relations, driver={})",
@@ -487,7 +532,16 @@ async fn main() -> Result<()> {
                 };
                 let _lock = engraph_codegraph::acquire_index_lock_wait(&project_key)?;
                 let stats = engraph_codegraph::index_scip_manifest(&conn, m, scope, effective_gc)?;
-                divergence::record_index_commit(&conn, &project_key, &subtree, &repo)?;
+                divergence::record_index_commit(
+                    &conn,
+                    &project_key,
+                    &subtree,
+                    &repo,
+                    &engraph_codegraph::IndexMode {
+                        source: engraph_codegraph::IndexSource::Manifest,
+                        ..Default::default()
+                    },
+                )?;
                 telemetry::record_event(
                     &conn,
                     EventInput {
@@ -1055,8 +1109,8 @@ fn warn_if_linked_worktree(repo: &std::path::Path) {
 }
 
 /// Index one repo — or one sub-project of a monorepo, when `subtree` is
-/// non-empty — into `project_key`, record the commit it was indexed at, and
-/// print the summary line. Shared by a plain `engraph index <repo>` and each
+/// non-empty — into `project_key`, record the commit it was indexed at and
+/// how, and print the summary line. Shared by a plain `engraph index <repo>` and each
 /// subtree of an `--if-changed` refresh; the caller records telemetry, since a
 /// refresh reports one row for the whole run rather than one per subtree.
 #[allow(clippy::too_many_arguments)]
@@ -1075,7 +1129,16 @@ fn index_single(
         subtree,
     };
     let stats = engraph_codegraph::index_repo_in(conn, repo, scip, lang, scope, bazel_symbols, gc)?;
-    divergence::record_index_commit(conn, project_key, subtree, repo)?;
+    let mode = engraph_codegraph::IndexMode {
+        source: if scip.is_some() {
+            engraph_codegraph::IndexSource::Scip
+        } else {
+            engraph_codegraph::IndexSource::Drivers
+        },
+        lang: lang.map(str::to_string),
+        bazel_symbols,
+    };
+    divergence::record_index_commit(conn, project_key, subtree, repo, &mode)?;
     let pruned_note = if stats.entities_pruned > 0 {
         format!(", {} pruned", stats.entities_pruned)
     } else {

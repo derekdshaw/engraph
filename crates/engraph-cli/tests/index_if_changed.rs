@@ -120,6 +120,17 @@ fn index_events(db: &Path) -> Vec<(String, i64)> {
         .collect()
 }
 
+/// Rewrite how every recorded subtree was indexed (`index_state.source` and
+/// `.lang`), to reach refresh paths without running a real indexer.
+fn set_mode(db: &Path, source: &str, lang: Option<&str>) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.execute(
+        "UPDATE index_state SET source = ?1, lang = ?2",
+        rusqlite::params![source, lang],
+    )
+    .unwrap();
+}
+
 fn rust_analyzer_present() -> bool {
     let probe = Command::new("rust-analyzer").arg("--version").output();
     let ok = probe.map(|o| o.status.success()).unwrap_or(false);
@@ -342,6 +353,9 @@ fn session_start_refreshes_an_indexed_repo_in_the_background() {
         &["index", ".", "--scip", scip.to_str().unwrap()],
     );
     assert!(out.status.success());
+    // Indexed driver-free from an empty SCIP, but record it as a driver run:
+    // that's what a refresh repeats (a `--scip` subtree it skips).
+    set_mode(&db, "drivers", None);
     std::fs::write(mono.join("svc-a/src/lib.rs"), "pub fn alpha_handler() {}\n").unwrap();
 
     // The hook returns the brief without waiting on the refresh, which then
@@ -432,7 +446,17 @@ fn a_linked_worktree_does_not_refresh_the_shared_index() {
     let before = index_state(&db);
 
     let wt = dir.path().join("wt");
-    git(&mono, &["worktree", "add", "-q", "-b", "feature", wt.to_str().unwrap()]);
+    git(
+        &mono,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            wt.to_str().unwrap(),
+        ],
+    );
     let wt = wt.canonicalize().unwrap();
     std::fs::write(wt.join("svc-a/src/lib.rs"), "pub fn alpha_handler() {}\n").unwrap();
 
@@ -448,16 +472,72 @@ fn a_linked_worktree_does_not_refresh_the_shared_index() {
     let out = engraph(&db, &wt, &["index", "--if-changed", "."]);
     assert!(out.status.success());
     let s = stdout(&out);
-    assert!(s.starts_with("skipped: ") && s.contains("linked worktree"), "{s}");
+    assert!(
+        s.starts_with("skipped: ") && s.contains("linked worktree"),
+        "{s}"
+    );
     assert_eq!(index_state(&db), before);
 
     // An explicit index still runs there, with a warning.
+    let out = engraph(&db, &wt, &["index", ".", "--scip", scip.to_str().unwrap()]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("warning:") && err.contains("linked worktree"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_refresh_skips_subtrees_indexed_from_prebuilt_scip() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let scip = dir.path().join("empty.scip");
     let out = engraph(
         &db,
-        &wt,
+        &mono,
         &["index", ".", "--scip", scip.to_str().unwrap()],
     );
     assert!(out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("warning:") && err.contains("linked worktree"), "{err}");
+    let before = index_state(&db);
+    std::fs::write(mono.join("svc-a/src/lib.rs"), "pub fn alpha_handler() {}\n").unwrap();
+
+    for extra in [&["--dry-run"][..], &[]] {
+        let mut args = vec!["index", "--if-changed", "."];
+        args.extend_from_slice(extra);
+        let out = engraph(&db, &mono, &args);
+        assert!(out.status.success(), "{extra:?}");
+        let s = stdout(&out);
+        assert!(s.contains("skip ") && s.contains("(--scip)"), "{s}");
+        let reindexed = s.lines().any(|l| l.starts_with("indexed "));
+        assert!(!reindexed && !s.contains("would re-index"), "{s}");
+    }
+    assert_eq!(
+        index_state(&db),
+        before,
+        "a skipped subtree keeps its commit"
+    );
+}
+
+#[test]
+fn a_refresh_repeats_the_recorded_lang_pin() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let scip = dir.path().join("empty.scip");
+    let out = engraph(
+        &db,
+        &mono,
+        &["index", ".", "--scip", scip.to_str().unwrap()],
+    );
+    assert!(out.status.success());
+    set_mode(&db, "drivers", Some("rust-analyzer"));
+    std::fs::write(mono.join("svc-a/src/lib.rs"), "pub fn alpha_handler() {}\n").unwrap();
+
+    let out = engraph(&db, &mono, &["index", "--if-changed", "--dry-run", "."]);
+    assert!(out.status.success());
+    let s = stdout(&out);
+    assert!(
+        s.contains("would re-index") && s.contains("(--lang rust-analyzer)"),
+        "{s}"
+    );
 }

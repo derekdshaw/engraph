@@ -93,9 +93,7 @@ pub fn acquire(project: &str) -> Result<Acquire> {
             let info = std::fs::read_to_string(&path).unwrap_or_default();
             Ok(Acquire::Held { path, info })
         }
-        Err(TryLockError::Error(e)) => {
-            Err(e).with_context(|| format!("lock {}", path.display()))
-        }
+        Err(TryLockError::Error(e)) => Err(e).with_context(|| format!("lock {}", path.display())),
     }
 }
 

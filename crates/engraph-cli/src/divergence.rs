@@ -70,7 +70,8 @@ fn git_stdout(repo: &Path, args: &[&str]) -> Option<String> {
     (!s.is_empty()).then(|| s.to_string())
 }
 
-/// Record the commit `subtree` of `project` was just indexed from. Indexers
+/// Record the commit `subtree` of `project` was just indexed from, and how
+/// (`mode`, so `--if-changed` can repeat it). Indexers
 /// read the working tree, so with uncommitted edits HEAD would flag the very
 /// files just indexed; `git stash create` snapshots the tracked working tree as
 /// a commit without touching the stash list or the files (empty output when the
@@ -80,10 +81,11 @@ pub(crate) fn record_index_commit(
     project: &str,
     subtree: &str,
     repo: &Path,
+    mode: &engraph_codegraph::IndexMode,
 ) -> anyhow::Result<()> {
     let commit =
         git_stdout(repo, &["stash", "create"]).or_else(|| git_stdout(repo, &["rev-parse", "HEAD"]));
-    engraph_codegraph::record_indexed_commit(conn, project, subtree, commit.as_deref())
+    engraph_codegraph::record_indexed_commit(conn, project, subtree, commit.as_deref(), mode)
 }
 
 /// The subset of `files` (repo-relative, indexed under `project`) whose copy in
@@ -333,7 +335,17 @@ mod tests {
         assert!(!in_linked_worktree(&repo));
         assert!(!in_linked_worktree(&repo.join("svc-a")));
         let wt = dir.path().join("wt");
-        git(&repo, &["worktree", "add", "-q", "-b", "feature", wt.to_str().unwrap()]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                wt.to_str().unwrap(),
+            ],
+        );
         assert!(in_linked_worktree(&wt));
         assert!(in_linked_worktree(&wt.join("svc-a")));
         // Outside git there is no worktree to be linked.
@@ -373,8 +385,22 @@ mod tests {
         let project = crate::canonical_repo_key(&repo);
         assert!(changed_subtrees(&conn, &project, &repo).is_empty());
 
-        engraph_codegraph::record_indexed_commit(&conn, &project, "svc-a", Some(&head)).unwrap();
-        engraph_codegraph::record_indexed_commit(&conn, &project, "svc-b", Some(&head)).unwrap();
+        engraph_codegraph::record_indexed_commit(
+            &conn,
+            &project,
+            "svc-a",
+            Some(&head),
+            &Default::default(),
+        )
+        .unwrap();
+        engraph_codegraph::record_indexed_commit(
+            &conn,
+            &project,
+            "svc-b",
+            Some(&head),
+            &Default::default(),
+        )
+        .unwrap();
         assert!(changed_subtrees(&conn, &project, &repo).is_empty());
 
         std::fs::write(repo.join("svc-b/b.rs"), "fn b() { 2 }\n").unwrap();
@@ -383,7 +409,14 @@ mod tests {
         // svc-b re-indexed at the edited state: nothing is stale any more.
         git(&repo, &["commit", "-q", "-am", "b"]);
         let head2 = git(&repo, &["rev-parse", "HEAD"]);
-        engraph_codegraph::record_indexed_commit(&conn, &project, "svc-b", Some(&head2)).unwrap();
+        engraph_codegraph::record_indexed_commit(
+            &conn,
+            &project,
+            "svc-b",
+            Some(&head2),
+            &Default::default(),
+        )
+        .unwrap();
         assert!(changed_subtrees(&conn, &project, &repo).is_empty());
         // ...while svc-a, still indexed at the first commit, is unaffected by
         // a commit that only touched svc-b.
