@@ -1,32 +1,27 @@
 //! One index run per project at a time.
 //!
-//! An index run takes a lock file for its project under `<data dir>/locks/`
-//! (next to the database, so `ENGRAPH_DB_PATH` moves it too) and removes it
-//! when it finishes, by `Drop`. A second run that finds the file does not
-//! start. A run that dies before the end — killed, crashed, machine off —
-//! leaves its file behind, so a file older than [`STALE_AFTER`] is taken for
-//! such a remnant and removed by the next run to come along.
+//! An index run locks a file for its project under `<data dir>/locks/` (next
+//! to the database, so `ENGRAPH_DB_PATH` moves it too) with an OS file lock
+//! (`File::try_lock` / `File::lock`). The OS releases the lock when the
+//! process ends — also when it is killed or crashes — so a dead run never
+//! blocks the next one, and no stale-file timeout is needed.
 //!
-//! Creation is `create_new` (O_EXCL), which is atomic on every platform we
-//! build for, so two runs racing for a free lock get exactly one winner. A
-//! stale file is not deleted in place: it is renamed to a per-process name
-//! first, so two runs that both judge it stale can't delete each other's
-//! fresh replacement — only the one whose rename succeeded took it away, and
-//! both then go back to `create_new`, where again one wins.
+//! The file is never deleted. Deleting it while another process waits on it
+//! would let a third process create and lock a new file at the same path
+//! while the waiter goes on to lock the old, unlinked one: two holders.
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use std::io::Write;
+use std::fs::{File, TryLockError};
+use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
 
-/// A lock file this old belongs to a run that never finished.
-pub const STALE_AFTER: Duration = Duration::from_secs(30 * 60);
-
-/// Held for the duration of an index run; removing the file on drop.
+/// Held for the duration of an index run; the OS lock is released when this
+/// (its open file) is dropped.
 #[derive(Debug)]
 pub struct IndexLock {
     path: PathBuf,
+    _file: File,
 }
 
 impl IndexLock {
@@ -35,27 +30,15 @@ impl IndexLock {
     }
 }
 
-impl Drop for IndexLock {
-    fn drop(&mut self) {
-        // A vanished file (someone judged us stale and removed it) is fine;
-        // anything else is logged, since the remnant blocks the next run for
-        // up to STALE_AFTER.
-        if let Err(e) = std::fs::remove_file(&self.path)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(path = %self.path.display(), error = %e, "index lock not removed");
-        }
-    }
-}
-
 /// Outcome of [`acquire`].
 #[derive(Debug)]
 pub enum Acquire {
     Acquired(IndexLock),
-    /// Another run holds the lock (its file is younger than [`STALE_AFTER`]).
+    /// Another run holds the lock.
     Held {
         path: PathBuf,
-        /// What the holder wrote: project, pid, start time.
+        /// What the holder wrote: project, pid, start time. Empty where the
+        /// platform's lock also blocks reads (Windows).
         info: String,
     },
 }
@@ -67,10 +50,8 @@ pub fn held_message(project: &str, path: &Path, info: &str) -> String {
         .find_map(|l| l.strip_prefix("started="))
         .unwrap_or("unknown time");
     format!(
-        "an index run for {project} is already in progress (lock {}, started {started}); \
-         locks older than {} min are cleared automatically",
-        path.display(),
-        STALE_AFTER.as_secs() / 60
+        "an index run for {project} is already in progress (lock {}, started {started})",
+        path.display()
     )
 }
 
@@ -102,84 +83,75 @@ pub fn lock_path_in(dir: &Path, project: &str) -> PathBuf {
     dir.join(format!("index-{}.lock", &hex[..16]))
 }
 
-/// Take the index lock for `project`, removing a stale file first. `Held`
-/// when a live run has it; `Err` only for I/O trouble other than contention.
+/// Take the index lock for `project` without waiting. `Held` when another run
+/// has it; `Err` only for I/O trouble.
 pub fn acquire(project: &str) -> Result<Acquire> {
+    let (path, file) = open(project)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Acquire::Acquired(claim(project, path, file))),
+        Err(TryLockError::WouldBlock) => {
+            let info = std::fs::read_to_string(&path).unwrap_or_default();
+            Ok(Acquire::Held { path, info })
+        }
+        Err(TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("lock {}", path.display()))
+        }
+    }
+}
+
+/// Take the index lock for `project`, waiting for a run that holds it to
+/// finish. For explicit index runs: the user asked for this index, so it
+/// queues behind a background refresh instead of failing.
+pub fn acquire_wait(project: &str) -> Result<IndexLock> {
+    match acquire(project)? {
+        Acquire::Acquired(lock) => Ok(lock),
+        Acquire::Held { path, info } => {
+            tracing::warn!(
+                "{}; waiting for it to finish",
+                held_message(project, &path, &info)
+            );
+            let (path, file) = open(project)?;
+            file.lock()
+                .with_context(|| format!("lock {}", path.display()))?;
+            Ok(claim(project, path, file))
+        }
+    }
+}
+
+/// The lock file, created if missing. Not truncated: until we hold the lock,
+/// its contents belong to whoever does.
+fn open(project: &str) -> Result<(PathBuf, File)> {
     let path = lock_path(project);
     std::fs::create_dir_all(path.parent().expect("lock path has a parent"))
         .with_context(|| format!("create lock dir for {}", path.display()))?;
-    // Two attempts: the first may find a stale file and clear it; the second
-    // then competes for the free slot. Anything still there after that is
-    // live, or was just taken by a run that beat us to it — either way, held.
-    for attempt in 0..2 {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut f) => {
-                // Best-effort contents for whoever reads the file by hand;
-                // staleness goes by mtime, not by this.
-                let _ = write!(
-                    f,
-                    "project={project}\npid={}\nstarted={}\n",
-                    std::process::id(),
-                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-                );
-                return Ok(Acquire::Acquired(IndexLock { path }));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if attempt == 0 && remove_if_stale(&path) {
-                    continue;
-                }
-                let info = std::fs::read_to_string(&path).unwrap_or_default();
-                return Ok(Acquire::Held { path, info });
-            }
-            Err(e) => {
-                return Err(e).with_context(|| format!("create index lock {}", path.display()));
-            }
-        }
-    }
-    unreachable!("both acquire attempts fell through")
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("open index lock {}", path.display()))?;
+    Ok((path, file))
 }
 
-/// Remove `path` if its mtime is older than [`STALE_AFTER`]. `true` when the
-/// file is gone afterwards — removed here, or by someone else meanwhile — so
-/// the caller should try to create it again; `false` when it is live.
-fn remove_if_stale(path: &Path) -> bool {
-    let modified = match std::fs::metadata(path).and_then(|m| m.modified()) {
-        Ok(t) => t,
-        // Vanished between the failed create and now: free to retry.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
-        Err(_) => return false,
-    };
-    let age = SystemTime::now()
-        .duration_since(modified)
-        .unwrap_or(Duration::ZERO);
-    if age < STALE_AFTER {
-        return false;
-    }
-    // Claim it by rename before deleting: if another run already renamed it
-    // away, our rename fails and we must not touch the fresh lock it may
-    // have created since.
-    let claimed = path.with_extension(format!("stale-{}", std::process::id()));
-    match std::fs::rename(path, &claimed) {
-        Ok(()) => {
-            tracing::warn!(
-                path = %path.display(),
-                age_secs = age.as_secs(),
-                "removing stale index lock"
-            );
-            let _ = std::fs::remove_file(&claimed);
-            true
-        }
-        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
-    }
+/// Record who holds the lock, for a run that finds it held. Best-effort: the
+/// lock is the OS lock, not these contents.
+fn claim(project: &str, path: PathBuf, mut file: File) -> IndexLock {
+    let _ = file.set_len(0).and_then(|()| file.rewind()).and_then(|()| {
+        write!(
+            file,
+            "project={project}\npid={}\nstarted={}\n",
+            std::process::id(),
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        )
+    });
+    IndexLock { path, _file: file }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     /// Serialize tests that set `ENGRAPH_DB_PATH` (process-global).
     static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -195,73 +167,73 @@ mod tests {
         out
     }
 
+    fn acquired(project: &str) -> IndexLock {
+        match acquire(project).unwrap() {
+            Acquire::Acquired(l) => l,
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn acquire_is_exclusive_and_released_on_drop() {
         with_temp_data_dir(|| {
-            let lock = match acquire("/p").unwrap() {
-                Acquire::Acquired(l) => l,
-                other => panic!("{other:?}"),
-            };
-            assert!(lock.path().exists());
+            let lock = acquired("/p");
             assert!(lock.path().starts_with(lock_dir()));
             let contents = std::fs::read_to_string(lock.path()).unwrap();
             assert!(contents.contains("project=/p\n"), "{contents}");
-            assert!(contents.contains("pid="), "{contents}");
+            assert!(
+                contents.contains(&format!("pid={}\n", std::process::id())),
+                "{contents}"
+            );
 
             match acquire("/p").unwrap() {
                 Acquire::Held { path, info } => {
                     assert_eq!(path, lock.path());
+                    #[cfg(unix)]
                     assert_eq!(info, contents);
+                    let _ = info;
                 }
                 other => panic!("{other:?}"),
             }
             // A different project is independent.
-            assert!(matches!(acquire("/q").unwrap(), Acquire::Acquired(_)));
+            let _q = acquired("/q");
 
             let path = lock.path().to_path_buf();
             drop(lock);
-            assert!(!path.exists());
-            assert!(matches!(acquire("/p").unwrap(), Acquire::Acquired(_)));
+            // Released, and the file stays (see the module doc).
+            assert!(path.exists());
+            let _again = acquired("/p");
         });
     }
 
     #[test]
-    fn stale_lock_is_replaced_and_fresh_lock_is_not() {
+    fn a_leftover_file_without_a_lock_does_not_block() {
         with_temp_data_dir(|| {
+            // What a killed run leaves: the file, but no OS lock.
             let path = lock_path("/p");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, "project=/p\npid=0\n").unwrap();
-            let old = SystemTime::now() - STALE_AFTER - Duration::from_secs(60);
-            std::fs::File::options()
-                .write(true)
-                .open(&path)
-                .unwrap()
-                .set_modified(old)
-                .unwrap();
-
-            let lock = match acquire("/p").unwrap() {
-                Acquire::Acquired(l) => l,
-                other => panic!("stale lock should be replaced: {other:?}"),
-            };
+            std::fs::write(&path, "project=/p\npid=0\nstarted=2026-01-01T00:00:00Z\n").unwrap();
+            let lock = acquired("/p");
             let contents = std::fs::read_to_string(lock.path()).unwrap();
-            assert!(contents.contains(&format!("pid={}\n", std::process::id())));
-            // No `.stale-<pid>` leftovers.
-            let leftovers: Vec<_> = std::fs::read_dir(lock_dir())
-                .unwrap()
-                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-                .filter(|n| n.contains("stale"))
-                .collect();
-            assert!(leftovers.is_empty(), "{leftovers:?}");
+            assert!(!contents.contains("pid=0\n"), "{contents}");
+        });
+    }
 
-            // Just under the threshold is still live.
-            let nearly = SystemTime::now() - STALE_AFTER + Duration::from_secs(60);
-            std::fs::File::options()
-                .write(true)
-                .open(lock.path())
-                .unwrap()
-                .set_modified(nearly)
-                .unwrap();
-            assert!(matches!(acquire("/p").unwrap(), Acquire::Held { .. }));
+    #[test]
+    fn acquire_wait_blocks_until_the_holder_releases() {
+        with_temp_data_dir(|| {
+            let lock = acquired("/p");
+            let hold = Duration::from_millis(300);
+            let holder = std::thread::spawn(move || {
+                std::thread::sleep(hold);
+                drop(lock);
+            });
+            let start = Instant::now();
+            let lock = acquire_wait("/p").unwrap();
+            assert!(start.elapsed() >= hold / 2, "{:?}", start.elapsed());
+            holder.join().unwrap();
+            let contents = std::fs::read_to_string(lock.path()).unwrap();
+            assert!(contents.contains("project=/p\n"), "{contents}");
         });
     }
 

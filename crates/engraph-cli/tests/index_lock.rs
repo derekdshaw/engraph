@@ -1,28 +1,41 @@
-//! One index run per project: `engraph index` takes `<data dir>/locks/
-//! index-<hash>.lock` for the project and removes it at the end, also after a
-//! failure. A second run finding the file does not start — an explicit run
-//! fails, `--if-changed` (the background refresh) skips — and a file older
-//! than 30 minutes is a remnant of a run that never finished, so it is
-//! cleared and the run proceeds.
+//! One index run per project: `engraph index` holds an OS lock on `<data
+//! dir>/locks/index-<hash>.lock` for the project and releases it at the end,
+//! also after a failure. A second run that finds it held waits if it is
+//! explicit and skips if it is `--if-changed` (the background refresh). A
+//! leftover file with no lock on it — what a killed run leaves — blocks
+//! nothing.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, SystemTime};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 use tempfile::tempdir;
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_engraph")
 }
 
-fn engraph(db: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(bin())
-        .env_clear()
+fn command(db: &Path, cwd: &Path, args: &[&str]) -> Command {
+    let mut c = Command::new(bin());
+    c.env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", std::env::var("HOME").unwrap_or_default())
         .env("ENGRAPH_DB_PATH", db)
         .current_dir(cwd)
-        .args(args)
-        .output()
+        .args(args);
+    c
+}
+
+fn engraph(db: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
+    command(db, cwd, args).output().expect("spawn engraph")
+}
+
+/// `engraph` started in the background, for a run expected to wait.
+fn spawn(db: &Path, cwd: &Path, args: &[&str]) -> Child {
+    command(db, cwd, args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("spawn engraph")
 }
 
@@ -86,15 +99,21 @@ fn lock_file(db: &Path, repo: &Path) -> PathBuf {
     engraph_codegraph::lock::lock_path_in(&dir, &repo.to_string_lossy())
 }
 
-fn hold_lock(path: &Path, age: Duration) {
+const HOLDER: &str = "project=test\npid=0\nstarted=2026-01-01T00:00:00Z\n";
+
+/// Lock `path` the way another index run would; held until dropped.
+fn hold(path: &Path) -> File {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, "project=test\npid=0\nstarted=2026-01-01T00:00:00Z\n").unwrap();
-    std::fs::File::options()
-        .write(true)
-        .open(path)
-        .unwrap()
-        .set_modified(SystemTime::now() - age)
-        .unwrap();
+    std::fs::write(path, HOLDER).unwrap();
+    let f = File::options().read(true).write(true).open(path).unwrap();
+    f.lock().unwrap();
+    f
+}
+
+/// Whether nobody holds the OS lock on `path`.
+fn is_free(path: &Path) -> bool {
+    let f = File::options().read(true).write(true).open(path).unwrap();
+    f.try_lock().is_ok()
 }
 
 fn scip_args(dir: &Path) -> [String; 4] {
@@ -107,12 +126,12 @@ fn args(a: &[String]) -> Vec<&str> {
 }
 
 #[test]
-fn a_run_takes_the_lock_and_releases_it_at_the_end() {
+fn a_run_releases_the_lock_at_the_end() {
     let (dir, mono, db) = mono();
     let lock = lock_file(&db, &mono);
     let out = engraph(&db, &mono, &args(&scip_args(dir.path())));
     assert!(out.status.success(), "{}", text(&out));
-    assert!(!lock.exists(), "lock left behind after a finished run");
+    assert!(is_free(&lock), "lock still held after a finished run");
     // Also after a run that fails: no manifest in an empty repo → no driver.
     let other = dir.path().join("other");
     std::fs::create_dir_all(&other).unwrap();
@@ -120,30 +139,21 @@ fn a_run_takes_the_lock_and_releases_it_at_the_end() {
     let other = other.canonicalize().unwrap();
     let out = engraph(&db, &other, &["index", "."]);
     assert!(!out.status.success());
+    let other_lock = lock_file(&db, &other);
     assert!(
-        !lock_file(&db, &other).exists(),
-        "lock left behind after a failed run"
+        !other_lock.exists() || is_free(&other_lock),
+        "lock still held after a failed run"
     );
 }
 
 #[test]
-fn a_held_lock_stops_a_second_run() {
+fn the_background_refresh_skips_a_held_lock() {
     let (dir, mono, db) = mono();
-    let scip = scip_args(dir.path());
-    let out = engraph(&db, &mono, &args(&scip));
+    let out = engraph(&db, &mono, &args(&scip_args(dir.path())));
     assert!(out.status.success(), "{}", text(&out));
     let lock = lock_file(&db, &mono);
-    hold_lock(&lock, Duration::from_secs(60));
+    let _held = hold(&lock);
 
-    // An explicit run fails and says why.
-    let out = engraph(&db, &mono, &args(&scip));
-    assert!(!out.status.success());
-    let t = text(&out);
-    assert!(t.contains("already in progress"), "{t}");
-    assert!(t.contains(&lock.to_string_lossy().into_owned()), "{t}");
-    assert!(t.contains("2026-01-01T00:00:00Z"), "{t}");
-
-    // The background refresh yields quietly: exit 0, nothing re-indexed.
     std::fs::write(mono.join("svc-a/src/lib.rs"), "pub fn f() { 1 }\n").unwrap();
     let out = engraph(&db, &mono, &["index", "--if-changed", "."]);
     assert!(out.status.success(), "{}", text(&out));
@@ -152,49 +162,66 @@ fn a_held_lock_stops_a_second_run() {
         t.starts_with("skipped: ") && t.contains("already in progress"),
         "{t}"
     );
+    assert!(t.contains(&lock.to_string_lossy().into_owned()), "{t}");
+    // Windows locks block reads too, so only Unix can show the holder's start.
+    #[cfg(unix)]
+    assert!(t.contains("2026-01-01T00:00:00Z"), "{t}");
     assert!(!t.contains("indexed "), "{t}");
     // A dry run needs no lock.
     let out = engraph(&db, &mono, &["index", "--if-changed", "--dry-run", "."]);
     assert!(text(&out).contains("would re-index"), "{}", text(&out));
-
-    // A workspace run reports it per repo and indexes nothing.
-    let out = engraph(&db, &mono, &["index", "--workspace", "."]);
-    let t = text(&out);
-    assert_eq!(t.matches("already in progress").count(), 2, "{t}");
-    assert!(t.contains("0 repo(s) ok, 2 failed"), "{t}");
-
-    // None of that touched the foreign lock.
-    assert!(lock.exists());
-    assert_eq!(
-        std::fs::read_to_string(&lock).unwrap(),
-        "project=test\npid=0\nstarted=2026-01-01T00:00:00Z\n"
-    );
+    // The holder's record is untouched.
+    #[cfg(unix)]
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), HOLDER);
 }
 
 #[test]
-fn a_lock_older_than_thirty_minutes_is_cleared() {
+fn an_explicit_run_waits_for_a_held_lock() {
     let (dir, mono, db) = mono();
     let lock = lock_file(&db, &mono);
-    hold_lock(
-        &lock,
-        engraph_codegraph::STALE_AFTER + Duration::from_secs(60),
+    let held = hold(&lock);
+
+    let scip = scip_args(dir.path());
+    let mut child = spawn(&db, &mono, &args(&scip));
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "explicit run did not wait for the held lock"
     );
+    drop(held);
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    let t = text(&out);
+    assert!(t.contains("waiting for it to finish"), "{t}");
+    assert!(t.contains("indexed "), "{t}");
+    assert!(is_free(&lock));
+}
+
+#[test]
+fn a_workspace_run_waits_once_per_project() {
+    let (_dir, mono, db) = mono();
+    let lock = lock_file(&db, &mono);
+    let held = hold(&lock);
+    // Both crates are sub-projects of one repo: one project, one lock.
+    let child = spawn(&db, &mono, &["index", "--workspace", "."]);
+    std::thread::sleep(Duration::from_millis(700));
+    drop(held);
+    let out = child.wait_with_output().unwrap();
+    let t = text(&out);
+    assert_eq!(t.matches("waiting for it to finish").count(), 1, "{t}");
+    assert!(is_free(&lock));
+}
+
+#[test]
+fn a_leftover_lock_file_does_not_block() {
+    let (dir, mono, db) = mono();
+    let lock = lock_file(&db, &mono);
+    // What a killed run leaves behind: the file, with no lock on it.
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    std::fs::write(&lock, HOLDER).unwrap();
     let out = engraph(&db, &mono, &args(&scip_args(dir.path())));
     assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("indexed "), "{}", text(&out));
-    assert!(!lock.exists(), "the run's own lock is released at the end");
-    let leftovers: Vec<_> = std::fs::read_dir(lock.parent().unwrap())
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    assert!(leftovers.is_empty(), "{leftovers:?}");
-
-    // Younger than that, it is honoured.
-    hold_lock(
-        &lock,
-        engraph_codegraph::STALE_AFTER - Duration::from_secs(60),
-    );
-    let out = engraph(&db, &mono, &args(&scip_args(dir.path())));
-    assert!(!out.status.success());
-    assert!(text(&out).contains("already in progress"), "{}", text(&out));
+    let t = text(&out);
+    assert!(t.contains("indexed "), "{t}");
+    assert!(!t.contains("waiting"), "{t}");
 }

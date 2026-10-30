@@ -473,7 +473,7 @@ async fn main() -> Result<()> {
                     project: &project_key,
                     subtree: &subtree,
                 };
-                let _lock = take_index_lock(&project_key)?.map_err(|held| anyhow::anyhow!(held))?;
+                let _lock = engraph_codegraph::acquire_index_lock_wait(&project_key)?;
                 let stats = engraph_codegraph::index_scip_manifest(&conn, m, scope, effective_gc)?;
                 divergence::record_index_commit(&conn, &project_key, &subtree, &repo)?;
                 telemetry::record_event(
@@ -511,7 +511,7 @@ async fn main() -> Result<()> {
                     Some(p) => (p, String::new()),
                     None => divergence::index_scope(&repo),
                 };
-                let _lock = take_index_lock(&project_key)?.map_err(|held| anyhow::anyhow!(held))?;
+                let _lock = engraph_codegraph::acquire_index_lock_wait(&project_key)?;
                 let stats = index_single(
                     &conn,
                     &repo,
@@ -1012,17 +1012,12 @@ fn resolve_project(over: Option<String>) -> Result<String> {
     Ok(canonical_repo_key(&cwd))
 }
 
-/// Stable identity for the repo containing `start`, used as the `project` scope
-/// key. For a git repo this is the **main worktree** path — shared across every
-/// linked worktree — so all worktrees of a repo map to one logical index instead
-/// of each worktree's distinct path spawning a duplicate. Falls back to the
-/// canonicalized path when `start` isn't in a git repo (or git is unavailable),
-/// which also collapses symlinked checkouts to one key.
-/// Take the index lock for `project_key`, or explain who holds it. The
-/// caller keeps the guard alive for the whole run; it removes the file on
-/// drop — also when the run fails with an error. A run that is killed leaves
-/// the file, and `lock::acquire` clears it once it is stale. The outer
-/// `Result` is I/O trouble; the inner `Err` is the held-lock message.
+/// Take the index lock for `project_key` without waiting, or explain who holds
+/// it. For the `--if-changed` refresh, which yields to an active run; explicit
+/// runs wait instead (`acquire_index_lock_wait`). The caller keeps the guard
+/// alive for the whole run; the OS releases the lock when it is dropped or the
+/// process ends. The outer `Result` is I/O trouble; the inner `Err` is the
+/// held-lock message.
 fn take_index_lock(project_key: &str) -> Result<std::result::Result<IndexLock, String>> {
     use engraph_codegraph::{Acquire, acquire_index_lock, held_message};
     Ok(match acquire_index_lock(project_key)? {
@@ -1072,6 +1067,12 @@ fn index_single(
     Ok(stats)
 }
 
+/// Stable identity for the repo containing `start`, used as the `project` scope
+/// key. For a git repo this is the **main worktree** path — shared across every
+/// linked worktree — so all worktrees of a repo map to one logical index instead
+/// of each worktree's distinct path spawning a duplicate. Falls back to the
+/// canonicalized path when `start` isn't in a git repo (or git is unavailable),
+/// which also collapses symlinked checkouts to one key.
 pub(crate) fn canonical_repo_key(start: &std::path::Path) -> String {
     if let Some(root) = git_main_worktree(start) {
         return root;

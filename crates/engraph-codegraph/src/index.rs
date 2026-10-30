@@ -688,8 +688,8 @@ pub fn index_workspace(
     let mut stats = WorkspaceStats::default();
     // One lock per project, held until the whole run is done — sub-projects
     // of a monorepo share a project, and another run mustn't slip in between
-    // them. A project whose lock is held by someone else fails per-repo, like
-    // any other per-repo failure.
+    // them. A workspace run is explicit, so it waits for a run that holds a
+    // project's lock instead of skipping that project.
     let mut locks: HashMap<String, crate::lock::IndexLock> = HashMap::new();
     for repo in repos {
         let (project, subtree) = scope_for(&repo);
@@ -711,22 +711,13 @@ pub fn index_workspace(
     Ok(stats)
 }
 
-/// Make sure `locks` holds `project`'s index lock, taking it if this is the
-/// first repo of that project. `Err` when another run has it.
+/// Make sure `locks` holds `project`'s index lock, taking it — and waiting for
+/// a run that has it — if this is the first repo of that project.
 fn hold_lock(locks: &mut HashMap<String, crate::lock::IndexLock>, project: &str) -> Result<()> {
-    if locks.contains_key(project) {
-        return Ok(());
+    if let std::collections::hash_map::Entry::Vacant(e) = locks.entry(project.to_string()) {
+        e.insert(crate::lock::acquire_wait(project)?);
     }
-    match crate::lock::acquire(project)? {
-        crate::lock::Acquire::Acquired(l) => {
-            locks.insert(project.to_string(), l);
-            Ok(())
-        }
-        crate::lock::Acquire::Held { path, info } => Err(anyhow::anyhow!(
-            "{}",
-            crate::lock::held_message(project, &path, &info)
-        )),
-    }
+    Ok(())
 }
 
 /// What `index_repo` *would* do, without doing it. Used by `engraph index
