@@ -1,25 +1,34 @@
 # engraph
 
-A Rust CLI that cuts Codex token usage via persistent session memory,
-scoped retrieval, deterministic compression of command output, and telemetry
-measuring the savings. Local-first: one SQLite file at
+A Rust CLI that cuts coding-agent (Claude Code, Codex) token usage via
+persistent session memory, scoped retrieval, deterministic compression of
+command output, and telemetry measuring the savings. Local-first: one SQLite file at
 `~/.local/share/engraph/engraph.db` (override `ENGRAPH_DB_PATH`). No daemon.
 
-This repo **dogfoods itself** — the `engraph` binary is wired into Codex
-hooks (`~/.Codex/settings.json`: pre-bash, pre-grep, post-read, SessionStart,
-SessionEnd). Changes here affect the live session you're in.
+This repo **dogfoods itself** — the `engraph` binary is wired into Claude Code
+hooks (`~/.claude/settings.json`: pre-bash, pre-grep, post-read, SessionStart,
+SessionEnd) and Codex hooks (`~/.codex/hooks.json`: SessionStart, Stop). Changes
+here affect the live session you're in.
 
 ## Use engraph for search before broad grep/read
 
-When orienting in this codebase, prefer engraph's own retrieval over a cold
-grep/read sweep:
+When you need context on a code symbol — what it is, what calls it, what it
+calls, what lives beside it — **`engraph subgraph <symbol>` is the default, not
+grep/read.** It returns a 2-hop neighborhood in one call; grepping a symbol then
+reading each hit is the slow path. Reach for it whenever you catch yourself about
+to grep for a function/type/method name or open a file just to see what's around
+a definition.
 
+- **Code symbol + its callers/callees/siblings** → `engraph subgraph <symbol>` (the first move for code context)
 - **Prior context / decisions / conversation history** → `engraph recall "<topic>" --project "$(pwd)"`
-- **Code symbol + its callers/callees/siblings** → `engraph subgraph <symbol>`
-- Fall back to grep/read when those come up empty or you need exact text.
+- Fall back to grep/read only when subgraph comes up empty, the target isn't a
+  symbol, or you need exact text/line content.
 
-(The pre-grep / post-read hooks already nudge this when the codegraph is
-populated — keep it built with `engraph index .`.)
+Under Claude Code the pre-grep / pre-bash hooks enforce this (Codex has no
+tool-use hooks wired, so there it's on you): a `grep`/`rg` for an indexed symbol
+(including `fn x`, `x(`, `Foo::bar` shapes) is denied and redirected to
+`engraph subgraph`. Add a regex metachar (`x\b`) to bypass when you truly need
+raw text. Keep the graph fresh with `engraph index .`.
 
 ## Crate map
 
@@ -28,9 +37,9 @@ populated — keep it built with `engraph index .`.)
 | `engraph-core` | SQLite pool + schema/migrations (`db`), `budget`, `telemetry`/events, `memory` (do_not_repeat/bugs/context_items), `tokens` (tiktoken), feature-gated `embedding` |
 | `engraph-compress` | Deterministic output compression; per-command filters in `filters/` (one fn + a `filters::pick` arm each); `preprocess`/`rank`/`sentinel`/`brevity` |
 | `engraph-retrieve` | Recall: FTS5 (`lib`) + `hybrid` embeddings; project `scope`s |
-| `engraph-ingest` | JSONL transcript → SQLite. `ingest` (parse + incremental offset/rotation handling), `sweep` (compress existing rows), `common` (sha256 + threshold) |
-| `engraph-codegraph` | SCIP indexing (`index`, `scip_loader`, `driver`, `bazel`, `bazel_symbols`), `subgraph` neighborhoods, `relation_kind` |
-| `engraph-cli` | The `engraph` binary. `main` (dispatch), `cli` (clap defs), `rewrite` (bash-rewrite parser), `redirect` (grep→subgraph), `hooks` (5 lifecycle hooks + brief + catch-up ingest), `output` (tables/plans) |
+| `engraph-ingest` | JSONL transcript → SQLite. `ingest` (parse + incremental offset/rotation handling), `sweep` (compress existing rows), `digest` (per-session `session_digest` context item), `common` (sha256 + threshold) |
+| `engraph-codegraph` | SCIP indexing (`index`, `scip_loader`, `driver`, `bazel`, `bazel_symbols`, `gc`), `subgraph` neighborhoods, `relation_kind` |
+| `engraph-cli` | The `engraph` binary. `main` (dispatch), `cli` (clap defs), `rewrite` (bash-rewrite parser), `redirect` (grep→subgraph), `divergence` (index scope + commit per checkout, files changed since, absolute path → indexed location), `hooks` (5 lifecycle hooks + brief + catch-up ingest), `output` (tables/plans) |
 
 ## Conventions
 

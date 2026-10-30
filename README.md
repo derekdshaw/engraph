@@ -42,13 +42,13 @@ The pre-bash parser handles common command shapes that would otherwise misroute.
 
 ### Session memory
 
-`engraph ingest` ingests Claude Code's JSONL transcript files into SQLite. Wired as a `SessionEnd` hook, it runs automatically when a session closes. Ingestion is incremental — it tracks file offsets and handles log rotation and truncation correctly.
+`engraph ingest` ingests Claude Code's JSONL transcript files and Codex rollout files (`$CODEX_HOME/sessions`) into SQLite. Wired as a `SessionEnd` hook (Codex: `Stop`), it runs automatically when a session closes. Ingestion is incremental — it tracks file offsets and handles log rotation and truncation correctly.
 
 `engraph recall <query>` retrieves relevant messages and context items using FTS5 full-text search. Results are scoped by working directory so queries in one project don't surface noise from another.
 
 ### SessionStart context injection
 
-`engraph hook session-start` injects prior project context as `additionalContext` at the start of each Claude session: stored do-not-repeat rules, open bugs, recent decisions, and budget status (each section capped at the 5 most-recent entries). It also performs a best-effort catch-up ingest of the project's transcripts first, so sessions that closed without a clean `SessionEnd` are still captured (incremental and idempotent via `ingestion_log` offsets). Empty briefs cost zero tokens. The cap is 2KB to keep the per-session opening cost predictable.
+`engraph hook session-start` injects prior project context as `additionalContext` at the start of each Claude session: stored do-not-repeat rules, open bugs, a one-line summary of the last session (full digest via `engraph resume`), recent decisions, and budget status (rules, bugs, and decisions each capped at the 5 most-recent entries). It also performs a best-effort catch-up ingest of the project's transcripts first, so sessions that closed without a clean `SessionEnd` are still captured (incremental and idempotent via `ingestion_log` offsets). Empty briefs cost zero tokens. The cap is 2KB to keep the per-session opening cost predictable.
 
 ### Structure-aware code indexing
 
@@ -311,6 +311,9 @@ engraph index --workspace /path/to/monorepo
 
 # Query the code graph
 engraph subgraph run_migrations
+```
+
+````markdown
 ## Symbol `run_migrations` (defined in crates/engraph-core/src/schema.rs:244)
 ```
 pub fn run_migrations(conn: &mut Connection) -> Result<()>
@@ -318,7 +321,9 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()>
 **Calls**: `current_version` (crates/engraph-core/src/schema.rs:225)
 **Called by**: `open_pool` (crates/engraph-core/src/db.rs:30)
 **Sibling symbols** (same file): `current_version`, `check_drift`, `MIGRATIONS`
+````
 
+```bash
 # JSON output for programmatic use
 engraph subgraph run_migrations --json
 
@@ -409,10 +414,10 @@ Key test locations:
 | `engraph run` budget tracking and stdin inheritance | `engraph-cli/tests/run_budget.rs` |
 | Ingest: rotation/truncation replay, partial-line handling, sidechain skip | `engraph-ingest/src/lib.rs` |
 | FTS retention through compress-existing sweep | `engraph-ingest/src/lib.rs` |
-| Recall, scope restriction, KG entity search | `engraph-retrieve/tests/end_to_end.rs` |
+| Recall, scope restriction, KG entity search | `engraph-ingest/tests/ingest_retrieve_roundtrip.rs` |
 | Hybrid RRF reordering, recency tiebreak, missing embeddings | `engraph-retrieve/tests/hybrid_path.rs` |
 | SCIP loader: entities, edges, idempotency, project scoping | `engraph-codegraph/tests/loader_unit.rs` |
-| Subgraph markdown shape, disambiguation, byte-cap truncation | `engraph-codegraph/tests/subgraph_format.rs` |
+| Subgraph markdown shape, disambiguation, byte-cap truncation | `engraph-codegraph/src/subgraph.rs` |
 | Driver file-probe detection (one per build system) | `engraph-codegraph/tests/drivers_detect.rs` |
 | Driver live end-to-end (soft-skips when indexer absent) | `engraph-codegraph/tests/drivers_live.rs` |
 | Cross-repo workspace discovery and CALLS edge annotation | `engraph-codegraph/tests/workspace_cross_repo.rs` |
@@ -481,7 +486,7 @@ GROUP BY filter_id ORDER BY avg_ratio ASC;
 |---|---|
 | (default) | Lexical retrieval only; no ONNX dependency |
 | `embeddings` | Adds fastembed-rs (~150MB transitive), enables `engraph init-embeddings`, `engraph reindex-embeddings`, and `engraph recall --hybrid` |
-| `otel` | Adds OpenTelemetry OTLP/gRPC export of the `events` telemetry. Off at runtime unless `ENGRAPH_OTEL=1`; see [docs/opentelemetry.md](docs/opentelemetry.md). Required when building the binary the Claude Code hooks invoke. |
+| `otel` | Adds OpenTelemetry OTLP/gRPC export of the `events` telemetry. Off at runtime unless `ENGRAPH_OTEL=1`; see [docs/opentelemetry.md](docs/opentelemetry.md). To get metrics from live sessions, the installed binary the hooks invoke must be built with it. |
 
 ---
 

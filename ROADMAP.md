@@ -67,7 +67,6 @@ The codegraph (single-repo, cross-repo, and Bazel polyglot) is shipped, now incl
 - **Per-driver moniker normalization rules:** `scip_loader::normalize_moniker` is a no-op today. Java first-party monikers carry a constant empty version (`semanticdb maven . . …`) — cross-commit stable, but cross-*repo* collision-prone; a per-scheme rewrite would disambiguate.
 - **50-symbol stability test suite:** snapshot known monikers across a polyrepo and regress on every loader change. Pays back once indexer-version drift causes a real failure.
 - **Auto-trigger indexing.** Today `engraph index` is manual. Wiring it into the SessionStart hook (or an MCP tool surface) so a fresh session re-indexes the workspace automatically — with stale-detection so cold builds don't fire every session — is the most user-visible follow-up.
-- **Deep workspace discovery.** `discover_workspace_repos` walks immediate children only; nested polyrepo layouts need explicit per-repo invocations. Recursion + a depth-limit / `.gitignore` respect would close this.
 
 ### Deeper Go support
 
@@ -84,8 +83,6 @@ The native pass indexes `go.mod`-rooted modules, but on gazelle-managed `rules_g
 
 - **Mnemosyne → engraph data migration script.** Both DBs are SQLite with similar schemas. A one-shot SQL script could copy sessions, messages, do-not-repeat, and bugs over. Effort: a day with the SQL + a sanity-check pass.
 - **2-week real-world measurement.** The original success criteria called for ≥ 20% aggregate token savings across two weeks of actual Claude Code use, measured via `engraph gain`. Run it now that `scripts/install.sh` wires the hooks.
-- **CI.** No GitHub Actions / equivalent yet. Worth setting up: `cargo test`, `cargo clippy --all-targets -- -D warnings`, and the `--features embeddings` variant of both, on every push.
-- **Release binaries.** No `cargo dist` / GitHub Releases yet. Once the hooks have run in production for two weeks and are stable, ship a release with prebuilt binaries.
 
 ---
 
