@@ -1245,6 +1245,66 @@ nothing, but a language removed from the repo keeps its symbols until
 it is deleted by hand. The Bazel path ignores the subtree and refreshes
 the whole project. `--project` overrides the key (whole-project scope).
 
+### 14.0 SCIP: what it is, and why not tree-sitter
+
+**Origin.** SCIP ("SCIP Code Intelligence Protocol", pronounced "skip")
+is a language-agnostic format for code-navigation data: go to
+definition, find references, find implementations. Sourcegraph designed
+it in 2022 as the successor to LSIF, the JSON graph format from the LSP
+ecosystem; the motivation is in Sourcegraph's announcement post and the
+design doc linked from the `scip` crate's README. The schema is a single
+Protobuf file. The spec, the Rust bindings engraph uses (`scip` crate,
+Apache-2.0), and some indexers now live under the `scip-code` GitHub
+organization (`repository = "https://github.com/scip-code/scip"` in the
+crate's `Cargo.toml`). Others, such as scip-java and scip-typescript,
+are still under `sourcegraph/`, and rust-analyzer emits SCIP itself.
+
+**What an index contains.** A language's indexer runs that language's
+own compiler front end or type checker over the whole project and writes
+one `Index` message:
+
+- `Document` per source file: its `relative_path`, a list of
+  `Occurrence`s (a source range, the symbol at that range, and role bits
+  such as `Definition`, `Import`, `ReadAccess`), and the
+  `SymbolInformation` for symbols it defines (kind, signature
+  documentation, and `relationships` such as "implements").
+- `external_symbols`: `SymbolInformation` for symbols defined outside the
+  indexed project.
+
+Each symbol is a string that works like a URI:
+`<scheme> ' ' <manager> ' ' <package-name> ' ' <version> ' ' <descriptor>+`,
+for example `rust-analyzer cargo engraph-core 0.1.0 schema/run_migrations().`.
+Symbols local to one file use `local <id>` instead. Because the package
+and version are part of the name, the same symbol gets the same string in
+every repo that references it. That is what makes cross-repo stitching
+(§14.7) work with no extra matching. engraph stores the string as
+`entities.id` and builds `relations` from the occurrences (§14.3).
+
+**Why SCIP rather than tree-sitter.** tree-sitter is a fast, incremental,
+error-tolerant parser. It produces a syntax tree for one file at a time,
+with no type information. That is enough to list the definitions in a
+file with exact line ranges, but not to say what a reference *means*:
+
+| Question | tree-sitter | SCIP indexer |
+|---|---|---|
+| Definitions, line ranges, and signatures in a file | Yes, exact | Yes, exact |
+| Which of several `parse` functions this call refers to | No: matched by name | Yes, resolved by the type checker |
+| Method calls through a trait, interface, or receiver type | No | Yes |
+| Calls into another file, crate, or repo | Guessed from imports and names | Yes, via the global symbol string |
+| Implements / extends edges | Only where written in the syntax | Yes, from `relationships` |
+| Needs a buildable project and installed toolchain | No | Yes |
+| Speed | Milliseconds per file, incremental | Seconds to minutes; most indexers analyze the whole project each run |
+
+The codegraph exists to replace the read-and-grep loop with answers that
+are right, especially "who calls this" (`Called by`), which by-name
+matching gets wrong for common names (the reason the grep redirect
+skips ambiguous names, §5.5). So engraph takes on SCIP's costs: an
+indexer per language (`scripts/install-scip-indexers.sh`), a project that
+must resolve its dependencies, and index runs measured in seconds to
+minutes, not milliseconds. tree-sitter remains a candidate for a fast
+first pass over a few changed files, filling in definitions until a
+SCIP run finishes; it would not replace SCIP's call edges.
+
 ### 14.1 Crate boundary
 
 `crates/engraph-codegraph/` is its own workspace member. Eight modules:

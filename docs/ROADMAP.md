@@ -12,6 +12,9 @@ Each item has a plan in `docs/plans/`. Read
 [the general information for all plans](plans/00-general-info-plan.md) first.
 It gives the language, the rules for the work, and the sequence of the work.
 
+Small performance improvements are not items in this file. They are in
+[`docs/plans/general-perf-improvements.md`](plans/general-perf-improvements.md).
+
 ---
 
 ## 1. Automatic index runs

@@ -1,7 +1,9 @@
 # Plan 00: General information for all plans
 
 This file gives the rules and the sequence for the plans in `docs/plans/`. Each
-plan is for one item in [`docs/ROADMAP.md`](../ROADMAP.md). Read this file
+numbered plan is for one item in [`docs/ROADMAP.md`](../ROADMAP.md).
+[`general-perf-improvements.md`](general-perf-improvements.md) is a list of
+small performance improvements that are not roadmap items. Read this file
 before you use a plan.
 
 ## Language
