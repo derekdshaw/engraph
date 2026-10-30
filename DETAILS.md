@@ -979,6 +979,72 @@ canonicalizes to the current project. Both paths are incremental and idempotent
 via `ingestion_log`, per-file errors are logged and skipped, and a
 `session_ingest` telemetry event is recorded when anything was inserted.
 
+### 8.0.1 Background index refresh
+
+After the brief's sections are gathered, the hook checks
+`engraph_codegraph::indexed_commits(project)`. If the project has at least one
+`index_state` row — i.e. someone ran `engraph index` on it before — it spawns
+`engraph index --if-changed <cwd>` (`spawn_detached_index`, `hooks.rs`) and
+does not wait: stdin is null, stdout/stderr append to `auto-index.log` in the
+data directory beside the database — the hook writes a dated header line
+(`=== <UTC> engraph index --if-changed <cwd> …`) before handing the file over,
+since the child's own lines carry no timestamp — and the child gets its own process group (Unix) / a detached
+process with its own group (Windows), so the client sees no inherited pipe and
+a signal aimed at the hook doesn't take the refresh down. `ENGRAPH_AUTO_INDEX=0`
+(or `false`/`no`/`off`) disables it.
+
+The "indexed before" gate is deliberate: a cold index can run for minutes and
+download toolchains, which is a commitment the user makes once with an explicit
+`engraph index`; from then on, every session start pays only for what changed.
+
+`--if-changed` itself (`Cmd::Index`, `main.rs`) resolves the project key with
+`index_scope`, lists the subtrees `divergence::changed_subtrees` reports — one
+`git diff --quiet <commit> -- <subtree>` per `index_state` row, at the current
+checkout's toplevel; an unresolvable commit counts as changed — drops subtrees
+nested under another changed one (`outermost_subtrees`), and runs the normal
+single-repo index (`index_single`) for each at `<toplevel>/<subtree>`, which
+re-records that subtree's commit. A repo with no rows prints a hint and exits
+0. It composes with `--dry-run` (lists the subtrees it would re-index) and the
+GC/Bazel flags, and conflicts with everything that pins a source (`--scip`,
+`--scip-manifest`, `--lang`, `--project`, `--workspace`, `--recursive`).
+
+Telemetry follows the `--workspace` precedent — one `index` row per run, not
+one per subtree — with `input_tokens` = the SCIP bytes the run produced and
+`filter_id` = `auto` when the hook started it (it passes `--auto`, which
+requires `--if-changed`) or `if_changed` by hand. The row is written whatever
+the outcome — nothing to do, lock held, every subtree failed — and before the
+run's own error exit, so the hook's firing rate and cost are always visible.
+A dry run records nothing. Plain `engraph index <repo>` keeps its one row per
+run keyed by driver name.
+
+### 8.0.2 One index run per project
+
+Every index run — explicit, `--if-changed`, manifest, or each project of a
+`--workspace` run — first takes `<data dir>/locks/index-<sha256(project)[..16]>.lock`
+(`engraph-codegraph::lock`; the data dir is the database's, so
+`ENGRAPH_DB_PATH` moves the locks with it). The file is created with
+`create_new` (O_EXCL), so two runs racing for a free lock get exactly one
+winner; it holds `project=`, `pid=`, `started=` lines for anyone reading it
+by hand. The `IndexLock` guard removes the file on drop, which covers a run
+that ends in an error as well as one that succeeds; a workspace run keeps one
+guard per project for the whole run so another run can't slip in between two
+sub-projects of a monorepo.
+
+A run that finds the file does not start: an explicit run fails with the
+holder's start time and the lock path, `--if-changed` prints `skipped: …` and
+exits 0 (it is the best-effort background refresh), and a workspace run
+records the failure per repo. A dry run never takes the lock.
+
+A run that dies — killed, crashed, machine off — leaves its file behind, and
+nothing else ever removes it. So `acquire` treats a file whose mtime is older
+than `STALE_AFTER` (30 minutes) as such a remnant: it renames it to a
+per-process name and deletes that, then tries `create_new` again. The rename
+is what keeps two runs that both judge the same file stale from deleting each
+other's fresh replacement — only the one whose rename succeeded took the old
+file away, and both then compete on `create_new` as usual. A run that holds
+the lock legitimately for longer than 30 minutes can therefore lose it to a
+newcomer; the limit is chosen well above any real index run seen so far.
+
 ### 8.1 What goes in
 
 For the resolved `cwd`:

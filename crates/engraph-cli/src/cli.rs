@@ -172,6 +172,19 @@ pub(crate) enum Cmd {
         /// Bazel, or writing the codegraph. Composes with all other flags.
         #[arg(long)]
         dry_run: bool,
+        /// Re-index only the parts of this repo's existing index whose files
+        /// changed since they were indexed: each `index_state` row (whole repo
+        /// or sub-project) is checked with `git diff --quiet <commit> --
+        /// <subtree>` and re-run if it differs. A repo with no recorded index
+        /// is left alone, so an explicit `engraph index` must come first. The
+        /// SessionStart hook runs this in the background.
+        #[arg(long, conflicts_with_all = ["scip", "scip_manifest", "lang", "project", "workspace", "recursive"])]
+        if_changed: bool,
+        /// Mark this `--if-changed` run as started automatically (the
+        /// SessionStart hook passes it): its telemetry event is recorded with
+        /// filter `auto` instead of `if_changed`.
+        #[arg(long, requires = "if_changed")]
+        auto: bool,
     },
     /// Show a 2-hop markdown neighborhood for a symbol from the codegraph
     Subgraph {

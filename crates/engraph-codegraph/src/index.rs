@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -686,13 +686,21 @@ pub fn index_workspace(
         );
     }
     let mut stats = WorkspaceStats::default();
+    // One lock per project, held until the whole run is done — sub-projects
+    // of a monorepo share a project, and another run mustn't slip in between
+    // them. A project whose lock is held by someone else fails per-repo, like
+    // any other per-repo failure.
+    let mut locks: HashMap<String, crate::lock::IndexLock> = HashMap::new();
     for repo in repos {
         let (project, subtree) = scope_for(&repo);
         let scope = IndexScope {
             project: &project,
             subtree: &subtree,
         };
-        let outcome = index_repo_in(conn, &repo, None, None, scope, bazel_symbols, gc);
+        let outcome = match hold_lock(&mut locks, &project) {
+            Ok(()) => index_repo_in(conn, &repo, None, None, scope, bazel_symbols, gc),
+            Err(e) => Err(e),
+        };
         stats.repos.push(WorkspaceRepoResult {
             repo,
             project,
@@ -701,6 +709,24 @@ pub fn index_workspace(
         });
     }
     Ok(stats)
+}
+
+/// Make sure `locks` holds `project`'s index lock, taking it if this is the
+/// first repo of that project. `Err` when another run has it.
+fn hold_lock(locks: &mut HashMap<String, crate::lock::IndexLock>, project: &str) -> Result<()> {
+    if locks.contains_key(project) {
+        return Ok(());
+    }
+    match crate::lock::acquire(project)? {
+        crate::lock::Acquire::Acquired(l) => {
+            locks.insert(project.to_string(), l);
+            Ok(())
+        }
+        crate::lock::Acquire::Held { path, info } => Err(anyhow::anyhow!(
+            "{}",
+            crate::lock::held_message(project, &path, &info)
+        )),
+    }
 }
 
 /// What `index_repo` *would* do, without doing it. Used by `engraph index

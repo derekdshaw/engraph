@@ -50,9 +50,15 @@ The pre-bash parser handles common command shapes that would otherwise misroute.
 
 `engraph hook session-start` injects prior project context as `additionalContext` at the start of each Claude session: stored do-not-repeat rules, open bugs, a one-line summary of the last session (full digest via `engraph resume`), recent decisions, and budget status (rules, bugs, and decisions each capped at the 5 most-recent entries). It also performs a best-effort catch-up ingest of the project's transcripts first, so sessions that closed without a clean `SessionEnd` are still captured (incremental and idempotent via `ingestion_log` offsets). Empty briefs cost zero tokens. The cap is 2KB to keep the per-session opening cost predictable.
 
+It also keeps the code graph fresh: for a repo that has been indexed before, the hook starts `engraph index --if-changed <cwd>` as a detached background process and returns immediately. That run re-indexes only the recorded parts of the repo whose files changed since their index commit (see [Structure-aware code indexing](#structure-aware-code-indexing)); a repo that was never indexed is left alone, so the first `engraph index` is always an explicit choice. Its output goes to `auto-index.log` in the engraph data directory (next to `engraph.db`; `ENGRAPH_DB_PATH` moves it too), one dated `=== … engraph index --if-changed --auto <cwd>` header per run followed by that run's lines. Each automatic run records one `index` telemetry event with filter `auto` (a hand-run `--if-changed` records `if_changed`), whatever its outcome, so `engraph gain --by-filter` shows how often the refresh fires and what it cost; `index` rows never count toward savings. Set `ENGRAPH_AUTO_INDEX=0` to turn the refresh off.
+
 ### Structure-aware code indexing
 
 `engraph index <repo>` runs a per-language SCIP indexer, decodes the resulting `index.scip`, and populates the `entities` and `relations` tables with symbols, calls, references, imports, and inheritance edges. When a repo's root advertises multiple build manifests (e.g. `pyproject.toml` + `tsconfig.json` for a Python+TypeScript project, or `pyproject.toml` + `pom.xml` for a Python+Java mono-service), every matching driver runs and their SCIP outputs are merged into one index. Per-driver failures are surfaced as warnings; the load proceeds with whatever succeeded. `--lang <name>` or `--scip <path>` pin to a single source as before. `--scip-manifest <file>` ingests externally-produced SCIP files (tab-separated `<repo-relative-root>` + `<scip-file>` lines), rebasing each to repo-root and merging them into one load — for orchestrators that build SCIP per language or module out-of-band.
+
+`engraph index --if-changed` refreshes an existing index incrementally: every `index_state` row (the whole repo, or a sub-project indexed on its own) is checked with `git diff --quiet <indexed-commit> -- <subtree>` and only the rows that differ are re-indexed, each at its own directory. A repo with no recorded index is skipped, so automatic refreshes only begin after one manual `engraph index`. The SessionStart hook runs this detached on every session start.
+
+Index runs are serialized per project: a run takes `locks/index-<hash>.lock` in the data directory (next to the database) and removes it when it finishes. While the file is there, an explicit `engraph index` of that project fails with a message naming the lock, and `--if-changed` skips. A run that is killed leaves its file behind, so a lock older than 30 minutes is treated as a remnant and cleared by the next run.
 
 `engraph subgraph <symbol>` returns a 2-hop markdown neighborhood — typically orders of magnitude smaller than the file-read-and-grep loop Claude would otherwise run to answer "what calls `processOrder`."
 
@@ -305,6 +311,11 @@ engraph index .
 # Index one sub-project of a monorepo (refreshes just that directory of the repo's index)
 engraph index services/svc-a
 
+# Re-index only the recorded parts of the repo whose files changed since they
+# were indexed (what the SessionStart hook runs in the background); no-op on a
+# never-indexed repo. --dry-run lists what would be re-indexed.
+engraph index --if-changed
+
 # Index a workspace (separate repos get their own index; sub-projects of
 # one repo merge into its index)
 engraph index --workspace /path/to/monorepo
@@ -408,6 +419,8 @@ Key test locations:
 | Pre-bash hook branches (rewrite, deny, passthrough, parser shapes) | `engraph-cli/tests/pre_bash_hook.rs` |
 | Pre-grep subgraph redirect gate | `engraph-cli/tests/pre_grep_hook.rs` |
 | Indexed commit + branch-divergence redirect/subgraph | `engraph-cli/tests/index_divergence.rs` |
+| `index --if-changed` subtree selection + SessionStart background refresh gate | `engraph-cli/tests/index_if_changed.rs` |
+| Per-project index lock: exclusion, release on success/failure, 30-minute stale clearing | `engraph-codegraph/src/lock.rs`, `engraph-cli/tests/index_lock.rs` |
 | Post-read augment shape and passthrough on unindexed files | `engraph-cli/tests/post_read_hook.rs` |
 | Read-bucket filter (cat/head/tail) per-language strip + windowing | `engraph-compress/tests/read_filter.rs` |
 | SessionStart brief content and size cap | `engraph-cli/tests/session_start_hook.rs` |

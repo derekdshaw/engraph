@@ -697,6 +697,7 @@ name = "engraph-cli"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "engraph-codegraph",
  "engraph-compress",
@@ -719,6 +720,7 @@ name = "engraph-codegraph"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "dirs",
  "engraph-core",
  "protobuf",
