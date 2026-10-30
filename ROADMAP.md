@@ -60,10 +60,13 @@ The `engraph index` command is manual. The SessionStart hook does not start an
 index run.
 
 The grep redirect, the PostToolUse(Read) symbol list, and `engraph subgraph` use
-the code graph. If the code graph does not exist or is old, these features save fewer
-tokens or no tokens. engraph does not show an error when this occurs.
+the code graph. If the code graph does not exist or is old, these features save
+fewer tokens or no tokens. For a file that changed after the index commit, the
+grep redirect lets the grep continue, and `engraph subgraph` shows a "Changed
+since the index" note. No hook tells Claude or the user to do an index run.
 
-The `index_state` table records the commit of each index run.
+The `index_state` table (schema v10) records the commit of each indexed subtree
+of a project.
 
 ### Requirements
 
@@ -159,8 +162,10 @@ modules. This is also true in Bazel repos.
 - scip-go indexes only one build configuration. Thus, files with build tags for
   a different platform (for example `_linux.go` or `//go:build`) are not in the
   code graph.
-- engraph does not index `_test.go` files. The Bazel Go pass gives
-  `--skip-tests` to scip-go.
+- The standard Go driver indexes `_test.go` files, because scip-go indexes
+  tests by default (`Tests: !opts.SkipTests` in scip-go v0.2.7). The Bazel Go
+  pass gives `--skip-tests` to scip-go. Thus, the Bazel Go pass does not index
+  `_test.go` files.
 - In Bazel repos, the native Go pass (`run_go_modules`) indexes only the
   modules that have a `go.mod` file. A large gazelle repo can have thousands of
   `go_library` targets, but only a small number of `go.mod` files.
@@ -188,8 +193,8 @@ modules. This is also true in Bazel repos.
 10. If scip-go accepts them, add the `--go-tags` flag to the `engraph index`
     command.
 11. Write the limit of one build configuration in `DETAILS.md`.
-12. Add the `--go-tests` flag to index `_test.go` files.
-13. Use the `--go-tests` flag in the native Go pass and in the Bazel Go pass.
+12. Add the `--go-tests` flag. With this flag, the Bazel Go pass does not give
+    `--skip-tests` to scip-go.
 
 Optional step for Bazel repos: engraph can make a temporary `go.mod` file for
 each gazelle prefix from the import paths of the `go_library` targets. Then it
@@ -203,8 +208,8 @@ target repo.
 - `engraph index --recursive` indexes the root module and the module in
   `tools/`.
 - A relation from module A to module B points to the correct symbol.
-- With `--go-tests`, a function in a `_test.go` file is in the code graph.
-  Without `--go-tests`, it is not in the code graph.
+- In the Bazel Go pass with `--go-tests`, a function in a `_test.go` file is in
+  the code graph. Without `--go-tests`, it is not in the code graph.
 
 ### Risks
 
@@ -296,16 +301,20 @@ indexer changes the ids or the relations of known symbols.
 
 - The function `scip_loader::normalize_moniker` does not change the symbol id.
 - The standalone Go driver (`ScipGo` in `driver.rs`) does not give
-  `--module-version` to scip-go. Thus, scip-go puts the git short hash in each
-  Go symbol id, and all Go symbol ids change at each commit. The Bazel Go pass
+  `--module-version` to scip-go. Thus, scip-go uses a version tag on `HEAD`, or
+  the first 12 characters of the `HEAD` commit hash, in each Go symbol id
+  (`InferModuleVersion` in scip-go v0.2.7). All Go symbol ids change at each
+  commit that has no tag. The Bazel Go pass
   gives a fixed version (`SCIP_GO_VERSION`). The Python driver also gives a
   fixed version (`SCIP_PYTHON_VERSION`).
-- For first-party Java code, scip-java gives an empty version
-  (`semanticdb maven . . …`). Thus, two repos with the same package names can
-  have the same symbol ids.
-- scip-go versions before 0.7 put absolute paths of the computer in symbol ids.
-  `scripts/install-scip-indexers.sh` installs the latest scip-go. Thus, this
-  problem possibly does not occur at this time.
+- Earlier documents say that scip-java gives an empty version to first-party
+  Java code (`semanticdb maven . . …`). Thus, two repos with the same package
+  names can have the same symbol ids. This is not verified. The live database
+  has no Java symbols, and no test or fixture in this repo shows this id.
+- Earlier documents say that scip-go versions before 0.7 put absolute paths of
+  the computer in symbol ids. This is possibly not correct. The installed
+  scip-go is v0.2.7, and its source does not show absolute paths in symbol ids.
+  Step 2 of part 2 finds out.
 - The symbol ids of published dependencies (Cargo, npm, PyPI, Go modules) are
   the same on each computer.
 - No test compares the symbol ids of a repo between two engraph versions or two
@@ -401,7 +410,11 @@ code.
 ### Condition at this time (2026-10-30)
 
 The symbol-level Bazel pass indexes Go (phase A) and Java (phase C). Refer to
-`docs/bazel-symbol-indexing.md` and `DETAILS.md` §14.9. Two phases remain:
+`docs/bazel-symbol-indexing.md` and `DETAILS.md` §14.9. For TypeScript and
+Python, `run_language` runs the standard indexer at the workspace root. No
+command from the repo (`ENGRAPH_BAZEL_SCIP_TS_CMD`) exists. The failures below
+are from the diagnosis of 2026-06-02. They are not verified again. Two phases
+remain:
 
 - **Phase B, TypeScript:** scip-typescript possibly fails on a cold run. A
   `bazel build //...` command must first make the `node_modules` links in
@@ -499,7 +512,9 @@ conventions.
 - **Compression that changes with the budget level.** When
   `engraph budget status` shows level 2 or 3, the filters can use smaller
   limits. For example, the `tree` depth can change from 3 to 2, and the
-  `docker logs` tail can change from 200 lines to 100 lines. A design for this
+  `docker logs` tail can change from 200 lines to 100 lines. At this time, only
+  the SessionStart brief and `engraph budget status` show the level. No filter
+  uses it. A design for this
   escalation does not exist at this time.
 - **Removal of old memory.** A memory store that only increases becomes a
   problem. A possible design: a score that decreases with time and has a
@@ -512,7 +527,9 @@ conventions.
   must add `MemoryStore` and `GraphStore` traits, and then an implementation
   for Turso or LiteFS. The architecture review recommended that engraph does
   not add these traits before a real need for cloud sync occurs.
-- **Weekly summary.** An `engraph weekly` command reads `events` and `messages`.
+- **Weekly summary.** `engraph gain --weekly` shows token totals for each week.
+  It does not show the data that follows. An `engraph weekly` command reads
+  `events` and `messages`.
   It shows the most compressed commands, the most recalled phrases, the longest
   sessions, and the largest savings. These data help the user and help to
   adjust the filters.
