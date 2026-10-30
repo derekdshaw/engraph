@@ -12,13 +12,11 @@ Each item has a plan in `docs/plans/`. Read
 [the general information for all plans](plans/00-general-info-plan.md) first.
 It gives the language, the rules for the work, and the sequence of the work.
 
+The number of an item is the number of its plan. When the work of an item is
+complete, the item and its plan are removed. The numbers of the other items do
+not change.
+
 ---
-
-## 1. Automatic index runs
-
-When a session starts, engraph updates the code graph of the project if the code graph is old.
-
-Plan: [`docs/plans/01-automatic-index-runs-plan.md`](plans/01-automatic-index-runs-plan.md)
 
 ## 2. Deeper workspace discovery
 
