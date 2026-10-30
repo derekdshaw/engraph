@@ -1731,8 +1731,9 @@ target-level module into a directory.
 workload trips them):
 - **Go gazelle bulk**: `go_library` targets without a `go.mod` are
   unreachable by scip-go; the `IndexedModules` `targets` count makes the
-  gap visible. "Deeper Go support" in `ROADMAP.md` scopes closing it (a
-  delegated `ENGRAPH_BAZEL_SCIP_GO_CMD` hook, or synthesized go.mod).
+  gap visible. The shipped `ENGRAPH_BAZEL_SCIP_GO_CMD` delegate reaches
+  them per repo; "Go module coverage" in `ROADMAP.md` scopes the in-engraph
+  alternative (synthesized go.mod).
 - **scip-typescript + rules_ts node_modules**: cold runs may fail until a
   prior `bazel build //...` populates the package-local `node_modules`
   symlinks; likely delegated like Java.
@@ -1747,21 +1748,9 @@ workload trips them):
 
 ## 15. Forward pointers
 
-The roadmap (`ROADMAP.md`) tracks features that aren't built. The
-codegraph is fully shipped (target-level §14.8, symbol-level §14.9);
-the largest remaining items are:
-
-- **Auto-trigger indexing.** Today `engraph index` is manual. Wiring
-  it into the SessionStart hook (or an MCP tool surface) so a fresh
-  Claude session re-indexes the workspace automatically — with
-  stale-detection so cold scip-java doesn't fire every session — is
-  the most user-visible follow-up.
-- **Codegraph polish items**: per-driver moniker
-  normalization rules (the rewrite hook in
-  `scip_loader::normalize_moniker` is a no-op today) and the
-  50-symbol stability test suite (snapshot known monikers, regression
-  on every loader change). Both pay back only once indexer-version
-  drift causes a real failure in practice.
-- **MCP server** wrapping `engraph recall` / `engraph subgraph`:
-  worthwhile once there are 5+ tools to expose. With the codegraph
-  fully shipped, that threshold is met.
+The roadmap (`ROADMAP.md`) tracks features that aren't built, ranked by
+expected impact. The codegraph is shipped (target-level §14.8,
+symbol-level §14.9); its open items there are auto-trigger indexing,
+deeper workspace discovery, Go module coverage, Bazel TypeScript and
+Python symbols, and stable symbol ids (normalization plus a stability
+suite).
