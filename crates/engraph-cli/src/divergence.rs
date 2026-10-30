@@ -19,6 +19,18 @@ pub(crate) fn index_scope(repo: &Path) -> (String, String) {
     (crate::canonical_repo_key(repo), rel.unwrap_or_default())
 }
 
+/// Whether `dir` is inside a linked worktree rather than its repo's main
+/// worktree. The codegraph is one index per repo under the main worktree's key,
+/// so indexing from a linked worktree replaces the code every other worktree
+/// sees with this branch's. Those worktrees rely on the per-file divergence
+/// check instead. `false` outside git.
+pub(crate) fn in_linked_worktree(dir: &Path) -> bool {
+    let Some(top) = crate::git_current_toplevel(dir).and_then(|t| t.canonicalize().ok()) else {
+        return false;
+    };
+    Path::new(&crate::canonical_repo_key(dir)) != top
+}
+
 /// Where the codegraph stores an absolute `file`: `(project, repo-relative
 /// path)` of the git checkout it's in — a linked worktree maps to its repo's
 /// key. `None` for relative paths or outside git.
@@ -313,6 +325,20 @@ mod tests {
             "0000000000000000000000000000000000000000",
             "svc-b"
         ));
+    }
+
+    #[test]
+    fn in_linked_worktree_is_false_in_the_main_worktree_only() {
+        let (dir, repo, _) = repo();
+        assert!(!in_linked_worktree(&repo));
+        assert!(!in_linked_worktree(&repo.join("svc-a")));
+        let wt = dir.path().join("wt");
+        git(&repo, &["worktree", "add", "-q", "-b", "feature", wt.to_str().unwrap()]);
+        assert!(in_linked_worktree(&wt));
+        assert!(in_linked_worktree(&wt.join("svc-a")));
+        // Outside git there is no worktree to be linked.
+        let plain = tempfile::tempdir().unwrap();
+        assert!(!in_linked_worktree(plain.path()));
     }
 
     #[test]

@@ -417,3 +417,47 @@ fn session_start_leaves_unindexed_and_opted_out_repos_alone() {
         "spawned a refresh despite ENGRAPH_AUTO_INDEX=0"
     );
 }
+
+#[test]
+fn a_linked_worktree_does_not_refresh_the_shared_index() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let scip = dir.path().join("empty.scip");
+    let out = engraph(
+        &db,
+        &mono,
+        &["index", ".", "--scip", scip.to_str().unwrap()],
+    );
+    assert!(out.status.success());
+    let before = index_state(&db);
+
+    let wt = dir.path().join("wt");
+    git(&mono, &["worktree", "add", "-q", "-b", "feature", wt.to_str().unwrap()]);
+    let wt = wt.canonicalize().unwrap();
+    std::fs::write(wt.join("svc-a/src/lib.rs"), "pub fn alpha_handler() {}\n").unwrap();
+
+    // The hook starts nothing from the linked worktree.
+    session_start(&db, &wt, &[]);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        !dir.path().join("auto-index.log").exists(),
+        "spawned a refresh from a linked worktree"
+    );
+
+    // A refresh run by hand there skips, and records nothing.
+    let out = engraph(&db, &wt, &["index", "--if-changed", "."]);
+    assert!(out.status.success());
+    let s = stdout(&out);
+    assert!(s.starts_with("skipped: ") && s.contains("linked worktree"), "{s}");
+    assert_eq!(index_state(&db), before);
+
+    // An explicit index still runs there, with a warning.
+    let out = engraph(
+        &db,
+        &wt,
+        &["index", ".", "--scip", scip.to_str().unwrap()],
+    );
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("warning:") && err.contains("linked worktree"), "{err}");
+}

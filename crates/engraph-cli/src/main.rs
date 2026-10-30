@@ -283,11 +283,15 @@ async fn main() -> Result<()> {
                     anyhow::bail!("--if-changed needs a git checkout: {}", repo.display());
                 };
                 let recorded = engraph_codegraph::indexed_commits(&conn, &project_key)?;
+                // The shared index follows the main worktree; a linked one
+                // relies on the per-file divergence check (see
+                // `in_linked_worktree`).
+                let linked = divergence::in_linked_worktree(&repo);
                 // A dry run takes no lock; a real one holds it across every
                 // subtree. A best-effort refresh yields to whatever run is
                 // active instead of failing.
                 let lock: std::result::Result<Option<IndexLock>, String> =
-                    if recorded.is_empty() || dry_run {
+                    if recorded.is_empty() || linked || dry_run {
                         Ok(None)
                     } else {
                         take_index_lock(&project_key)?.map(Some)
@@ -303,6 +307,11 @@ async fn main() -> Result<()> {
                     _ if recorded.is_empty() => {
                         println!("no index recorded for {project_key}; run `engraph index` first");
                     }
+                    _ if linked => println!(
+                        "skipped: {} is a linked worktree; only the main worktree refreshes \
+                         the shared index of {project_key}",
+                        top.display()
+                    ),
                     Err(held) => println!("skipped: {held}"),
                     Ok(_lock) => {
                         let changed = divergence::outermost_subtrees(divergence::changed_subtrees(
@@ -467,7 +476,10 @@ async fn main() -> Result<()> {
                 // monorepo sub-project refreshes its subtree of it.
                 let (project_key, subtree) = match project {
                     Some(p) => (p, String::new()),
-                    None => divergence::index_scope(&repo),
+                    None => {
+                        warn_if_linked_worktree(&repo);
+                        divergence::index_scope(&repo)
+                    }
                 };
                 let scope = engraph_codegraph::IndexScope {
                     project: &project_key,
@@ -509,7 +521,10 @@ async fn main() -> Result<()> {
                 // monorepo sub-project refreshes its subtree of it.
                 let (project_key, subtree) = match project {
                     Some(p) => (p, String::new()),
-                    None => divergence::index_scope(&repo),
+                    None => {
+                        warn_if_linked_worktree(&repo);
+                        divergence::index_scope(&repo)
+                    }
                 };
                 let _lock = engraph_codegraph::acquire_index_lock_wait(&project_key)?;
                 let stats = index_single(
@@ -1024,6 +1039,19 @@ fn take_index_lock(project_key: &str) -> Result<std::result::Result<IndexLock, S
         Acquire::Acquired(lock) => Ok(lock),
         Acquire::Held { path, info } => Err(held_message(project_key, &path, &info)),
     })
+}
+
+/// An explicit index from a linked worktree still writes the repo's one shared
+/// index, so every other worktree then sees this branch's code. Allowed — the
+/// user asked for it — but said out loud.
+fn warn_if_linked_worktree(repo: &std::path::Path) {
+    if divergence::in_linked_worktree(repo) {
+        eprintln!(
+            "warning: {} is a linked worktree; this replaces the index that every worktree of \
+             the repo shares with this branch's code (pass --project to keep a separate index)",
+            repo.display()
+        );
+    }
 }
 
 /// Index one repo — or one sub-project of a monorepo, when `subtree` is

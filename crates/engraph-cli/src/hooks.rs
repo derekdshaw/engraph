@@ -94,8 +94,12 @@ pub(crate) fn run_session_start_hook(conn: &db::PooledConn, client: HookClient) 
         // Refresh the codegraph in the background (`engraph index
         // --if-changed`), but only for a repo that was indexed by hand at
         // least once: a cold first index can run for minutes and pull
-        // toolchains, which is a choice the user makes, not the hook.
+        // toolchains, which is a choice the user makes, not the hook. And
+        // only from the main worktree: the index is shared by every worktree
+        // of the repo, so a refresh from a linked one would swap in its
+        // branch for all of them.
         if auto_index_enabled()
+            && !crate::divergence::in_linked_worktree(Path::new(cwd))
             && engraph_codegraph::indexed_commits(conn, project)
                 .map(|c| !c.is_empty())
                 .unwrap_or(false)
