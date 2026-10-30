@@ -1,349 +1,518 @@
-# Engraph Roadmap
+# Engraph roadmap
 
-Forward-looking only: features and follow-ups that aren't built yet. Anything
-already shipped lives in `DETAILS.md` under its feature section, not here.
+This file gives the features and changes that engraph does not have at this
+time. `DETAILS.md` describes the features that engraph has.
 
-Items are ordered by expected impact, most to least: first on tokens saved,
-then on how much of a codebase engraph can show correctly. Rank is not build
-order. Some items depend on others (see **Depends on** in each item and
-[Build sequence](#build-sequence)).
+This file uses ASD-STE100 Simplified Technical English (issue 9). Code names,
+file names, and commands are technical nouns. They show in `code` font.
 
-## Working rules
+The items are in the sequence of their expected effect, from the largest to the
+smallest. First, the effect on the tokens that engraph saves. Second, the effect
+on the part of a codebase that engraph shows correctly. This sequence is not the
+sequence of the work. Some items must wait for other items. Refer to
+"Dependencies" in each item and to "Sequence of work".
 
-- Do each item on its own branch. Make one commit for each step that changes code.
-- For each step that changes code: write a test that shows the problem or the
-  new behavior, and confirm it fails; change the code; run
-  `cargo test --workspace` and `cargo clippy --workspace --all-targets`, both
-  with and without `--features embeddings`. If the change affects how engraph
-  behaves, update `DETAILS.md`, `README.md`, and this file.
-- Steps that start with "Find out": record the result in the pull request, then
-  continue with the steps that follow.
+Each item gives its condition at a specified date. Before you start an item,
+make sure that the condition is still correct.
 
-## Build sequence
+## Rules for the work
 
-1. Start Phase 1 of [Pre-read file summary](#1-pre-read-file-summary) now. Its
-   two-week measurement window can run alongside everything else.
-2. [Stable symbol ids](#6-stable-symbol-ids): the stability suite before
-   normalization. Normalization changes ids, and the suite shows whether that
-   breaks anything.
-3. [Deeper workspace discovery](#3-deeper-workspace-discovery) before
-   [Go module coverage](#4-go-module-coverage), which uses its member rules.
-4. Everything else is independent.
+1. Do the work for each item on a new branch.
+2. Make one commit for each step that changes code.
+3. For each step that changes code, do these tasks:
+   1. Write a test that shows the problem or the new function.
+   2. Make sure that the result of the test is incorrect before you change the
+      code.
+   3. Change the code.
+   4. Do the `cargo test --workspace` command.
+   5. Do the `cargo clippy --workspace --all-targets` command with and without
+      `--features embeddings`.
+   6. If the change has an effect on how engraph operates, update `DETAILS.md`,
+      `README.md`, and this file.
+4. Some steps start with "Find out". For these steps, record the result in the
+   pull request. Then do the steps that follow.
 
----
+## Sequence of work
 
-## 1. Pre-read file summary
-
-**What:** before Claude reads a file engraph has indexed, a PreToolUse(Read)
-hook injects a short summary: symbols with line ranges and signatures, open bugs
-that name the file, and the date of the last commit that changed it. With it,
-Claude can read only the part of the file it needs. The hook never blocks the
-read: a hook that withholds the file and gives only the summary can make Claude
-act on incomplete data.
-
-**Why deferred:** PreToolUse(Read) fires on *every* file read, including small
-ones. Injecting 500 tokens before each Read can dwarf the savings on
-small files. Worth building only when telemetry shows file re-reads are a top-3
-token sink. The codegraph already supplies the anatomy cheaply via the
-`entities` table, and the PostToolUse(Read) symbol-augment hook is a shipped,
-lower-risk cousin. This is the more aggressive pre-read variant.
-
-**Phase 1: measure (start now)**
-
-1. In the PostToolUse(Read) hook (`run_post_read_hook`), record a telemetry
-   event for each read, with the read's token count and a hash of the file path.
-2. Add `engraph gain --reads`: tokens of all reads, and tokens of reads of a
-   file the same session already read.
-3. Collect for two weeks. Over the same window, run the original success
-   measurement: ≥ 20% aggregate token savings across real Claude Code use,
-   measured via `engraph gain`.
-4. If re-reads are not a top-3 token source, stop here.
-5. Find out whether Claude Code accepts `additionalContext` from a PreToolUse
-   hook. If it does not, stop here.
-
-**Phase 2: build**
-
-1. Add a PreToolUse(Read) hook to `engraph hook`. Claude sends absolute paths;
-   map them with `divergence::indexed_location` to the project and the
-   repo-relative path.
-2. Give a summary only when the codegraph has the file, the file is unchanged
-   since the index commit, and the file has more lines than
-   `ENGRAPH_PREREAD_MIN_LINES` (default 200).
-3. Cap the summary at 300 tokens.
-4. When the pre-read hook gave a summary for a read, the PostToolUse(Read) hook
-   skips its symbol list for that read.
-5. Record a telemetry event for each summary. Compare read tokens for two weeks
-   before and two weeks after.
-
-**Tests:** a summary for an indexed file over the line limit; no summary for a
-small file; no summary for a file changed since the index commit; summary ≤ 300
-tokens; no post-read symbol list after a read that got a summary.
-
-**Risk:** the hook fires on every read. If summaries don't make Claude read
-less, they only add tokens. The before/after comparison in Phase 2 is the check.
-
-**Depends on:** nothing. Phase 2 is gated on Phase 1's results.
-
-**Effort:** 1–2 days for Phase 2.
+1. Start steps 1 to 4 of item 4 (measurement of file reads) at the start of the
+   work. These steps must collect data for two weeks. You can do other items
+   at the same time.
+2. Do item 2 (deeper workspace discovery) before item 3 (all Go modules).
+   Item 3 uses the member rules of item 2.
+3. In item 5 (stable symbol ids), do part 1 (test suite) before part 2
+   (normalization). Part 2 changes symbol ids. The test suite shows if a change
+   to the ids causes problems. Step 1 of part 2 is a bug fix. You can do it
+   before part 1.
+4. You can do the other items in any sequence.
 
 ---
 
-## 2. Auto-trigger indexing
+## 1. Automatic index runs
 
-**What:** today `engraph index` is manual. Wire it into the SessionStart hook (or
-an MCP tool surface) so a fresh session re-indexes the workspace automatically,
-with stale-detection so cold builds don't fire every session.
+### Result
 
-**Why it ranks here:** the grep redirect, the post-read augment, and `subgraph`
-all depend on a current graph. A missing or stale graph turns their savings off
-without any error, and today keeping it fresh is on the user. This is the most
-user-visible codegraph follow-up.
+When a session starts, engraph updates the code graph of the project if the
+code graph is old.
 
-**Depends on:** nothing.
+### Condition at this time (2026-10-30)
 
----
+The `engraph index` command is manual. The SessionStart hook does not start an
+index run.
 
-## 3. Deeper workspace discovery
+The grep redirect, the PostToolUse(Read) symbol list, and `engraph subgraph` use
+the code graph. If the code graph does not exist or is old, these features save fewer
+tokens or no tokens. engraph does not show an error when this occurs.
 
-**What:** let the user choose which projects `engraph index --recursive` finds,
-and make discovery obey `.gitignore`.
+The `index_state` table records the commit of each index run.
 
-**Today:** `walk_recursive` descends to `RECURSIVE_MAX_DEPTH` (16) and skips the
-fixed `is_pruned_dir` list (`node_modules`, `target`, `vendor`, …). It reads no
-`.gitignore` files, and there's no way to include or exclude directories. A
-directory below another directory of the same language is treated as a workspace
-member. That is right for Cargo workspaces, and possibly wrong for Go modules,
-TypeScript packages, and Python projects.
+### Requirements
 
-**Approach:**
+- The hook must find out if the code graph is old. The commit in `index_state`
+  is a possible source for this check.
+- A slow index run (for example, a cold scip-java build) must not start in each
+  session.
 
-1. Walk with the `ignore` crate so `.gitignore` and `.ignore` apply. Keep the
-   `is_pruned_dir` list as well.
-2. Add `--max-depth` (default 16), and `--include <glob>` / `--exclude <glob>`
-   (relative to the workspace root).
-3. In `--dry-run` output, list each directory discovery found and why it was
-   included or skipped.
-4. Find out whether a git repo nested inside another git repo gets its own
-   project key. Add a test for it.
-5. Replace the same-language member rule with one rule per language:
-   - Cargo: a member only if the root `Cargo.toml` has a `[workspace]` section.
-   - TypeScript: a member only if the root `package.json` lists it in
-     `workspaces`.
-   - Go and Python: a directory with its own manifest is never a member.
+### Dependencies
 
-**Tests:** a directory named in `.gitignore` is skipped; `--exclude` removes a
-directory and `--include` limits results to the directories it names;
-`--max-depth 2` skips a project at depth 3; a Cargo crate below a root
-`[workspace]` is a member, and one below a root crate without `[workspace]` is
-not; a Go module below a root Go module is not a member.
-
-**Risk:** the new member rules can increase the number of index runs in a
-workspace. Check with `--dry-run` before a full run.
-
-**Depends on:** nothing. [Go module coverage](#4-go-module-coverage) uses its
-member rules.
+None.
 
 ---
 
-## 4. Go module coverage
+## 2. Deeper workspace discovery
 
-**What:** index every Go module of a repo, with correct relations between
-modules, both natively and inside Bazel.
+### Result
 
-**Today:**
+You can select the projects that `engraph index --recursive` finds. The
+discovery obeys `.gitignore` files. Go modules and Python projects below a
+project of the same language are in the result.
 
-- **Native:** the Go driver detects a module only when `go.mod` is in the
-  indexed directory. A multi-module repo needs `--recursive`, and that may skip
-  a module nested under another Go module (see
-  [Deeper workspace discovery](#3-deeper-workspace-discovery)). `go.work` files
-  are not read.
-- **Bazel:** the native pass (`run_go_modules`) reaches only `go.mod`-rooted
-  modules. On gazelle-managed `rules_go` monorepos that's the *minority* of the
-  code: a large gazelle repo can have thousands of `go_library` targets but only
-  a handful of `go.mod` files. `LangStatus::IndexedModules` surfaces the gap
-  (`indexed N go.mod modules of M go targets`). The shipped
-  `ENGRAPH_BAZEL_SCIP_GO_CMD` delegate lets a repo drive scip-go through its own
-  Bazel glue (`docs/examples/scip-go-bazel-index.sh`).
-- **Both:** scip-go indexes one build configuration, so platform-gated files
-  (`_linux.go`, `//go:build` tags) are missed. `_test.go` files are not indexed
-  (the Bazel pass passes `--skip-tests`).
+### Condition at this time (2026-10-30)
 
-**Approach:**
+`walk_recursive` examines the directory tree to a maximum depth of 16
+(`RECURSIVE_MAX_DEPTH`). It does not examine the directories in
+`is_pruned_dir`: hidden directories, `node_modules`, `target`, `vendor`,
+`__pycache__`, `venv`, and `testdata`. It does not read `.gitignore` files. You
+cannot include or exclude specified directories.
 
-1. **Nested modules.** Write a test with a root Go module and a second module in
-   `tools/`. Check that `engraph index --recursive --dry-run` includes `tools/`.
-   If it doesn't, apply the Go member rule from
-   [Deeper workspace discovery](#3-deeper-workspace-discovery).
-2. **`go.work`.** Find out whether scip-go can index all modules of a `go.work`
-   in one run. If it can, give it the `go.work` directory. If not, index each
-   module of the `go.work` as a subtree of the repo.
-3. **Cross-module resolution.** Write a test where a function in module A calls
-   a function in module B. Check that the relation points at module B's symbol
-   and doesn't dangle, in the native pass and in the merged per-module Bazel
-   SCIP. Check that vendored copies don't double-count.
-4. **Build tags.** Find out whether scip-go accepts build tags or `GOOS` /
-   `GOARCH`. If it does, add `--go-tags` to `engraph index`. Either way, document
-   the one-configuration limit in `DETAILS.md`.
-5. **Test files.** Add `--go-tests` to index `_test.go` files (test → impl
-   edges), in both the native and the Bazel Go pass.
-6. **Synthesize (Bazel; alternative to delegation).** Instead of a repo-supplied
-   command, derive an ephemeral `go.mod` per gazelle prefix from `go_library`
-   importpaths, run scip-go per synthesized root, and clean up. Fully
-   in-engraph, but fiddly. It can't resolve hermetic Bazel deps without extra
-   glue, and it must not mutate the target repo.
+If a directory above a project has the same language, the discovery does not
+record the project. This rule is correct for Cargo workspaces. It is not correct
+for Go: a Go module below a different Go module is not in the result. The rule
+is possibly not correct for TypeScript packages and Python projects.
 
-**Tests:** `engraph index --recursive` indexes the root module and the module in
-`tools/`; a relation from module A to module B points at the right symbol; with
-`--go-tests` a function in a `_test.go` file is in the graph, and without it, it
-is not.
+### Steps
 
-**Risk:** one index run per module can take a long time in a large repo. Scope
-it with `--include` from [Deeper workspace discovery](#3-deeper-workspace-discovery).
+1. In `walk_recursive`, use the `ignore` crate to obey `.gitignore` and
+   `.ignore` files.
+2. Keep the list in `is_pruned_dir` together with the `.gitignore` rules.
+3. Add the `--max-depth` flag, with a default value of 16.
+4. Add the `--include <glob>` flag. Each glob is relative to the workspace root.
+5. Add the `--exclude <glob>` flag. Each glob is relative to the workspace root.
+6. In the `--dry-run` output, show each directory that the discovery found.
+7. For each directory, show the cause for which the discovery included it or
+   did not include it.
+8. Find out if a git repo in a subdirectory of a different git repo has a
+   different project key.
+9. Write a test for this condition.
+10. Replace the rule that makes a directory with the same language a member.
+    Use a rule for each language:
+    - Cargo: a directory is a member only if the root `Cargo.toml` has a
+      `[workspace]` section.
+    - TypeScript: a directory is a member only if the root `package.json` lists
+      it in `workspaces`.
+    - Go and Python: a directory with a manifest in it is not a member.
 
-**Depends on:** [Deeper workspace discovery](#3-deeper-workspace-discovery) (the
-Go member rule).
+### Tests
 
----
+- The discovery does not include a directory that `.gitignore` names.
+- `--exclude` removes a directory from the result. `--include` limits the
+  result to the directories that it names.
+- `--max-depth 2` does not include a project at depth 3.
+- A Cargo crate below a root `[workspace]` is a member. A Cargo crate below a
+  root crate without `[workspace]` is not a member.
+- A Go module below a root Go module is not a member.
 
-## 5. Bazel TypeScript and Python symbols
+### Risks
 
-**What:** symbol-level Bazel indexing is shipped for Go (Phase A) and Java
-(Phase C) (`docs/bazel-symbol-indexing.md`, `DETAILS.md` §14.9). Two languages
-remain:
+The new member rules can increase the number of index runs in a workspace. Use
+`--dry-run` to see the result before you do a full index run.
 
-- **scip-typescript + rules_ts node_modules (Phase B):** cold runs may fail
-  until a prior `bazel build //...` populates `bazel-bin/<pkg>/node_modules`
-  symlinks. Likely delegated the same way Java is (an
-  `ENGRAPH_BAZEL_SCIP_TS_CMD` hook), since `rules_ts` / pnpm-workspace
-  materialization is repo-specific.
-- **scip-python in rules_python (Phase D):** per-project venv / site-packages
-  resolution. The hardest to make useful; reasonable to leave for last.
+### Dependencies
 
-**Why deferred:** until a real workload trips them.
-
-**Depends on:** nothing.
+None. Item 3 uses the member rules of this item.
 
 ---
 
-## 6. Stable symbol ids
+## 3. All Go modules in the code graph
 
-**What:** a symbol id is the same on every machine, and two different symbols
-never share one. A regression suite shows when a change to engraph or to an
-indexer changes the ids or relations of known symbols.
+### Result
 
-**Why it ranks here:** ids from canonically published deps (Cargo, npm, PyPI, Go
-modules) are already machine-stable, and cross-repo stitching works without
-rewrites. The known problems are narrow:
+engraph indexes all Go modules of a repo, with correct relations between the
+modules. This is also true in Bazel repos.
 
-- scip-java gives first-party Java code an empty version
-  (`semanticdb maven . . …`). Two repos with the same package names can
-  therefore produce the same ids.
-- scip-go before 0.7 put absolute machine paths in ids.
+### Condition at this time (2026-10-30)
 
-`scip_loader::normalize_moniker` is the hook for fixes, and it is a no-op today.
-Both parts pay back once indexer drift or id collisions hit a real workload.
+- The Go driver finds a module only when `go.mod` is in the indexed directory.
+  For a repo with more than one Go module, a `--recursive` index run is
+  necessary. But that run does not include a Go module below a different Go
+  module (item 2).
+- The Go driver does not read `go.work` files.
+- scip-go indexes only one build configuration. Thus, files with build tags for
+  a different platform (for example `_linux.go` or `//go:build`) are not in the
+  code graph.
+- engraph does not index `_test.go` files. The Bazel Go pass gives
+  `--skip-tests` to scip-go.
+- In Bazel repos, the native Go pass (`run_go_modules`) indexes only the
+  modules that have a `go.mod` file. A large gazelle repo can have thousands of
+  `go_library` targets, but only a small number of `go.mod` files.
+  `LangStatus::IndexedModules` shows this difference. With the
+  `ENGRAPH_BAZEL_SCIP_GO_CMD` command, a repo can use its own Bazel scripts to
+  index all targets (`docs/examples/scip-go-bazel-index.sh`).
 
-**Part 1: stability suite (do first)**
+### Steps
 
-1. Make a small fixture repo for each of Rust, Python, Go, TypeScript, and Java,
-   with pinned dependency versions.
-2. In each fixture, pick 50 symbols: functions, types, and methods, including
-   symbols used from a different module.
-3. Write a snapshot file per fixture with each symbol's id, name, file path,
-   line range, and caller/callee ids, plus the indexer version.
-4. Add a test that indexes each fixture and diffs against its snapshot. It
-   soft-skips when the indexer is absent (as `tests/drivers_live.rs` does). On a
-   mismatch it shows the differences, and if the indexer version differs it
-   names both versions. `ENGRAPH_UPDATE_SNAPSHOTS=1` rewrites the snapshots.
-5. Commit a prebuilt SCIP file per fixture. Add a second test that loads it and
-   diffs against the snapshot. It needs no indexer, so it runs in every CI job
-   and catches loader changes.
-6. Run the first test in the "Codegraph live drivers" CI job, with pinned
-   indexer versions installed.
+1. Write a test with a root Go module and a second Go module in `tools/`.
+2. Make sure that `engraph index --recursive` indexes the two modules. Item 2,
+   step 10 changes the discovery for this.
+3. Find out if scip-go can index all modules of a `go.work` file in one
+   operation.
+4. If scip-go can do this, give the `go.work` directory to scip-go.
+5. If scip-go cannot do this, index each module of the `go.work` file as a
+   subtree of the repo.
+6. Write a test in which a function in module A uses a function in module B.
+7. Make sure that the relation from module A points to the symbol in module B.
+   Do this for the native Go pass and for the merged SCIP data of the Bazel Go
+   pass.
+8. Make sure that vendored copies of a module do not cause duplicate symbols.
+9. Find out if scip-go accepts build tags or the `GOOS` and `GOARCH`
+   environment variables.
+10. If scip-go accepts them, add the `--go-tags` flag to the `engraph index`
+    command.
+11. Write the limit of one build configuration in `DETAILS.md`.
+12. Add the `--go-tests` flag to index `_test.go` files.
+13. Use the `--go-tests` flag in the native Go pass and in the Bazel Go pass.
 
-**Part 2: normalization**
+Optional step for Bazel repos: engraph can make a temporary `go.mod` file for
+each gazelle prefix from the import paths of the `go_library` targets. Then it
+can index each of these roots with scip-go and remove the temporary files. This
+method does not need a command from the repo. But it is complex, and it cannot
+resolve hermetic Bazel dependencies without more code. It must not change the
+target repo.
 
-1. Find out which id parts each indexer emits (rust-analyzer, scip-python,
-   scip-go, scip-typescript, scip-java): scheme, package manager, package name,
-   version.
-2. Tabulate problems per scheme: empty versions, absolute paths, versions that
-   change on every commit. Leave scip-python's pinned project version as is.
-3. Write one rule per problem. Put them in `normalize_moniker`, one `match` arm
-   per scheme:
-   - First-party Java with an empty version: fill the version from the repo key.
-   - scip-go ids with an absolute path: strip the machine-local part.
-4. Make sure every function that writes a symbol id to the database goes
-   through `normalize_moniker`.
-5. Add a `normalization` column to `index_state` recording the rules version.
-   When it differs from the binary's rules version, print a message
-   recommending a full re-index.
+### Tests
 
-**Tests:** a before/after unit test per rule; two Java repos with the same
-package names get different ids; `tests/workspace_cross_repo.rs` is unchanged;
-the Part 1 suite shows changed ids only for schemes that have a rule.
+- `engraph index --recursive` indexes the root module and the module in
+  `tools/`.
+- A relation from module A to module B points to the correct symbol.
+- With `--go-tests`, a function in a `_test.go` file is in the code graph.
+  Without `--go-tests`, it is not in the code graph.
 
-**Risks:** a new indexer version can change ids legitimately and fail the suite.
-Regenerate snapshots only after reviewing the diff. Changing normalization rules
-disconnects cross-repo relations indexed under different rule versions, so after
-a rules update, re-index every repo.
+### Risks
 
-**Depends on:** Part 2 depends on Part 1.
+An index run for each Go module can use much time in a large repo. Use the
+`--include` flag of item 2 to select modules.
 
----
+### Dependencies
 
-## 7. MCP server
-
-**What:** expose `engraph recall`, `engraph subgraph`, and related queries as MCP tools. Lets Claude orchestrate retrieval explicitly via tool calls rather than reading CLI output.
-
-**Why deferred:** with ToolSearch enabled (the user's setup), MCP unused-cost is ~50 tk/tool name — low but non-zero. The Bash-CLI path (`engraph recall <q>` → output into transcript) already covers current use cases. MCP wins when there are many tools that benefit from structured args + result types; now that the codegraph is shipped, each graph operation (`find_symbol`, `who_calls`, `subgraph_around`) is a candidate tool, so the 5+-tool threshold is within reach.
-
-**Effort:** 3–4 days. The MCP SDK + a stdio server crate are the bulk of it.
-
----
-
-## 8. LLM reranking layer
-
-**What:** top-K from RRF hybrid retrieval → small-model rerank for final ordering. Defaults to off because it costs tokens.
-
-**Why deferred:** until hybrid retrieval (shipped) shows a measurable ceiling on a real query benchmark, this is theoretical. Need telemetry showing a p@5 plateau before justifying the per-query model spend.
-
-**Dependencies:** a real query benchmark dataset (nothing close exists yet).
-
-**Effort:** 2–3 days, mostly prompt design + token-cost measurement.
+Item 2 (the member rule for Go).
 
 ---
 
-## 9. `/resume` and `/save` skills
+## 4. Measurement of file reads
 
-**What:** the writer (`engraph save`), the SessionStart `## decisions` and `## last session` surfacing, and `engraph resume` (prints the last session's digest) now ship. What remains is the optional skill UX: a `/save` shortcut and a `/resume` skill wrapping `engraph resume`.
+### Result
 
-**Why deferred:** the SessionStart brief already auto-surfaces saved decisions and the last session's final turn, and `engraph resume` is one Bash call away.
+Telemetry shows the tokens that file reads use. It also shows the tokens of
+reads of a file that the session read before. With these data, you can decide
+if a change to file reads is worth the work.
 
-**Effort:** ~0.5 day (skill markdown).
+### Condition at this time (2026-10-30)
+
+The PostToolUse(Read) hook adds a list of symbols after Claude reads a file. Its
+telemetry event (`read_augment`) records only the tokens of this list. It does
+not record the tokens of the read.
+
+An earlier plan added a PreToolUse(Read) hook that gives a file summary before
+the read. The purpose of the summary was that Claude reads only the necessary
+part of the file. This plan does not operate. The Claude Code hooks documentation
+(`code.claude.com/docs/en/hooks`) gives this description of `additionalContext`
+for PreToolUse: "String added to Claude's context alongside the tool result."
+Thus, Claude receives the summary at the same time as the full file. The summary
+cannot make the read smaller. It gives the same data as the PostToolUse(Read)
+symbol list.
+
+A hook that stops the read and gives only a summary can make Claude use
+incorrect data.
+
+### Steps
+
+1. Find out if the input of the PostToolUse(Read) hook includes the content of
+   the read in `tool_response`. If it does not, count the tokens of the lines
+   that the read selected. Use the file path, `offset`, and `limit` in
+   `tool_input`.
+2. In the PostToolUse(Read) hook, record a telemetry event for each read. In
+   this event, record the token count of the read and a hash of the file path.
+3. Add the `--reads` flag to the `engraph gain` command. With `--reads`, show
+   the tokens of all reads. Also show the tokens of reads of a file that the
+   session read before.
+4. Collect this data for two weeks. In the same two weeks, measure the total
+   savings with `engraph gain`. The initial success criterion of engraph is
+   that it saves 20% or more of all tokens.
+5. If the reads of the same file again are not one of the three largest token
+   sources, stop this item.
+6. Find out if a different method can make reads of the same file smaller. A
+   possible method: for a read of an unchanged file that the session read
+   before, the PreToolUse(Read) hook stops the read and refers Claude to the
+   earlier result.
+7. Before you use the method of step 6, find out what occurs after Claude Code
+   compacts the conversation. After compaction, the earlier result is possibly
+   not in the context.
+
+### Tests
+
+- The PostToolUse(Read) hook records one telemetry event for each read, with
+  the token count of the read.
+- `engraph gain --reads` shows the tokens of reads of the same file again
+  separately from the tokens of all reads.
+
+### Risks
+
+The hook operates for each read. The telemetry must be small and fast.
+
+### Dependencies
+
+None.
 
 ---
 
-## 10. Mnemosyne → engraph data migration
+## 5. Stable symbol ids
 
-**What:** an operational item, not engineering. Both DBs are SQLite with similar schemas. A one-shot SQL script could copy sessions, messages, do-not-repeat, and bugs over.
+### Result
 
-**Effort:** a day with the SQL + a sanity-check pass.
+A symbol id is the same on each computer and after each commit. Two different
+symbols do not have the same id. A test shows when a change to engraph or to an
+indexer changes the ids or the relations of known symbols.
+
+### Condition at this time (2026-10-30)
+
+- The function `scip_loader::normalize_moniker` does not change the symbol id.
+- The standalone Go driver (`ScipGo` in `driver.rs`) does not give
+  `--module-version` to scip-go. Thus, scip-go puts the git short hash in each
+  Go symbol id, and all Go symbol ids change at each commit. The Bazel Go pass
+  gives a fixed version (`SCIP_GO_VERSION`). The Python driver also gives a
+  fixed version (`SCIP_PYTHON_VERSION`).
+- For first-party Java code, scip-java gives an empty version
+  (`semanticdb maven . . …`). Thus, two repos with the same package names can
+  have the same symbol ids.
+- scip-go versions before 0.7 put absolute paths of the computer in symbol ids.
+  `scripts/install-scip-indexers.sh` installs the latest scip-go. Thus, this
+  problem possibly does not occur at this time.
+- The symbol ids of published dependencies (Cargo, npm, PyPI, Go modules) are
+  the same on each computer.
+- No test compares the symbol ids of a repo between two engraph versions or two
+  indexer versions.
+
+### Steps, part 1: test suite for stable symbol ids
+
+1. Make a small fixture repo for each language: Rust, Python, Go, TypeScript,
+   and Java.
+2. Use specified versions of all dependencies in each fixture repo.
+3. In each fixture repo, select 50 symbols.
+4. Include functions, types, and methods in the 50 symbols.
+5. Include symbols that code in a different module uses.
+6. For each fixture repo, make a snapshot file.
+7. In the snapshot file, record the id, the name, the file path, and the line
+   range of each symbol.
+8. In the snapshot file, also record the ids of the callers and callees of each
+   symbol.
+9. In the snapshot file, record the version of the indexer.
+10. Add a test that indexes each fixture repo and compares the result with the
+    snapshot file.
+11. If the indexer is not installed, stop the test without an error, as
+    `tests/drivers_live.rs` does.
+12. If the result is not the same as the snapshot file, show the differences.
+13. If the indexer version is not the version in the snapshot file, show the
+    two versions in the error message.
+14. Add the `ENGRAPH_UPDATE_SNAPSHOTS=1` environment variable to write new
+    snapshot files.
+15. Keep a prebuilt SCIP file for each fixture repo in the repo.
+16. Add a second test that loads the prebuilt SCIP file and compares the result
+    with the snapshot file. This test does not use an indexer. Thus, it
+    operates in all CI jobs and shows changes to the loader.
+17. Add the first test to the "Codegraph live drivers" CI job.
+18. In the CI job, install specified versions of the indexers.
+
+### Steps, part 2: normalization of symbol ids
+
+1. In the standalone Go driver, give `--module-version` with the value of
+   `SCIP_GO_VERSION` to scip-go. This change replaces all Go symbol ids one
+   time.
+2. Find out which parts of the symbol id each indexer gives. Do this for
+   rust-analyzer, scip-python, scip-go, scip-typescript, and scip-java.
+3. For each indexer, record the scheme, the package manager, the package name,
+   and the version.
+4. Make a table of the problems for each scheme. Look for empty versions,
+   absolute paths, and versions that change at each commit. Do not change the
+   specified version that the scip-python driver gives.
+5. Write one rule for each problem in the table.
+6. For first-party Java code with an empty version, put a value from the
+   project key in the version part.
+7. If scip-go symbol ids have an absolute path, remove the part of the path
+   that is on the computer.
+8. Put the rules in `normalize_moniker`, with one `match` arm for each scheme.
+9. Find each function that writes a symbol id into the database.
+10. Make sure that each of these functions uses `normalize_moniker`.
+11. Add the `normalization` column to the `index_state` table, with the version
+    of the rules.
+12. Compare the version in `index_state` with the version of the rules.
+13. If the two versions are different, show a message that recommends a full
+    index run.
+
+### Tests
+
+- Two index runs of a Go repo at different commits give the same Go symbol ids.
+- Each rule has a unit test with a symbol id before and after the rule.
+- Two Java repos with the same package names do not have the same symbol ids.
+- The cross-repo test (`tests/workspace_cross_repo.rs`) shows the same result
+  as before.
+- The test suite of part 1 shows changed ids only for the schemes that have a
+  rule.
+
+### Risks
+
+- A new indexer version can change symbol ids correctly. The test then shows an
+  error. Make a new snapshot file only after you examine the differences.
+- A change to symbol ids disconnects relations between repos that you indexed
+  with different rule versions. Thus, after an update of the rules, do a full
+  index run of all repos.
+
+### Dependencies
+
+Part 2 must wait for part 1, but step 1 of part 2 can start before part 1.
 
 ---
 
-## 11. Cross-project wikilink / Obsidian surface
+## 6. Bazel symbols for TypeScript and Python
 
-**What:** export `context_items` / `bugs` / `decisions` to an Obsidian-compatible vault structure with wikilinks. Useful for human browsability across projects; orthogonal to token savings.
+### Result
 
-**Why deferred:** not a token-savings feature. Only build if the user wants the vault for personal note-taking.
+The symbol-level Bazel pass (`--bazel-symbols`) indexes TypeScript and Python
+code.
 
-**Effort:** 2–3 days. Conceptually simple; friction is in matching Obsidian's conventions.
+### Condition at this time (2026-10-30)
+
+The symbol-level Bazel pass indexes Go (phase A) and Java (phase C). Refer to
+`docs/bazel-symbol-indexing.md` and `DETAILS.md` §14.9. Two phases remain:
+
+- **Phase B, TypeScript:** scip-typescript possibly fails on a cold run. A
+  `bazel build //...` command must first make the `node_modules` links in
+  `bazel-bin/<pkg>/node_modules`. The setup of `rules_ts` and pnpm workspaces
+  is different in each repo. Thus, a command from the repo
+  (`ENGRAPH_BAZEL_SCIP_TS_CMD`) is a possible solution, as for Java.
+- **Phase D, Python:** scip-python must find the virtual environment and the
+  `site-packages` of each project in `rules_python`. This phase is the most
+  difficult. Do it last.
+
+### Reason to wait
+
+Do this work when a real repo shows the problem.
+
+### Dependencies
+
+None.
 
 ---
 
-## Future research (not on the roadmap, but worth noting)
+## 7. LLM reranking
 
-- **Adaptive compression based on budget escalation level.** When `engraph budget status` shows level 2 or 3, filters could apply stricter caps (e.g. `tree` depth drops from 3 to 2, `docker logs` tail from 200 to 100). Telemetry-driven escalation is the bigger story here that hasn't been fleshed out.
-- **Mempalace-style eviction policy.** Memory tools that only accrete become liabilities. Need time-decay scoring with a hard floor, demote-after-N-non-retrievals, size budget per project. The schema supports it (`scopes.archived`); the algorithm doesn't exist yet.
-- **Cloud sync.** Local-first is the v1 promise. If you ever want to share memory across machines, the trait boundary in place today (`EmbeddingProvider`) + UUIDv7 IDs + the `ingestion_log` append-only pattern are the foundation. Need to add `MemoryStore` and `GraphStore` traits, then a Turso/LiteFS implementation. The architecture review explicitly argued against adding those traits before there's a concrete cloud need; revisit when there is.
-- **A "what did Claude actually do" weekly digest.** An `engraph weekly` subcommand that reads `events` + `messages` and produces a summary of: top compressed commands, top recalled phrases, longest sessions, biggest savings. Useful for both the user and for tuning filter targets.
+### Result
+
+A small model puts the top results of hybrid retrieval (RRF) in a better
+sequence. This function is off by default, because it uses tokens.
+
+### Reason to wait
+
+Hybrid retrieval operates at this time. No data shows that its results are not
+sufficiently good. Before this work, a benchmark must show that the precision
+of the first 5 results (p@5) does not increase more.
+
+### Dependencies
+
+A benchmark data set of real queries. No such data set exists at this time.
+
+### Effort
+
+2 to 3 days. Most of the work is the prompt design and the measurement of the
+token cost.
+
+---
+
+## 8. `/resume` and `/save` skills
+
+### Result
+
+A `/save` skill calls `engraph save`. A `/resume` skill calls `engraph resume`.
+
+### Condition at this time (2026-10-30)
+
+`engraph save`, `engraph resume`, and the `## decisions` and `## last session`
+sections of the SessionStart brief operate.
+
+### Reason to wait
+
+The SessionStart brief shows the saved decisions and the last session. Claude
+can do `engraph resume` with one Bash command. Thus, the skills add only a
+small improvement.
+
+### Effort
+
+Approximately half a day (skill Markdown).
+
+---
+
+## 9. Obsidian export
+
+### Result
+
+engraph writes `context_items`, `bugs`, and decisions to an Obsidian vault, with
+wikilinks between projects.
+
+### Reason to wait
+
+This function does not save tokens. It is useful only for notes that a person
+reads. Do it only if the user wants the vault.
+
+### Effort
+
+2 to 3 days. The function is simple. Most of the work is to match the Obsidian
+conventions.
+
+---
+
+## Possible future work (not on the roadmap)
+
+- **MCP server.** An MCP server can give `engraph recall` and
+  `engraph subgraph` as MCP tools with typed arguments. For Claude Code and
+  Codex, this adds almost nothing. These clients can do the `engraph` commands
+  with their shell tool. The hooks can also change and stop tool calls, and an
+  MCP server cannot do this. Each MCP tool also adds tokens to each session. Do
+  this work only if a client that has no shell access must use engraph.
+- **Compression that changes with the budget level.** When
+  `engraph budget status` shows level 2 or 3, the filters can use smaller
+  limits. For example, the `tree` depth can change from 3 to 2, and the
+  `docker logs` tail can change from 200 lines to 100 lines. A design for this
+  escalation does not exist at this time.
+- **Removal of old memory.** A memory store that only increases becomes a
+  problem. A possible design: a score that decreases with time and has a
+  minimum, a lower rank for an item that retrieval does not find after N
+  queries, and a size limit for each project. The schema has the necessary
+  column (`scopes.archived`). The algorithm does not exist.
+- **Cloud sync.** engraph keeps all data on the local computer. To share memory
+  between computers, these parts can be the base: the `EmbeddingProvider`
+  trait, the UUIDv7 ids, and the append-only `ingestion_log` table. The work
+  must add `MemoryStore` and `GraphStore` traits, and then an implementation
+  for Turso or LiteFS. The architecture review recommended that engraph does
+  not add these traits before a real need for cloud sync occurs.
+- **Weekly summary.** An `engraph weekly` command reads `events` and `messages`.
+  It shows the most compressed commands, the most recalled phrases, the longest
+  sessions, and the largest savings. These data help the user and help to
+  adjust the filters.
