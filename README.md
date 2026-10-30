@@ -492,4 +492,4 @@ GROUP BY filter_id ORDER BY avg_ratio ASC;
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
