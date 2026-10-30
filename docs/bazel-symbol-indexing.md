@@ -5,9 +5,9 @@ open.** Kept as the original design record: the problem, the per-language
 approach, integration points, risks, and the phased plan. Line references and
 the "Problem & evidence" section describe the codebase as of the 2026-06-02
 diagnosis, not today. Current behavior lives in `DETAILS.md` §14.9; remaining
-work in `ROADMAP.md` → "Bazel TypeScript and Python symbols".
+work in `ROADMAP.md` → "Bazel symbols for TypeScript and Python".
 
-Related: `ROADMAP.md` → "Bazel TypeScript and Python symbols" (the open phases);
+Related: `ROADMAP.md` → "Bazel symbols for TypeScript and Python" (the open phases);
 `crates/engraph-codegraph/src/bazel.rs:8` defers this ("symbol-level half … is
 deferred").
 

@@ -1732,7 +1732,7 @@ workload trips them):
 - **Go gazelle bulk**: `go_library` targets without a `go.mod` are
   unreachable by scip-go; the `IndexedModules` `targets` count makes the
   gap visible. The shipped `ENGRAPH_BAZEL_SCIP_GO_CMD` delegate reaches
-  them per repo; "Go module coverage" in `ROADMAP.md` scopes the in-engraph
+  them per repo; "All Go modules in the code graph" in `ROADMAP.md` scopes the in-engraph
   alternative (synthesized go.mod).
 - **scip-typescript + rules_ts node_modules**: cold runs may fail until a
   prior `bazel build //...` populates the package-local `node_modules`
@@ -1750,7 +1750,7 @@ workload trips them):
 
 The roadmap (`ROADMAP.md`) tracks features that aren't built, ranked by
 expected impact. The codegraph is shipped (target-level §14.8,
-symbol-level §14.9); its open items there are auto-trigger indexing,
-deeper workspace discovery, Go module coverage, Bazel TypeScript and
-Python symbols, and stable symbol ids (normalization plus a stability
-suite).
+symbol-level §14.9); its open items there are automatic index runs,
+deeper workspace discovery, all Go modules in the code graph, Bazel
+symbols for TypeScript and Python, and stable symbol ids (normalization
+plus a stability suite).
