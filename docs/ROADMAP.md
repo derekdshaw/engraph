@@ -12,6 +12,9 @@ Each item has a plan in `docs/plans/`. Read
 [the general information for all plans](plans/00-general-info-plan.md) first.
 It gives the language, the rules for the work, and the sequence of the work.
 
+The number of an item is the number of its plan. When the work of an item is
+complete, the item and its plan are removed. The numbers of the other items do
+not change.
 Small performance improvements are not items in this file. They are in
 [`docs/plans/general-perf-improvements.md`](plans/general-perf-improvements.md).
 
@@ -19,9 +22,7 @@ Small performance improvements are not items in this file. They are in
 
 ## 1. Automatic index runs
 
-When a session starts, engraph updates the code graph of the project if the code graph is old.
-
-Plan: [`docs/plans/01-automatic-index-runs-plan.md`](plans/01-automatic-index-runs-plan.md)
+---
 
 ## 2. Deeper workspace discovery
 
@@ -34,6 +35,12 @@ Plan: [`docs/plans/02-deeper-workspace-discovery-plan.md`](plans/02-deeper-works
 engraph indexes all Go modules of a repo, with correct relations between the modules. This is also true in Bazel repos.
 
 Plan: [`docs/plans/03-all-go-modules-plan.md`](plans/03-all-go-modules-plan.md)
+
+## 10. Separate code graphs for worktrees
+
+An agent in a worktree sees the base graph together with the changes of that worktree, and not the changes of other worktrees. A merge to the base branch updates the base graph and each overlay.
+
+Plan: [`docs/plans/10-worktree-overlays-plan.md`](plans/10-worktree-overlays-plan.md)
 
 ## 4. Measurement of file reads
 

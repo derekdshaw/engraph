@@ -281,6 +281,16 @@ const MIGRATIONS: &[&str] = &[
     DROP TABLE index_state;
     ALTER TABLE index_state_new RENAME TO index_state;
     "#,
+    // v11 — how each subtree was indexed, so `index --if-changed` repeats it:
+    // `source` is where the SCIP came from (`drivers` run by engraph, or a
+    // prebuilt `scip` / `manifest` it can't rebuild), plus the `--lang` pin
+    // and whether the symbol-level Bazel pass ran. Older rows were indexed by
+    // drivers with neither, which the defaults say.
+    r#"
+    ALTER TABLE index_state ADD COLUMN source TEXT NOT NULL DEFAULT 'drivers';
+    ALTER TABLE index_state ADD COLUMN lang TEXT;
+    ALTER TABLE index_state ADD COLUMN bazel_symbols INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
@@ -389,6 +399,35 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn migrates_v10_index_state_rows_to_v11_driver_runs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        for (i, sql) in MIGRATIONS[..10].iter().enumerate() {
+            tx.execute_batch(sql).unwrap();
+            tx.execute(
+                "INSERT INTO migrations (version) VALUES (?1)",
+                [i as i64 + 1],
+            )
+            .unwrap();
+        }
+        tx.execute(
+            "INSERT INTO index_state (project, subtree, commit_sha) VALUES ('/p', 'svc-a', 'abc')",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let row: (String, Option<String>, i64) = conn
+            .query_row(
+                "SELECT source, lang, bazel_symbols FROM index_state WHERE project = '/p'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("drivers".into(), None, 0));
     }
 
     #[test]

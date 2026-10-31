@@ -3,6 +3,7 @@ pub mod bazel_symbols;
 pub mod driver;
 pub mod gc;
 pub mod index;
+pub mod lock;
 pub mod relation_kind;
 pub mod scip_loader;
 pub mod subgraph;
@@ -15,9 +16,14 @@ pub use bazel_symbols::{
 pub use driver::{Driver, registry};
 pub use gc::collect_orphans;
 pub use index::{
-    IndexPlan, IndexScope, IndexStats, SymbolLangSummary, WorkspaceRepoResult, WorkspaceStats,
-    discover_workspace_repos, index_repo, index_repo_in, index_scip_manifest, index_workspace,
-    indexed_commits, plan_repo, plan_workspace, record_indexed_commit,
+    IndexMode, IndexPlan, IndexScope, IndexSource, IndexStats, SymbolLangSummary,
+    WorkspaceRepoResult, WorkspaceStats, discover_workspace_repos, index_modes, index_repo,
+    index_repo_in, index_scip_manifest, index_workspace, indexed_commits, plan_repo,
+    plan_workspace, record_indexed_commit,
+};
+pub use lock::{
+    Acquire, IndexLock, acquire as acquire_index_lock, acquire_wait as acquire_index_lock_wait,
+    held_message,
 };
 pub use relation_kind::RelationKind;
 pub use scip_loader::{LoadStats, load};

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use engraph_codegraph::IndexLock;
 use engraph_compress::{
     CompressInput, compress,
     filters::{self, FilterCtx},
@@ -50,6 +51,10 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .with_writer(std::io::stderr)
+        // Colour only on a terminal: stderr redirected to a file (the
+        // SessionStart hook's detached refresh logs to `auto-index.log`) or
+        // a pipe gets plain text, not escape codes.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
 
     // Best-effort metrics export; None (no-op) unless built with `--features otel`
@@ -241,6 +246,8 @@ async fn main() -> Result<()> {
             no_gc,
             recursive,
             dry_run,
+            if_changed,
+            auto,
         } => {
             let start = Instant::now();
             let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
@@ -267,7 +274,165 @@ async fn main() -> Result<()> {
             } else {
                 workspace.clone()
             };
-            if dry_run {
+            if if_changed {
+                // Refresh only the recorded parts of this repo's index whose
+                // files moved on since their index commit. Nothing recorded
+                // means the repo was never indexed by hand; leave it alone.
+                let (project_key, _) = divergence::index_scope(&repo);
+                let Some(top) = git_current_toplevel(&repo) else {
+                    anyhow::bail!("--if-changed needs a git checkout: {}", repo.display());
+                };
+                let recorded = engraph_codegraph::indexed_commits(&conn, &project_key)?;
+                let modes = engraph_codegraph::index_modes(&conn, &project_key)?;
+                // The shared index follows the main worktree; a linked one
+                // relies on the per-file divergence check (see
+                // `in_linked_worktree`).
+                let linked = divergence::in_linked_worktree(&repo);
+                // A dry run takes no lock; a real one holds it across every
+                // subtree. A best-effort refresh yields to whatever run is
+                // active instead of failing.
+                let lock: std::result::Result<Option<IndexLock>, String> =
+                    if recorded.is_empty() || linked || dry_run {
+                        Ok(None)
+                    } else {
+                        take_index_lock(&project_key)?.map(Some)
+                    };
+                // One telemetry row per run (like `--workspace`), with the
+                // SCIP volume it produced: filter `auto` when the SessionStart
+                // hook started it, `if_changed` when run by hand. Recorded
+                // whatever the outcome, so the hook's firing rate and cost
+                // are visible even when there was nothing to do.
+                let mut scip_bytes_total = 0usize;
+                let mut all_failed = false;
+                match lock {
+                    _ if recorded.is_empty() => {
+                        println!("no index recorded for {project_key}; run `engraph index` first");
+                    }
+                    _ if linked => println!(
+                        "skipped: {} is a linked worktree; only the main worktree refreshes \
+                         the shared index of {project_key}",
+                        top.display()
+                    ),
+                    Err(held) => println!("skipped: {held}"),
+                    Ok(_lock) => {
+                        let changed = divergence::outermost_subtrees(divergence::changed_subtrees(
+                            &conn,
+                            &project_key,
+                            &repo,
+                        ));
+                        if changed.is_empty() {
+                            println!(
+                                "index up to date: {project_key} ({} subtree(s) unchanged)",
+                                recorded.len()
+                            );
+                        }
+                        let (mut attempted, mut failed) = (0usize, 0usize);
+                        for subtree in &changed {
+                            let shown = scope_label(&project_key, subtree);
+                            // Repeat how this subtree was indexed. Prebuilt
+                            // SCIP can only be rebuilt by whatever produced it.
+                            let mode = modes.get(subtree).cloned().unwrap_or_default();
+                            let flag = match mode.source {
+                                engraph_codegraph::IndexSource::Drivers => None,
+                                engraph_codegraph::IndexSource::Scip => Some("--scip"),
+                                engraph_codegraph::IndexSource::Manifest => Some("--scip-manifest"),
+                            };
+                            if let Some(flag) = flag {
+                                println!(
+                                    "  skip {shown} :: indexed from prebuilt SCIP ({flag}); \
+                                     re-run that index to refresh it"
+                                );
+                                continue;
+                            }
+                            // Re-indexing a parent replaces what is under it,
+                            // and records over the sub-projects' rows, so a
+                            // prebuilt sub-project would be rebuilt by local
+                            // indexers and lose its mode.
+                            let prebuilt_below = modes.iter().find(|(t, m)| {
+                                m.source != engraph_codegraph::IndexSource::Drivers
+                                    && t.as_str() != subtree
+                                    && (subtree.is_empty()
+                                        || t.strip_prefix(subtree.as_str())
+                                            .is_some_and(|r| r.starts_with('/')))
+                            });
+                            if let Some((below, _)) = prebuilt_below {
+                                println!(
+                                    "  skip {shown} :: covers {}, indexed from prebuilt SCIP; \
+                                     a re-index here would replace it",
+                                    scope_label(&project_key, below)
+                                );
+                                continue;
+                            }
+                            // Explicit --bazel-symbols / --no-bazel-symbols on
+                            // this run win over what was recorded.
+                            let bazel = if bazel_symbols {
+                                true
+                            } else if no_bazel_symbols {
+                                false
+                            } else {
+                                mode.bazel_symbols
+                            };
+                            if dry_run {
+                                let mut how = Vec::new();
+                                if let Some(l) = &mode.lang {
+                                    how.push(format!("--lang {l}"));
+                                }
+                                if bazel {
+                                    how.push("--bazel-symbols".to_string());
+                                }
+                                let how = if how.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" ({})", how.join(" "))
+                                };
+                                println!("dry-run: would re-index {shown}{how}");
+                                continue;
+                            }
+                            let sub_repo = if subtree.is_empty() {
+                                top.clone()
+                            } else {
+                                top.join(subtree)
+                            };
+                            attempted += 1;
+                            let outcome = index_single(
+                                &conn,
+                                &sub_repo,
+                                None,
+                                mode.lang.as_deref(),
+                                &project_key,
+                                subtree,
+                                bazel,
+                                effective_gc,
+                            );
+                            match outcome {
+                                Ok(stats) => scip_bytes_total += stats.scip_bytes,
+                                Err(e) => {
+                                    failed += 1;
+                                    println!("  err {shown} :: {e:#}");
+                                }
+                            }
+                        }
+                        all_failed = failed > 0 && failed == attempted;
+                    }
+                }
+                if !dry_run {
+                    telemetry::record_event(
+                        &conn,
+                        EventInput {
+                            session_id: session_id.as_deref(),
+                            kind: EventKind::Index,
+                            feature: "codegraph_index",
+                            filter_id: Some(if auto { "auto" } else { "if_changed" }),
+                            input_tokens: scip_bytes_total as i64,
+                            output_tokens: 0,
+                            latency_ms: start.elapsed().as_millis() as i64,
+                        },
+                    )?;
+                }
+                if all_failed {
+                    anyhow::bail!("every changed subtree failed to re-index");
+                }
+            } else if dry_run {
                 if let Some(root) = &recursive_root {
                     let plans = engraph_codegraph::plan_workspace(
                         root,
@@ -319,7 +484,14 @@ async fn main() -> Result<()> {
                     match &r.outcome {
                         Ok(s) => {
                             divergence::record_index_commit(
-                                &conn, &r.project, &r.subtree, &r.repo,
+                                &conn,
+                                &r.project,
+                                &r.subtree,
+                                &r.repo,
+                                &engraph_codegraph::IndexMode {
+                                    bazel_symbols: effective_bazel_symbols,
+                                    ..Default::default()
+                                },
                             )?;
                             println!(
                                 "  ok  {} ({} entities, {} relations, driver={})",
@@ -368,14 +540,27 @@ async fn main() -> Result<()> {
                 // monorepo sub-project refreshes its subtree of it.
                 let (project_key, subtree) = match project {
                     Some(p) => (p, String::new()),
-                    None => divergence::index_scope(&repo),
+                    None => {
+                        warn_if_linked_worktree(&repo);
+                        divergence::index_scope(&repo)
+                    }
                 };
                 let scope = engraph_codegraph::IndexScope {
                     project: &project_key,
                     subtree: &subtree,
                 };
+                let _lock = engraph_codegraph::acquire_index_lock_wait(&project_key)?;
                 let stats = engraph_codegraph::index_scip_manifest(&conn, m, scope, effective_gc)?;
-                divergence::record_index_commit(&conn, &project_key, &subtree, &repo)?;
+                divergence::record_index_commit(
+                    &conn,
+                    &project_key,
+                    &subtree,
+                    &repo,
+                    &engraph_codegraph::IndexMode {
+                        source: engraph_codegraph::IndexSource::Manifest,
+                        ..Default::default()
+                    },
+                )?;
                 telemetry::record_event(
                     &conn,
                     EventInput {
@@ -409,22 +594,22 @@ async fn main() -> Result<()> {
                 // monorepo sub-project refreshes its subtree of it.
                 let (project_key, subtree) = match project {
                     Some(p) => (p, String::new()),
-                    None => divergence::index_scope(&repo),
+                    None => {
+                        warn_if_linked_worktree(&repo);
+                        divergence::index_scope(&repo)
+                    }
                 };
-                let scope = engraph_codegraph::IndexScope {
-                    project: &project_key,
-                    subtree: &subtree,
-                };
-                let stats = engraph_codegraph::index_repo_in(
+                let _lock = engraph_codegraph::acquire_index_lock_wait(&project_key)?;
+                let stats = index_single(
                     &conn,
                     &repo,
                     scip.as_deref(),
                     lang.as_deref(),
-                    scope,
+                    &project_key,
+                    &subtree,
                     effective_bazel_symbols,
                     effective_gc,
                 )?;
-                divergence::record_index_commit(&conn, &project_key, &subtree, &repo)?;
                 telemetry::record_event(
                     &conn,
                     EventInput {
@@ -437,22 +622,6 @@ async fn main() -> Result<()> {
                         latency_ms: start.elapsed().as_millis() as i64,
                     },
                 )?;
-                let pruned_note = if stats.entities_pruned > 0 {
-                    format!(", {} pruned", stats.entities_pruned)
-                } else {
-                    String::new()
-                };
-                println!(
-                    "indexed {} ({} entities, {} relations, {} SCIP bytes, {}ms, driver={}){}",
-                    scope_label(&project_key, &subtree),
-                    stats.entities_inserted,
-                    stats.relations_inserted,
-                    stats.scip_bytes,
-                    stats.elapsed_ms,
-                    stats.driver_name,
-                    pruned_note
-                );
-                print_symbol_langs(&stats.symbol_langs, "  ");
             }
         }
         Cmd::Subgraph {
@@ -929,6 +1098,83 @@ fn resolve_project(over: Option<String>) -> Result<String> {
     }
     let cwd = std::env::current_dir()?;
     Ok(canonical_repo_key(&cwd))
+}
+
+/// Take the index lock for `project_key` without waiting, or explain who holds
+/// it. For the `--if-changed` refresh, which yields to an active run; explicit
+/// runs wait instead (`acquire_index_lock_wait`). The caller keeps the guard
+/// alive for the whole run; the OS releases the lock when it is dropped or the
+/// process ends. The outer `Result` is I/O trouble; the inner `Err` is the
+/// held-lock message.
+fn take_index_lock(project_key: &str) -> Result<std::result::Result<IndexLock, String>> {
+    use engraph_codegraph::{Acquire, acquire_index_lock, held_message};
+    Ok(match acquire_index_lock(project_key)? {
+        Acquire::Acquired(lock) => Ok(lock),
+        Acquire::Held { path, info } => Err(held_message(project_key, &path, &info)),
+    })
+}
+
+/// An explicit index from a linked worktree still writes the repo's one shared
+/// index, so every other worktree then sees this branch's code. Allowed — the
+/// user asked for it — but said out loud.
+fn warn_if_linked_worktree(repo: &std::path::Path) {
+    if divergence::in_linked_worktree(repo) {
+        eprintln!(
+            "warning: {} is a linked worktree; this replaces the index that every worktree of \
+             the repo shares with this branch's code",
+            repo.display()
+        );
+    }
+}
+
+/// Index one repo — or one sub-project of a monorepo, when `subtree` is
+/// non-empty — into `project_key`, record the commit it was indexed at and
+/// how, and print the summary line. Shared by a plain `engraph index <repo>` and each
+/// subtree of an `--if-changed` refresh; the caller records telemetry, since a
+/// refresh reports one row for the whole run rather than one per subtree.
+#[allow(clippy::too_many_arguments)]
+fn index_single(
+    conn: &db::PooledConn,
+    repo: &std::path::Path,
+    scip: Option<&std::path::Path>,
+    lang: Option<&str>,
+    project_key: &str,
+    subtree: &str,
+    bazel_symbols: bool,
+    gc: bool,
+) -> Result<engraph_codegraph::IndexStats> {
+    let scope = engraph_codegraph::IndexScope {
+        project: project_key,
+        subtree,
+    };
+    let stats = engraph_codegraph::index_repo_in(conn, repo, scip, lang, scope, bazel_symbols, gc)?;
+    let mode = engraph_codegraph::IndexMode {
+        source: if scip.is_some() {
+            engraph_codegraph::IndexSource::Scip
+        } else {
+            engraph_codegraph::IndexSource::Drivers
+        },
+        lang: lang.map(str::to_string),
+        bazel_symbols,
+    };
+    divergence::record_index_commit(conn, project_key, subtree, repo, &mode)?;
+    let pruned_note = if stats.entities_pruned > 0 {
+        format!(", {} pruned", stats.entities_pruned)
+    } else {
+        String::new()
+    };
+    println!(
+        "indexed {} ({} entities, {} relations, {} SCIP bytes, {}ms, driver={}){}",
+        scope_label(project_key, subtree),
+        stats.entities_inserted,
+        stats.relations_inserted,
+        stats.scip_bytes,
+        stats.elapsed_ms,
+        stats.driver_name,
+        pruned_note
+    );
+    print_symbol_langs(&stats.symbol_langs, "  ");
+    Ok(stats)
 }
 
 /// Stable identity for the repo containing `start`, used as the `project` scope

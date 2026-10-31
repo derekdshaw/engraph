@@ -91,6 +91,21 @@ pub(crate) fn run_session_start_hook(conn: &db::PooledConn, client: HookClient) 
                 signal_sections.push(format!("- {d}"));
             }
         }
+        // Refresh the codegraph in the background (`engraph index
+        // --if-changed`), but only for a repo that was indexed by hand at
+        // least once: a cold first index can run for minutes and pull
+        // toolchains, which is a choice the user makes, not the hook. And
+        // only from the main worktree: the index is shared by every worktree
+        // of the repo, so a refresh from a linked one would swap in its
+        // branch for all of them.
+        if auto_index_enabled()
+            && engraph_codegraph::indexed_commits(conn, project)
+                .map(|c| !c.is_empty())
+                .unwrap_or(false)
+            && !crate::divergence::in_linked_worktree(Path::new(cwd))
+        {
+            spawn_detached_index(Path::new(cwd));
+        }
     }
     if let Some(sid) = session_id.as_deref() {
         let g = budget::get_or_init(conn, sid)?;
@@ -139,6 +154,92 @@ pub(crate) fn run_session_start_hook(conn: &db::PooledConn, client: HookClient) 
         )?;
     }
     Ok(())
+}
+
+/// `ENGRAPH_AUTO_INDEX=0|false|no|off` turns the SessionStart refresh off.
+fn auto_index_enabled() -> bool {
+    !std::env::var("ENGRAPH_AUTO_INDEX").is_ok_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        )
+    })
+}
+
+/// Where the detached refresh writes its output: `auto-index.log` in the
+/// engraph data directory, beside the database. The hook's own stdout is the
+/// client protocol, so the child's can't go there, and `/dev/null` would hide
+/// indexer failures.
+pub(crate) fn auto_index_log_path() -> Option<PathBuf> {
+    Some(db::default_db_path().parent()?.join("auto-index.log"))
+}
+
+/// The log opened for appending, with a dated header for this run written
+/// first so consecutive runs can be told apart (the child's own lines carry
+/// no timestamp).
+fn auto_index_log(cwd: &Path) -> Option<std::fs::File> {
+    use std::io::Write;
+    let path = auto_index_log_path()?;
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()?;
+    let _ = writeln!(
+        f,
+        "=== {} engraph index --if-changed --auto {} (from session-start hook)",
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        cwd.display()
+    );
+    Some(f)
+}
+
+/// Start `engraph index --if-changed <cwd>` as a detached process — its own
+/// process group (session on Windows), stdin closed, output to the log — and
+/// return without waiting, so the brief isn't held up and the client sees no
+/// inherited pipe keeping the hook "running". Failure to spawn is logged and
+/// otherwise ignored: a refresh is best-effort.
+fn spawn_detached_index(cwd: &Path) {
+    use std::process::{Command, Stdio};
+    let Ok(exe) = std::env::current_exe() else {
+        tracing::warn!("auto-index: can't locate the engraph binary");
+        return;
+    };
+    let (out, err) = match auto_index_log(cwd) {
+        Some(f) => match f.try_clone() {
+            Ok(f2) => (Stdio::from(f), Stdio::from(f2)),
+            Err(_) => (Stdio::from(f), Stdio::null()),
+        },
+        None => (Stdio::null(), Stdio::null()),
+    };
+    let mut cmd = Command::new(exe);
+    cmd.args(["index", "--if-changed", "--auto"])
+        .arg(cwd)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(out)
+        .stderr(err);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // New process group: a SIGINT/SIGHUP aimed at the hook's group
+        // doesn't take the refresh with it.
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    match cmd.spawn() {
+        // Dropping the handle without waiting is the point: the child is
+        // reparented when the hook exits.
+        Ok(child) => tracing::info!(pid = child.id(), cwd = %cwd.display(), "auto-index started"),
+        Err(e) => tracing::warn!(error = %e, "auto-index: spawn failed"),
+    }
 }
 
 fn session_start_output(client: HookClient, body: &str) -> serde_json::Value {

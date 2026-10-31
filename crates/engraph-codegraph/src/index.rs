@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -95,15 +95,58 @@ fn gc_pass(conn: &PooledConn, project: &str, gc: bool) -> Result<usize> {
     Ok(n)
 }
 
+/// How a subtree was indexed, recorded beside its commit so `engraph index
+/// --if-changed` can repeat the same run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexMode {
+    pub source: IndexSource,
+    /// The `--lang` pin, if the run had one.
+    pub lang: Option<String>,
+    /// Whether the run included the symbol-level Bazel pass.
+    pub bazel_symbols: bool,
+}
+
+/// Where an index run's SCIP came from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IndexSource {
+    /// Indexers that engraph ran itself (detected, or pinned by `--lang`); a
+    /// refresh can run them again.
+    #[default]
+    Drivers,
+    /// A prebuilt `--scip` file, which only its producer can rebuild.
+    Scip,
+    /// A `--scip-manifest` of prebuilt files, likewise.
+    Manifest,
+}
+
+impl IndexSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IndexSource::Drivers => "drivers",
+            IndexSource::Scip => "scip",
+            IndexSource::Manifest => "manifest",
+        }
+    }
+
+    fn from_db(s: &str) -> Self {
+        match s {
+            "scip" => IndexSource::Scip,
+            "manifest" => IndexSource::Manifest,
+            _ => IndexSource::Drivers,
+        }
+    }
+}
+
 /// Record the commit `subtree` of `project` was just indexed at (`""` for the
-/// whole project). It replaces the commits of subtrees nested under it, which
-/// this run re-indexed. `None` (not a git repo, or HEAD unreadable) leaves no
-/// commit rather than one that no longer describes the graph.
+/// whole project), and how. It replaces the commits of subtrees nested under
+/// it, which this run re-indexed. `None` (not a git repo, or HEAD unreadable)
+/// leaves no commit rather than one that no longer describes the graph.
 pub fn record_indexed_commit(
     conn: &PooledConn,
     project: &str,
     subtree: &str,
     commit: Option<&str>,
+    mode: &IndexMode,
 ) -> Result<()> {
     conn.execute(
         "DELETE FROM index_state
@@ -113,8 +156,16 @@ pub fn record_indexed_commit(
     )?;
     if let Some(sha) = commit {
         conn.execute(
-            "INSERT INTO index_state (project, subtree, commit_sha) VALUES (?1, ?2, ?3)",
-            rusqlite::params![project, subtree, sha],
+            "INSERT INTO index_state (project, subtree, commit_sha, source, lang, bazel_symbols)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                project,
+                subtree,
+                sha,
+                mode.source.as_str(),
+                mode.lang,
+                mode.bazel_symbols
+            ],
         )?;
     }
     Ok(())
@@ -128,6 +179,29 @@ pub fn indexed_commits(conn: &PooledConn, project: &str) -> Result<Vec<(String, 
     let rows = stmt
         .query_map([project], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// How each recorded subtree of `project` was indexed, by subtree.
+pub fn index_modes(
+    conn: &PooledConn,
+    project: &str,
+) -> Result<std::collections::HashMap<String, IndexMode>> {
+    let mut stmt = conn.prepare(
+        "SELECT subtree, source, lang, bazel_symbols FROM index_state WHERE project = ?1",
+    )?;
+    let rows = stmt
+        .query_map([project], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                IndexMode {
+                    source: IndexSource::from_db(&r.get::<_, String>(1)?),
+                    lang: r.get(2)?,
+                    bazel_symbols: r.get(3)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
 }
 
@@ -686,13 +760,36 @@ pub fn index_workspace(
         );
     }
     let mut stats = WorkspaceStats::default();
-    for repo in repos {
-        let (project, subtree) = scope_for(&repo);
+    let scoped: Vec<(PathBuf, String, String)> = repos
+        .into_iter()
+        .map(|repo| {
+            let (project, subtree) = scope_for(&repo);
+            (repo, project, subtree)
+        })
+        .collect();
+    // Take every project's lock before indexing anything, in sorted key
+    // order, and hold them all until the run is done. Sub-projects of a
+    // monorepo share a project, so another run mustn't slip in between them;
+    // and two workspace runs that share projects take their locks in the same
+    // order, so neither can hold one the other waits for while waiting on
+    // the other. A workspace run is explicit, so it waits for a held lock.
+    let projects: BTreeSet<&str> = scoped.iter().map(|(_, p, _)| p.as_str()).collect();
+    let locks: HashMap<String, std::result::Result<crate::lock::IndexLock, String>> = projects
+        .into_iter()
+        .map(|p| {
+            let lock = crate::lock::acquire_wait(p).map_err(|e| format!("{e:#}"));
+            (p.to_string(), lock)
+        })
+        .collect();
+    for (repo, project, subtree) in scoped {
         let scope = IndexScope {
             project: &project,
             subtree: &subtree,
         };
-        let outcome = index_repo_in(conn, &repo, None, None, scope, bazel_symbols, gc);
+        let outcome = match &locks[&project] {
+            Ok(_) => index_repo_in(conn, &repo, None, None, scope, bazel_symbols, gc),
+            Err(e) => Err(anyhow::anyhow!("{e}")),
+        };
         stats.repos.push(WorkspaceRepoResult {
             repo,
             project,
@@ -1054,9 +1151,9 @@ mod tests {
         let conn = pool.get().unwrap();
         let commits = |c: &PooledConn| indexed_commits(c, "/p").unwrap();
         assert!(commits(&conn).is_empty());
-        record_indexed_commit(&conn, "/p", "svc-a", Some("aaa")).unwrap();
-        record_indexed_commit(&conn, "/p", "svc-b", Some("bbb")).unwrap();
-        record_indexed_commit(&conn, "/p", "svc-b", Some("ccc")).unwrap();
+        record_indexed_commit(&conn, "/p", "svc-a", Some("aaa"), &IndexMode::default()).unwrap();
+        record_indexed_commit(&conn, "/p", "svc-b", Some("bbb"), &IndexMode::default()).unwrap();
+        record_indexed_commit(&conn, "/p", "svc-b", Some("ccc"), &IndexMode::default()).unwrap();
         assert_eq!(
             commits(&conn),
             [
@@ -1065,10 +1162,33 @@ mod tests {
             ]
         );
         // An index run with no known commit must not leave the old one trusted.
-        record_indexed_commit(&conn, "/p", "svc-b", None).unwrap();
+        record_indexed_commit(&conn, "/p", "svc-b", None, &IndexMode::default()).unwrap();
         assert_eq!(commits(&conn), [("svc-a".into(), "aaa".into())]);
         // A root run covers every subtree, so it replaces their commits.
-        record_indexed_commit(&conn, "/p", "", Some("ddd")).unwrap();
+        record_indexed_commit(&conn, "/p", "", Some("ddd"), &IndexMode::default()).unwrap();
         assert_eq!(commits(&conn), [(String::new(), "ddd".into())]);
+    }
+
+    #[test]
+    fn index_modes_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = engraph_core::db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let pinned = IndexMode {
+            source: IndexSource::Drivers,
+            lang: Some("scip-go".into()),
+            bazel_symbols: true,
+        };
+        let prebuilt = IndexMode {
+            source: IndexSource::Manifest,
+            ..IndexMode::default()
+        };
+        record_indexed_commit(&conn, "/p", "svc-a", Some("a"), &pinned).unwrap();
+        record_indexed_commit(&conn, "/p", "svc-b", Some("b"), &prebuilt).unwrap();
+        let modes = index_modes(&conn, "/p").unwrap();
+        assert_eq!(modes.len(), 2);
+        assert_eq!(modes["svc-a"], pinned);
+        assert_eq!(modes["svc-b"], prebuilt);
+        assert!(index_modes(&conn, "/other").unwrap().is_empty());
     }
 }

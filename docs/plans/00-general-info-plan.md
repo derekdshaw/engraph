@@ -63,4 +63,8 @@ not the sequence of the work. Some plans must wait for other plans:
    (normalization). Part 2 changes symbol ids. The test suite shows if a change
    to the ids causes problems. Step 1 of part 2 is a bug fix. You can do it
    before part 1.
-4. You can do the other plans in any sequence.
+4. Do step 1 of part 2 of [plan 05](05-stable-symbol-ids-plan.md) (stable Go
+   symbol ids) before [plan 10](10-worktree-overlays-plan.md) (separate code
+   graphs for worktrees). Plan 10 needs symbol ids that do not change between
+   commits.
+5. You can do the other plans in any sequence.

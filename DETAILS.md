@@ -979,6 +979,92 @@ canonicalizes to the current project. Both paths are incremental and idempotent
 via `ingestion_log`, per-file errors are logged and skipped, and a
 `session_ingest` telemetry event is recorded when anything was inserted.
 
+### 8.0.1 Background index refresh
+
+After the brief's sections are gathered, the hook checks
+`engraph_codegraph::indexed_commits(project)`. If the project has at least one
+`index_state` row — i.e. someone ran `engraph index` on it before — and `cwd`
+is in the repo's main worktree, it spawns `engraph index --if-changed --auto
+<cwd>` (`spawn_detached_index`, `hooks.rs`) and does not wait: stdin is null,
+stdout/stderr append to `auto-index.log` in the data directory beside the
+database — the hook writes a dated header line (`=== <UTC> engraph index
+--if-changed --auto <cwd> …`) before handing the file over, since the child's
+own lines carry no timestamp — and the child gets its own process group (Unix)
+/ a detached process with its own group (Windows), so the client sees no
+inherited pipe and a signal aimed at the hook doesn't take the refresh down.
+`ENGRAPH_AUTO_INDEX=0` (or `false`/`no`/`off`) disables it.
+
+The "indexed before" gate is deliberate: a cold index can run for minutes and
+download toolchains, which is a commitment the user makes once with an explicit
+`engraph index`; from then on, every session start pays only for what changed.
+
+The main-worktree gate (`divergence::in_linked_worktree`) follows from the
+codegraph being one index per repo (§5.5, §14): a refresh from a linked
+worktree would re-index that shared index from its branch, and sessions in
+different worktrees would then keep re-indexing over each other. Linked
+worktrees rely on the per-file divergence check instead: greps on symbols
+whose files their branch changed pass through, and `subgraph` flags those
+files. An explicit `engraph index` from a linked worktree still runs, with a
+warning that it replaces the shared index. In a bare-repo layout (`git clone
+--bare` plus `git worktree add`) git lists the bare directory as the main
+worktree, so every checkout counts as linked and no session refreshes the
+index automatically; run `engraph index` by hand there.
+
+`--if-changed` itself (`Cmd::Index`, `main.rs`) resolves the project key with
+`index_scope`, lists the subtrees `divergence::changed_subtrees` reports — one
+`git diff --quiet <commit> -- <subtree>` per `index_state` row, at the current
+checkout's toplevel; an unresolvable commit counts as changed — drops subtrees
+nested under another changed one (`outermost_subtrees`), and re-indexes each
+at `<toplevel>/<subtree>` with `index_single`, which re-records that subtree's
+commit. It repeats how the subtree was indexed (`index_state.source`, `lang`,
+`bazel_symbols`, §12.1 v11): a `--lang` pin and the symbol-level Bazel pass
+are run again (an explicit `--bazel-symbols` / `--no-bazel-symbols` on the
+refresh wins), and a subtree indexed from prebuilt SCIP (`--scip`,
+`--scip-manifest`) is skipped with a note, since only its producer can rebuild
+it. So is a changed subtree that covers such a prebuilt sub-project: re-indexing
+the parent would rebuild the sub-project with local indexers and record over
+its row. In a linked worktree it prints `skipped: …` and records nothing. A repo
+with no rows prints a hint and exits 0. It composes with `--dry-run` (lists the
+subtrees it would re-index and with which flags) and `--gc`/`--no-gc`, and
+conflicts with everything that pins a source (`--scip`, `--scip-manifest`,
+`--lang`, `--project`, `--workspace`, `--recursive`).
+
+Telemetry follows the `--workspace` precedent — one `index` row per run, not
+one per subtree — with `input_tokens` = the SCIP bytes the run produced and
+`filter_id` = `auto` when the hook started it (it passes `--auto`, which
+requires `--if-changed`) or `if_changed` by hand. The row is written whatever
+the outcome — nothing to do, lock held, every subtree failed — and before the
+run's own error exit, so the hook's firing rate and cost are always visible.
+A dry run records nothing. Plain `engraph index <repo>` keeps its one row per
+run keyed by driver name.
+
+### 8.0.2 One index run per project
+
+Every index run — explicit, `--if-changed`, manifest, or each project of a
+`--workspace` run — first takes an OS file lock (`File::try_lock` /
+`File::lock`) on `<data dir>/locks/index-<sha256(project)[..16]>.lock`
+(`engraph-codegraph::lock`; the data dir is the database's, so
+`ENGRAPH_DB_PATH` moves the locks with it). The holder writes `project=`,
+`pid=`, `started=` lines into it for a run that finds it held. A workspace
+run takes the lock of every project it covers before indexing anything, in
+sorted key order, and holds them until it is done: another run can't slip in
+between two sub-projects of a monorepo, and two workspace runs that share
+projects can't each hold a lock the other is waiting for.
+
+A run that finds the lock held: an explicit run (single repo, manifest,
+workspace) logs the holder's start time and the lock path and waits for it,
+since the user asked for that index; `--if-changed` prints `skipped: …` and
+exits 0, since it is the best-effort background refresh. A dry run never takes
+the lock.
+
+The OS releases the lock when the holding process ends, however it ends —
+finished, failed, killed, crashed — so a dead run never blocks the next one
+and no stale-file timeout is needed. The file itself is never deleted:
+deleting it while another run waits on it would let a third run create and
+lock a new file at the same path while the waiter goes on to lock the old,
+unlinked one, and both would think they hold the lock. On Windows the lock
+also blocks reads, so a waiting run can't show the holder's start time.
+
 ### 8.1 What goes in
 
 For the resolved `cwd`:
@@ -1182,8 +1268,9 @@ but logs a warning if it ever happens.
 | 8 | Add `context_items.project` column + `idx_context_items_project` so saved decisions scope to a project and surface in the SessionStart brief. |
 | 9 | `index_state` table: the commit each codegraph project was last indexed at (`engraph index` records `git stash create`, a commit of the working tree it indexed, else HEAD; it clears the row outside git), so lookups can detect files a worktree's branch has changed since (§5.5). |
 | 10 | `index_state` keyed by `(project, subtree)`: a monorepo sub-project index (§14) records its own commit; a run replaces the commits of subtrees nested under it. Table rebuilt (SQLite can't change a primary key); v9 rows become subtree `''`. Known gap: the commit is per subtree, not per indexer, so after a Rust-only root run a sub-project's TypeScript symbols (indexed by an earlier sub-project run) are checked against the root's newer commit, and a TypeScript change between the two runs goes unflagged. |
+| 11 | `index_state` records how each subtree was indexed: `source` (`drivers` run by engraph, or prebuilt `scip` / `manifest`), the `--lang` pin, and `bazel_symbols`, so `index --if-changed` repeats the same run (§8.0.1). Older rows default to a plain driver run. |
 
-(`SCHEMA_VERSION = 10`; the `MIGRATIONS` array has 10 entries.)
+(`SCHEMA_VERSION = 11`; the `MIGRATIONS` array has 11 entries.)
 
 ---
 
@@ -1810,7 +1897,6 @@ workload trips them):
 
 The roadmap (`docs/ROADMAP.md`, one plan per item in `docs/plans/`)
 tracks features that aren't built, ranked by expected impact. The codegraph is shipped (target-level §14.8,
-symbol-level §14.9); its open items there are automatic index runs,
-deeper workspace discovery, all Go modules in the code graph, Bazel
+symbol-level §14.9); its open items there are deeper workspace discovery, all Go modules in the code graph, Bazel
 symbols for TypeScript and Python, and stable symbol ids (normalization
 plus a stability suite).

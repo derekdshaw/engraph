@@ -34,3 +34,4 @@ serde_json.workspace = true
 shell-words.workspace = true
 regex.workspace = true
 tokio.workspace = true
+chrono.workspace = true
