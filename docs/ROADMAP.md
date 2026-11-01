@@ -15,12 +15,9 @@ It gives the language, the rules for the work, and the sequence of the work.
 The number of an item is the number of its plan. When the work of an item is
 complete, the item and its plan are removed. The numbers of the other items do
 not change.
+
 Small performance improvements are not items in this file. They are in
 [`docs/plans/general-perf-improvements.md`](plans/general-perf-improvements.md).
-
----
-
-## 1. Automatic index runs
 
 ---
 
