@@ -316,7 +316,7 @@ pub fn index_repo_in(
         let load_stats = scip_loader::load_with_options(
             conn,
             project,
-            &bazel_symbols::rebase_documents(&bytes, Path::new(subtree))?,
+            &bazel_symbols::rebase_subtree_documents(&bytes, Path::new(subtree), repo)?,
             load_opts,
         )?;
         return Ok(IndexStats {
@@ -337,7 +337,7 @@ pub fn index_repo_in(
         let load_stats = scip_loader::load_with_options(
             conn,
             project,
-            &bazel_symbols::rebase_documents(&bytes, Path::new(subtree))?,
+            &bazel_symbols::rebase_subtree_documents(&bytes, Path::new(subtree), repo)?,
             load_opts,
         )?;
         return Ok(IndexStats {
@@ -402,7 +402,7 @@ pub fn index_repo_in(
     let load_stats = scip_loader::load_with_options(
         conn,
         project,
-        &bazel_symbols::rebase_documents(&merged, Path::new(subtree))?,
+        &bazel_symbols::rebase_subtree_documents(&merged, Path::new(subtree), repo)?,
         load_opts,
     )?;
     let driver_name: &'static str = if succeeded_names.len() == 1 {
