@@ -19,20 +19,19 @@ of the plans.
 
 ## Condition at this time (2026-11-03)
 
-The test projects in `~/r/engraph-test-repos` showed these bugs (refer to the
-`README.md` of that directory). Each bug has an `engraph bug` record in the
-engraph database.
+The test projects in the `engraph-test-repos` directory showed these bugs
+(refer to the `README.md` of that directory).
 
-| Bug | Record | Effect |
-|---|---|---|
-| 1. Names keep SCIP descriptor characters | `01a19e8e-2a00-7812-b3ee-aa973f0949da` | `subgraph Config` finds no Rust type |
-| 2. Python graphs have no `CALLS` and no `REFERENCES` | `01a19e8e-2a68-7360-aae4-eb4f28aaa3ba` | `subgraph` shows no callers for Python |
-| 3. A Gradle sub-project index writes incorrect paths | `01a19ebc-d2f3-7372-ab8f-038bcf62877e` | Files of other modules get paths that do not exist |
-| 4. SCIP local symbols replace each other | `01a19ed8-9290-7061-a707-118c2738a30c` | Local symbols show the name of one file and the location of a different file |
-| 5. The Bazel Go message is not correct | — | The message says that there are no Go targets, but there are |
-| 6. Indexer errors on stdout are not shown | — | The error message of a failed index run is empty |
-| 7. The hook does not rewrite some test commands | — | `./gradlew test`, `uv run pytest`, and other commands are not compressed |
-| 8. New untracked files do not start `--if-changed` | — | The graph does not include a new file until a different change occurs |
+| Bug | Effect |
+|---|---|
+| 1. Names keep SCIP descriptor characters | `subgraph Config` finds no Rust type |
+| 2. Python graphs have no `CALLS` and no `REFERENCES` | `subgraph` shows no callers for Python |
+| 3. A Gradle sub-project index writes incorrect paths | Files of other modules get paths that do not exist |
+| 4. SCIP local symbols replace each other | Local symbols show the name of one file and the location of a different file |
+| 5. The Bazel Go message is not correct | The message says that there are no Go targets, but there are |
+| 6. Indexer errors on stdout are not shown | The error message of a failed index run is empty |
+| 7. The hook does not rewrite some test commands | `./gradlew test`, `uv run pytest`, and other commands are not compressed |
+| 8. New untracked files do not start `--if-changed` | The graph does not include a new file until a different change occurs |
 
 ### Bug 1: names keep SCIP descriptor characters
 
@@ -62,7 +61,7 @@ WHERE name = ?1 OR id = ?1
 ```
 
 Tested on `fd-rust`: `engraph subgraph Config` shows `No symbols matched.`, and
-`engraph subgraph 'Config#'` shows the struct. The engraph index has the same
+`engraph subgraph 'Config#'` shows the struct. An index of the engraph repo has the same
 problem (`IndexScope`).
 
 The problem is not only in Rust and Python. Some TypeScript and Java symbols
@@ -83,6 +82,16 @@ ON CONFLICT(id) DO UPDATE SET
 ```
 
 Thus, a new index of an existing project keeps the incorrect names.
+
+This also makes the names change between runs. If a document that refers to a
+symbol loads before the document that defines it, the loader writes a
+placeholder row with the name from `fallback_display_name`. The definition does
+not change that name. The sequence of the documents can change between runs:
+scip-java converts SemanticDB files in parallel by default. Tested on
+`jsonpath-java`, same snapshot, two runs: one run gave the name
+`incrementPosition`, and the other gave `CharacterIndex#incrementPosition`
+(`subgraph incrementPosition` showed `No symbols matched.`). Step 4 of part 1
+corrects this also.
 
 ### Bug 2: Python graphs have no `CALLS` and no `REFERENCES`
 
@@ -128,9 +137,10 @@ to each path that does not start with it (`bazel_symbols.rs:663-666`). The
 result is 1,981 entities with paths such as
 `json-path-assert/json-path/src/main/java/…`.
 
-A correction is on the branch `fix-subtree-sibling-docs` (not merged). It adds
+The correction is merged (pull request #12). It adds
 `rebase_subtree_documents`, which removes the documents that are not files in
-the subtree directory, but are files at the repo root.
+the subtree directory, but are files at the repo root. The validation of part 3
+is not done with the merged code.
 
 ### Bug 4: SCIP local symbols replace each other
 
@@ -235,7 +245,41 @@ does not start a new index (tested on a small Cargo project). The recorded commi
 
 ## Steps
 
-Do each part on its own branch. The parts do not depend on each other.
+Do each part on its own branch. The parts do not depend on each other. Each
+part has correction steps and validation steps. Do the validation steps after
+the correction steps, before the pull request.
+
+### Preparation for a validation
+
+The validation steps use the test projects in the `engraph-test-repos`
+directory. Do this procedure for each project that a validation step names.
+In these steps:
+
+- `<project>` is the directory name of the project, for example `fd-rust`.
+- `$TEST_REPOS` is the path of the `engraph-test-repos` directory.
+- `$WORK` is a work directory for the copies and the databases.
+
+1. In the engraph repo, on the branch of the part, build the binary:
+   `cargo build -p engraph-cli`
+2. Put the binary first in `PATH`: `export PATH="$PWD/target/debug:$PATH"`
+3. Use a new database for the project:
+   `export ENGRAPH_DB_PATH="$WORK/<project>.db" && rm -f "$ENGRAPH_DB_PATH"`
+4. Make a new copy of the project:
+   `mkdir -p "$WORK" && rm -rf "$WORK/<project>" && cp -r "$TEST_REPOS/<project>" "$WORK/"`
+5. Go to the copy: `cd "$WORK/<project>"`
+6. Make a git baseline:
+   `git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm baseline`
+7. Do the setup that the section of the project in `$TEST_REPOS/README.md`
+   gives. Some projects have no setup.
+8. Define the query function `q`. It shows the result of an SQL query on the
+   database:
+
+   ```sh
+   q() { python3 -c 'import sqlite3,os,sys; [print(*r) for r in sqlite3.connect(os.environ["ENGRAPH_DB_PATH"]).execute(sys.argv[1])]' "$1"; }
+   ```
+
+Some validation steps record a value with the `main` binary before the change.
+For these steps, do steps 1 and 2 on the `main` branch, and then steps 3 to 8.
 
 ### Part 1: names (bug 1)
 
@@ -277,6 +321,39 @@ Steps 5 to 9 decrease risk 1 (refer to "Risks").
    the file. Put the symbols in this sequence: symbols of the current project,
    symbols in files that are not tests, types before members.
 
+Validation of part 1:
+
+1. With the `main` binary, do the preparation for `fd-rust`,
+   `hono-typescript`, and `jsonpath-java`. In each copy, do `engraph index .`.
+2. In each copy, record the number of names with more than 8 entities:
+   `q "select count(*) from (select name from entities group by name having count(*) > 8)"`
+3. In the `fd-rust` copy, record the number of names with `#`:
+   `q "select count(*) from entities where file_path is not null and name like '%#%'"`.
+   Result: more than 0.
+4. In the same `fd-rust` copy, put the binary of the branch first in `PATH`
+   (preparation steps 1 and 2). Do `engraph index .` again.
+5. Do the query of step 3 again. Result: `0`. The new index changed the old
+   names.
+6. Do `engraph subgraph Config`. Result: the first line is
+   ``## Symbol `Config` (defined in src/config.rs:14)``.
+7. Do `engraph subgraph full_path_base`. Result: the first line starts with
+   ``## Symbol `full_path_base` ``.
+8. Do `engraph subgraph Config::full_path_base`, then
+   `engraph subgraph Config#full_path_base`, then
+   `engraph subgraph Config.full_path_base`. Result: the three commands show
+   the same symbol.
+9. Do this command:
+   `echo "{\"tool_input\":{\"pattern\":\"Config\"},\"cwd\":\"$PWD\"}" | engraph hook pre-grep`.
+   Result: a `deny` decision with the reason
+   `` `Config` is indexed in the engraph code graph ``.
+10. Do `engraph subgraph new`. Result: `## Multiple matches`. Each line shows a
+    qualified name (for example `<Type>.new`) and a file. The symbols in files
+    that are not tests are first.
+11. With the binary of the branch, do the preparation for `hono-typescript`
+    and `jsonpath-java`. In each copy, do `engraph index .`.
+12. In the three copies, do the query of step 2 again. Record the values of
+    step 2 and step 12 in the pull request.
+
 ### Part 2: Python relations (bug 2)
 
 1. Write a loader test with a document in which no symbol has a kind:
@@ -294,12 +371,62 @@ Steps 5 to 9 decrease risk 1 (refer to "Risks").
    method gives `CALLS`, type gives `REFERENCES`, all other suffixes give no
    relation. Thus, a parameter is not a call.
 
+Validation of part 2:
+
+1. With the `main` binary, do the preparation for `fd-rust`, `cobra-go`, and
+   `jsoup-java`. In each copy, do `engraph index .`.
+2. In each copy, record the relation counts:
+   `q "select kind, count(*) from relations group by kind"`. The values on
+   2026-11-02: `fd-rust` `CALLS` 2,943 and `REFERENCES` 2,353; `cobra-go`
+   `CALLS` 4,686, `IMPLEMENTS` 19, and `REFERENCES` 1,534; `jsoup-java`
+   `CALLS` 36,857, `IMPLEMENTS` 1,729, and `REFERENCES` 24,906.
+3. With the binary of the branch, do the preparation for `click-python`. Do
+   `engraph index .`.
+4. Do `q "select kind, count(*) from relations group by kind"`. Result: there
+   are rows for `CALLS` and `REFERENCES`, each with a count of more than 0.
+5. Do `q "select count(*) from relations where src_entity like '%).(%' or dst_entity like '%).(%'"`.
+   Result: `0`. No relation goes from a parameter or to a parameter.
+6. Do `engraph subgraph get_best_encoding`. Result: the output has a line
+   that starts with `**Called by**`.
+7. With the binary of the branch, do the preparation for `requests-python`. Do
+   `engraph index .`.
+8. Do the queries of steps 4 and 5 again. Result: the same results as in
+   steps 4 and 5.
+9. Do `engraph subgraph to_native_string`. Result: the output has a line that
+   starts with `**Called by**`.
+10. With the binary of the branch, do the preparation for `fd-rust`,
+    `cobra-go`, and `jsoup-java`. In each copy, do `engraph index .`.
+11. In each copy, do the query of step 2. Result: the counts are the same as
+    the counts of step 2.
+
 ### Part 3: sub-project paths (bug 3)
 
-1. Merge the branch `fix-subtree-sibling-docs`. It contains the test
-   `rebase_subtree_documents_drops_sibling_files`.
-2. Do the validation in the next section.
-3. Close the record: `engraph bug --resolve 01a19ebc-d2f3-7372-ab8f-038bcf62877e`.
+The correction is merged (pull request #12, with the test
+`rebase_subtree_documents_drops_sibling_files`). Only the validation is
+necessary. Use the binary of `main`.
+
+Validation of part 3:
+
+1. Make sure that `gradle --version` shows Gradle 8.5. If it does not, install
+   Gradle with the commands in the `jsonpath-java` section of
+   `$TEST_REPOS/README.md`.
+2. Do the preparation for `jsonpath-java`.
+3. Do `engraph index json-path-assert`. Result: the last line starts with
+   `indexed` and ends with `driver=scip-java)`.
+4. Do `q "select count(*) from entities where file_path like 'json-path-assert/json-path/%'"`.
+   Result: `0`.
+5. Do `engraph index json-path`.
+6. Do this query:
+   `q "select substr(file_path, 1, instr(file_path, '/') - 1), count(*) from entities where file_path is not null group by 1"`.
+   Result: `json-path 2963` and `json-path-assert 292`.
+7. Do this query:
+   `q "select count(*) from relations r join entities s on s.id = r.src_entity join entities d on d.id = r.dst_entity where s.file_path like 'json-path-assert/%' and d.file_path like 'json-path/%'"`.
+   Result: `161`.
+8. Do the preparation for `ripgrep-rust`. Do `engraph index crates/ignore`.
+   Result: the output shows `2654 entities`.
+9. Do `q "select count(*) from entities where file_path is not null and file_path not like 'crates/ignore/%'"`.
+   Result: `0`.
+10. Remove bug 3 and part 3 from this plan.
 
 ### Part 4: local symbols (bug 4)
 
@@ -327,6 +454,32 @@ Steps 5 to 9 decrease risk 1 (refer to "Risks").
    project. If it does not, add a migration that removes the rows with an id
    that has no `@`.
 
+Validation of part 4:
+
+1. With the `main` binary, do the preparation for `hono-typescript`,
+   `jsonpath-java`, and `fd-rust`. In each copy, do `engraph index .`.
+2. In each copy, record the relation counts:
+   `q "select kind, count(*) from relations group by kind"`.
+3. In each copy, record the number of local entities:
+   `q "select count(*) from entities where id like 'local %'"`.
+4. In the `fd-rust` copy, put the binary of the branch first in `PATH`
+   (preparation steps 1 and 2). Do `engraph index .` again.
+5. Do `q "select count(*) from entities where id like 'local %' and id not like '%@%'"`.
+   Result: `0`. The new index removed the old local rows (correction step 5).
+6. With the binary of the branch, do the preparation for `hono-typescript`
+   and `jsonpath-java`. In each copy, do `engraph index .`.
+7. In the three copies, do the query of step 5. Result: `0`.
+8. In the three copies, do this query:
+   `q "select count(*) from entities where id like 'local %@%' and file_path != substr(id, instr(id, '@') + 1)"`.
+   Result: `0`. Each local entity has the file of its own document.
+9. In the three copies, do the query of step 2. Result: each count is equal
+   to the count of step 2, or a small quantity more.
+10. In the three copies, do the query of step 3. Record the values of step 3
+    and step 10 in the pull request.
+11. In the `fd-rust` copy, do this command:
+    `echo "{\"tool_input\":{\"file_path\":\"$PWD/src/main.rs\"}}" | engraph hook post-read | grep -c 'let '`.
+    Result: `0`. The list shows no local variables.
+
 ### Part 5: Bazel Go message (bug 5)
 
 1. Write a test for the display of a new status `SkippedNoGoModules { targets }`.
@@ -335,6 +488,18 @@ Steps 5 to 9 decrease risk 1 (refer to "Risks").
    `skipped (3 go targets, no go.mod; set ENGRAPH_BAZEL_SCIP_GO_CMD to index them)`.
 2. Add the status. In `run_go_modules`, use it when `targets > 0` and there is
    no `go.mod`.
+
+Validation of part 5:
+
+1. Make sure that `bazel version` operates. Use bazelisk with the name
+   `bazel`.
+2. Do the preparation for `go-tutorial-go-bazel`.
+3. Do `engraph index --bazel-symbols .`. Result: the output has the line
+   `symbol[go]: skipped (3 go targets, no go.mod; set ENGRAPH_BAZEL_SCIP_GO_CMD to index them)`.
+4. Do the preparation for `java-tutorial-java-bazel`. Do
+   `engraph index --bazel-symbols .`. Result: the output has the line
+   `symbol[go]: skipped (no targets in this workspace)`. This workspace has no
+   Go targets, so the message did not change.
 
 ### Part 6: indexer errors (bug 6)
 
@@ -345,6 +510,16 @@ Steps 5 to 9 decrease risk 1 (refer to "Risks").
    the end of stdout, with the label `stdout (tail):`.
 3. Make the same change in `bazel_symbols.rs:308`, `bazel_symbols.rs:375`, and
    `bazel.rs:66`.
+
+Validation of part 6:
+
+1. Do the preparation for `ky-typescript`. Do not do preparation step 7. The
+   setup (`npm install`) prevents the error.
+2. Do `engraph index .`. Result: the command stops with an error.
+3. Examine the output. Result: it has the line `stdout (tail):`, and after it
+   the line `error TS6053: File '@sindresorhus/tsconfig' not found.`
+4. Do `npm install --ignore-scripts`. Then do `engraph index .` again.
+   Result: the last line starts with `indexed`.
 
 ### Part 7: test commands (bug 7)
 
@@ -360,6 +535,37 @@ Steps 5 to 9 decrease risk 1 (refer to "Risks").
 4. In `filters::pick`, match `pnpm test` and `yarn test` with the filter of
    `npm test`.
 
+Validation of part 7:
+
+This table gives the command, the project, and the filter that `engraph run`
+must use:
+
+| Command | Project | Filter |
+|---|---|---|
+| `./gradlew test` | `jsonpath-java` | `gradle` |
+| `uv run pytest` | `click-python` | `pytest` |
+| `python -m pytest` | `click-python` | `pytest` |
+| `pnpm test` | `hono-typescript` | `npm_test` |
+| `npx tsc --noEmit` | `hono-typescript` | `tsc` |
+| `npx vitest run` | `hono-typescript` | `js_test` |
+
+1. Do the preparation for `jsonpath-java`, `click-python`, and
+   `hono-typescript`. Do the setup of each project (preparation step 7). For
+   `click-python`, also do `uv pip install pytest`.
+2. For each row of the table, go to the copy of the project. Do this command,
+   with the command of the row:
+   `echo "{\"tool_input\":{\"command\":\"<command>\"},\"cwd\":\"$PWD\"}" | engraph hook pre-bash`.
+   Result: the output has `"updatedInput":{"command":"engraph run <command>"}`.
+3. For each row, do `engraph run <command>`.
+4. After each `engraph run`, do this query:
+   `q "select filter_id from events order by seq desc limit 1"`.
+   Result: the filter of the row.
+5. For each row, compare the output of step 3 with the output of the command
+   without `engraph run`. Result: the output of step 3 is smaller, and it
+   keeps the summary line of the tests.
+6. Do steps 2 to 4 for `gradle test`, `pytest`, `vitest run`, and
+   `tsc --noEmit`. Result: the same results as before the change.
+
 ### Part 8: untracked files (bug 8)
 
 1. Write a test: index a repo, add a new untracked file in a subtree, and do
@@ -371,9 +577,25 @@ Steps 5 to 9 decrease risk 1 (refer to "Risks").
 3. Find out the time of this step on a large repo. If it is more than 100 ms,
    do it only when `git diff --quiet` finds no change.
 
+Validation of part 8:
+
+1. Do the preparation for `cobra-go`. Do `engraph index .`.
+2. Make a new untracked file with a new function:
+   `printf 'package cobra\n\nfunc UntrackedHelper() {}\n' > untracked_helper.go`
+3. Do `engraph index --if-changed --dry-run .`. Result:
+   `dry-run: would re-index <path of the copy>`.
+4. Do `engraph index --if-changed .`. Result: the last line starts with
+   `indexed <path of the copy>`.
+5. Do `engraph subgraph UntrackedHelper`. Result: the first line is
+   ``## Symbol `UntrackedHelper` (defined in untracked_helper.go:3)``.
+6. Do `engraph index --if-changed .` again. Result: the output starts with
+   `index up to date`. The untracked file does not start a second index.
+7. Do the preparation for `hono-typescript`. Do `engraph index .`.
+8. Do `time engraph index --if-changed .`. Result: `index up to date`. Record
+   the time in the pull request (correction step 3).
+
 ### End of each part
 
-Close the `engraph bug` record of the bug with `engraph bug --resolve <id>`.
 When all parts are complete, remove this plan and item 1 of the roadmap
 (rule 5 of the general information).
 
@@ -398,54 +620,6 @@ When all parts are complete, remove this plan and item 1 of the roadmap
 - Each command in the bug 7 table is rewritten and uses the correct filter
   (part 7).
 - A new untracked file starts `--if-changed` one time (part 8).
-
-## Validation with the test projects
-
-Obey the rules of `~/r/engraph-test-repos/README.md`: use a copy, make a git
-baseline, and use a different database. Use the engraph binary of the branch.
-
-- **Part 1**, on `fd-rust`, after `engraph index .`:
-  - `engraph subgraph Config` shows `pub struct Config`.
-  - `engraph subgraph full_path_base` shows the method.
-  - The pre-grep hook stops a Grep for `Config` (F2 of the README).
-  - On a database that had the old names, a new `engraph index .` changes
-    `Config#` to `Config`.
-  - `engraph subgraph Config::new` finds only the `new` of `Config`.
-  - On `fd-rust`, `hono-typescript`, and `jsonpath-java`, compare the number
-    of names with more than 8 entities with the number from step 5. Record the
-    two numbers in the pull request.
-- **Part 2**, on `click-python` and `requests-python`, after `engraph index .`:
-  - The relations include `CALLS` and `REFERENCES`.
-  - `engraph subgraph get_best_encoding` (click) shows **Called by**.
-  - The counts of `CALLS` and `REFERENCES` on `fd-rust`, `cobra-go`, and
-    `jsoup-java` do not change.
-- **Part 3**, on `jsonpath-java`, with Gradle in `PATH`:
-  - `engraph index json-path-assert` writes no path that starts with
-    `json-path-assert/json-path/`.
-  - After `engraph index json-path`, the counts of each module (2,963 and
-    292) and the 161 relations from `json-path-assert` to `json-path` are the
-    same as the counts of `engraph index .`.
-  - `engraph index crates/ignore` on `ripgrep-rust` gives 2,654 entities, all
-    in `crates/ignore/`.
-- **Part 4**, on `hono-typescript`, `jsonpath-java`, and `fd-rust`, after
-  `engraph index .`:
-  - No entity has an id `local <n>` without `@`.
-  - Each local entity has the file of its own document. On `fd-rust`, the
-    post-read hook on `src/main.rs` shows no `let` lines with a name from a
-    different file.
-  - The counts of `CALLS` and `REFERENCES` are approximately the same as the
-    counts in the bug 4 table. They can increase a small quantity, because
-    relations to different local symbols no longer use one row.
-- **Part 5**, on `go-tutorial-go-bazel`: `engraph index --bazel-symbols .`
-  shows `symbol[go]: skipped (3 go targets, no go.mod; …)`.
-- **Part 6**, on `ky-typescript` without `npm install`: `engraph index .` shows
-  `stdout (tail):` and `error TS6053: File '@sindresorhus/tsconfig' not found`.
-- **Part 7**: do F3 and F5 of the test project README with each command in the
-  bug 7 table. Use `jsonpath-java` for `./gradlew test`, `click-python` for
-  `uv run pytest`, and `hono-typescript` for `pnpm test`.
-- **Part 8**, on `cobra-go`: do F6 of the README, but add a new untracked file
-  with a new function. `--if-changed --dry-run` shows the project, and after
-  the index, `engraph subgraph <new-function>` finds the function.
 
 ## Risks
 
@@ -484,7 +658,7 @@ None. Part 3 depends on the branch `fix-subtree-sibling-docs`.
 ## Effort
 
 Parts 2, 5, 6, and 8 each change one or two functions and add one or two
-tests. Part 3 is complete except for the merge. Part 1 is the largest: it adds
+tests. Part 3 is merged. Only its validation is necessary. Part 1 is the largest: it adds
 a schema version and changes `subgraph` and the grep redirect. Parts 4 and 7
 are medium: part 4 changes the loader and two lists, and part 7 changes the
 hook and `engraph run`.
