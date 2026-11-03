@@ -648,25 +648,69 @@ pub(crate) fn rebase_documents(bytes: &[u8], prefix: &Path) -> Result<Vec<u8>> {
     use protobuf::Message;
     use scip::types::Index;
 
-    let prefix_str = prefix
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/");
+    let prefix_str = slash_prefix(prefix);
+    if prefix_str.is_empty() {
+        return Ok(bytes.to_vec());
+    }
+    let mut idx = Index::parse_from_bytes(bytes).context("decoding SCIP protobuf for rebase")?;
+    prefix_documents(&mut idx, &prefix_str);
+    idx.write_to_bytes()
+        .context("serializing rebased SCIP index")
+}
+
+/// `rebase_documents` for an index run in `dir`, the directory of the subtree
+/// `prefix`. Some indexers also list files outside `dir`, relative to their
+/// build root: scip-java in a Gradle sub-project writes the sibling modules it
+/// compiled, relative to the Gradle root (and sets `project_root` to `dir`, so
+/// the metadata can't tell them apart). A document that is no file under `dir`
+/// but is one at the repo root, outside `prefix`, belongs to another subtree
+/// and is dropped: that subtree's own index owns it.
+pub(crate) fn rebase_subtree_documents(bytes: &[u8], prefix: &Path, dir: &Path) -> Result<Vec<u8>> {
+    use protobuf::Message;
+    use scip::types::Index;
+
+    let prefix_str = slash_prefix(prefix);
     if prefix_str.is_empty() {
         return Ok(bytes.to_vec());
     }
     let needle = format!("{prefix_str}/");
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let root = dir
+        .ancestors()
+        .nth(prefix.components().count())
+        .unwrap_or(&dir);
 
     let mut idx = Index::parse_from_bytes(bytes).context("decoding SCIP protobuf for rebase")?;
+    let before = idx.documents.len();
+    idx.documents.retain(|d| {
+        let p = &d.relative_path;
+        *p == prefix_str || p.starts_with(&needle) || dir.join(p).exists() || !root.join(p).exists()
+    });
+    let dropped = before - idx.documents.len();
+    if dropped > 0 {
+        tracing::info!(dropped, subtree = %prefix_str, "dropped SCIP documents outside the subtree");
+    }
+    prefix_documents(&mut idx, &prefix_str);
+    idx.write_to_bytes()
+        .context("serializing rebased SCIP index")
+}
+
+fn slash_prefix(prefix: &Path) -> String {
+    prefix
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn prefix_documents(idx: &mut scip::types::Index, prefix_str: &str) {
+    let needle = format!("{prefix_str}/");
     for doc in &mut idx.documents {
         if doc.relative_path == prefix_str || doc.relative_path.starts_with(&needle) {
             continue;
         }
         doc.relative_path = format!("{prefix_str}/{}", doc.relative_path);
     }
-    idx.write_to_bytes()
-        .context("serializing rebased SCIP index")
 }
 
 fn bazel_has_targets(bazel: &Path, repo: &Path, kinds: &[&str]) -> Result<bool> {
@@ -1089,5 +1133,41 @@ mod tests {
         let out = rebase_documents(&bytes, Path::new("")).unwrap();
         let parsed = Index::parse_from_bytes(&out).unwrap();
         assert_eq!(parsed.documents[0].relative_path, "main.go");
+    }
+
+    #[test]
+    fn rebase_subtree_documents_drops_sibling_files() {
+        // scip-java run in a Gradle sub-project also lists the sibling modules
+        // it compiled, relative to the Gradle (repo) root.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for f in ["sub/src/A.java", "sub/src/B.java", "other/src/C.java"] {
+            std::fs::create_dir_all(root.join(f).parent().unwrap()).unwrap();
+            std::fs::write(root.join(f), "").unwrap();
+        }
+        let mut idx = Index::new();
+        for p in [
+            "src/A.java",       // relative to the subtree
+            "sub/src/B.java",   // relative to the repo root, inside the subtree
+            "other/src/C.java", // relative to the repo root, a sibling module
+            "gen/Missing.java", // no file anywhere: rebased as before
+        ] {
+            let mut d = Document::new();
+            d.relative_path = p.to_string();
+            idx.documents.push(d);
+        }
+        let bytes = idx.write_to_bytes().unwrap();
+
+        let out = rebase_subtree_documents(&bytes, Path::new("sub"), &root.join("sub")).unwrap();
+        let parsed = Index::parse_from_bytes(&out).unwrap();
+        let paths: Vec<&str> = parsed
+            .documents
+            .iter()
+            .map(|d| d.relative_path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            vec!["sub/src/A.java", "sub/src/B.java", "sub/gen/Missing.java"]
+        );
     }
 }

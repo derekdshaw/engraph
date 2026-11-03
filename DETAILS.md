@@ -1313,7 +1313,13 @@ linked worktree updates one shared index, with file paths relative to
 the repo root. `engraph index services/svc-a` in a monorepo indexes
 into that same project with `services/svc-a` as its *subtree*
 (`IndexScope`): the indexer's paths are rebased under it, and the load
-replaces only what the run could have produced. The pre-load orphan GC,
+replaces only what the run could have produced. Documents outside the
+subtree are dropped (`rebase_subtree_documents`, `bazel_symbols.rs`): a
+path that is no file under the subtree directory but is one at the repo
+root belongs to another subtree. scip-java in a Gradle sub-project lists
+the sibling modules it compiled, relative to the Gradle root, and its
+`project_root` names the sub-project, so only the files on disk tell the
+two apart. The pre-load orphan GC,
 the relations delete, and the stale-symbol prune (`IN_SCOPE`,
 `scip_loader.rs`) are limited to
 - symbols from the SCIP schemes in this load (the first word of a
@@ -1862,8 +1868,8 @@ chains after the target-level pass; `driver_name` reports
 **Tests.** `run_java`'s delegation is unit-tested in-crate (a fake
 command writes a known SCIP, `run_java` merges it; the unconfigured case
 reports `SkippedNotConfigured`), as are `discover_go_modules`,
-`rebase_documents`, `merge_scip_bytes`, `count_label_kind_lines`, and the
-`LangStatus` displays. `tests/bazel_symbols_live.rs` is a live
+`rebase_documents`, `rebase_subtree_documents`, `merge_scip_bytes`,
+`count_label_kind_lines`, and the `LangStatus` displays. `tests/bazel_symbols_live.rs` is a live
 integration check (gated behind `bazel` on PATH +
 `ENGRAPH_LIVE_BAZEL_SYMBOLS=1`) that the full `--bazel-symbols` pass runs
 on a real Bazel fixture and reports the (delegated) Java pass without
