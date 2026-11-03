@@ -10,6 +10,9 @@ Telemetry shows the tokens that file reads use. It also shows the tokens of
 reads of a file that the session read before. With these data, you can decide
 if a change to file reads is worth the work.
 
+`engraph gain` shows the index runs for each type of run: automatic,
+`--if-changed` by hand, and each driver.
+
 ## Condition at this time (2026-10-30)
 
 The PostToolUse(Read) hook adds a list of symbols after Claude reads a file. Its
@@ -28,7 +31,20 @@ symbol list.
 A hook that stops the read and gives only a summary can make Claude use
 incorrect data.
 
+Condition of the index telemetry (2026-11-02): each index run records one
+`index` event. The `filter_id` is `auto` (a run that the SessionStart hook
+started), `if_changed` (`--if-changed` by hand), or the driver name. The
+`input_tokens` is the SCIP bytes of the run, and `latency_ms` is its time.
+`engraph gain` shows these events only as one `index` / `codegraph_index`
+total. `engraph gain --by-filter` does not show them, because each report uses
+`SAVINGS_WHERE` (`crates/engraph-core/src/telemetry.rs:112`), and
+`SAVINGS_WHERE` does not include `kind = 'index'`. Thus, the user cannot see
+how frequently the automatic refresh operates, or its time.
+
 ## Steps
+
+The index runs step (step 8) does not depend on the other steps. You can do it
+at any time.
 
 1. Find out if the input of the PostToolUse(Read) hook includes the content of
    the read in `tool_response`. If it does not, count the tokens of the lines
@@ -51,6 +67,11 @@ incorrect data.
 7. Before you use the method of step 6, find out what occurs after Claude Code
    compacts the conversation. After compaction, the earlier result is possibly
    not in the context.
+8. Add the `--index` flag to the `engraph gain` command. With `--index`, show
+   one row for each `filter_id` of the `index` events: the number of runs, the
+   total time, the mean time, and the SCIP bytes. Do not add these rows to
+   `SAVINGS_WHERE`, because index runs do not save tokens. Include the rows in
+   `--json` and in `--all`.
 
 ## Tests
 
@@ -58,6 +79,9 @@ incorrect data.
   the token count of the read.
 - `engraph gain --reads` shows the tokens of reads of the same file again
   separately from the tokens of all reads.
+- `engraph gain --index` shows one row each for `auto`, `if_changed`, and a
+  driver name, with the correct count and time. The savings totals of
+  `engraph gain` do not change.
 
 ## Risks
 

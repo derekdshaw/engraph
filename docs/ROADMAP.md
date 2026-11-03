@@ -41,7 +41,7 @@ Plan: [`docs/plans/10-worktree-overlays-plan.md`](plans/10-worktree-overlays-pla
 
 ## 4. Measurement of file reads
 
-Telemetry shows the tokens that file reads use. It also shows the tokens of reads of a file that the session read before. With these data, you can decide if a change to file reads is worth the work.
+Telemetry shows the tokens that file reads use. It also shows the tokens of reads of a file that the session read before. With these data, you can decide if a change to file reads is worth the work. `engraph gain` also shows the index runs for each type of run.
 
 Plan: [`docs/plans/04-file-read-measurement-plan.md`](plans/04-file-read-measurement-plan.md)
 
