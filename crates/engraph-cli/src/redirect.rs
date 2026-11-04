@@ -210,12 +210,16 @@ pub(crate) fn try_subgraph_redirect(
     let mut symbol = query.name.as_str();
     let mut rows = Vec::new();
     if let Some(qualified) = query.qualified.as_deref() {
-        let normalized = engraph_codegraph::normalize_qualified(qualified);
-        // The whole path is never a name (names have no `.`), so passing it
-        // as both parameters leaves only the qualified-name arm to match.
-        rows = entities_matching(conn, &normalized, &normalized)?;
-        if !rows.is_empty() {
-            symbol = query.shown.as_str();
+        // Longest suffix first: `config::Config::new` matches `Config.new`,
+        // since qualified names drop the module. A path is never a name
+        // (names have no `.`), so passing it as both parameters leaves only
+        // the qualified-name arm to match.
+        for candidate in engraph_codegraph::qualified_candidates(qualified) {
+            rows = entities_matching(conn, &candidate, &candidate)?;
+            if !rows.is_empty() {
+                symbol = query.shown.as_str();
+                break;
+            }
         }
     }
     // A `.`-only path is also how text is written (`Cargo.lock`,

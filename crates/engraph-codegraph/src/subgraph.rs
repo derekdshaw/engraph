@@ -130,6 +130,21 @@ pub fn normalize_qualified(symbol: &str) -> String {
         .to_string()
 }
 
+/// The `qualified_name` forms to try for an input, longest first: the whole
+/// path, then without its leading segments, down to two segments.
+/// `qualified_name` drops namespaces, so `config::Config::new` (or a Java
+/// fully qualified name) matches `Config.new` by a suffix, and
+/// `x::Outer::Config::new` prefers `Outer.Config.new` to `Config.new`.
+pub fn qualified_candidates(symbol: &str) -> Vec<String> {
+    let full = normalize_qualified(symbol);
+    let segments: Vec<&str> = full.split('.').collect();
+    let mut out = vec![full.clone()];
+    for start in 1..segments.len().saturating_sub(1) {
+        out.push(segments[start..].join("."));
+    }
+    out
+}
+
 /// True when `path` looks like a test file: a `test`/`tests`/`spec`
 /// directory, or a file name with `test`/`spec` in it. Used only to order
 /// an ambiguous match list; a wrong guess costs a position, not a match.
@@ -160,7 +175,6 @@ fn resolve_matches(
     // 8 — more than that is a sign the user needs a more specific identifier;
     // the order decides which 8 survive: an exact moniker, then the caller's
     // project, then files that are not tests, then types before members.
-    let qualified = normalize_qualified(symbol);
     let mut stmt = conn.prepare(&format!(
         "SELECT id, name, qualified_name, project, file_path, line_range, signature
          FROM entities
@@ -173,13 +187,18 @@ fn resolve_matches(
                   COALESCE(file_path, '')
          LIMIT 8"
     ))?;
-    let rows = stmt
-        .query_map(
-            rusqlite::params![symbol, qualified, current_project],
-            row_to_entity,
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    for qualified in qualified_candidates(symbol) {
+        let rows = stmt
+            .query_map(
+                rusqlite::params![symbol, qualified, current_project],
+                row_to_entity,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !rows.is_empty() {
+            return Ok(rows);
+        }
+    }
+    Ok(Vec::new())
 }
 
 #[derive(Copy, Clone)]
@@ -732,6 +751,37 @@ mod tests {
         let n = subgraph_for(&conn, "only_local", 30).unwrap();
         assert_eq!(n.matches.len(), 1);
         assert_eq!(n.matches[0].id, "local 5");
+    }
+
+    #[test]
+    fn module_paths_match_the_longest_qualified_suffix() {
+        // qualified_name drops namespaces, so a path written with its module
+        // (`config::Config::new`, a Java FQN) matches by its longest suffix
+        // that is a qualified name.
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        seed_qualified(&conn);
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, qualified_name, project, file_path, line_range)
+             VALUES ('ra outer/Outer#Config#new().', 'symbol', 'new', 'Outer.Config.new',
+                     '/p', 'src/outer.rs', '5:6')",
+            [],
+        )
+        .unwrap();
+        for q in [
+            "config::Config::new",
+            "crate::config::Config::new",
+            "com.example.Config.new",
+        ] {
+            let n = subgraph_for(&conn, q, 30).unwrap();
+            let ids: Vec<&str> = n.matches.iter().map(|m| m.id.as_str()).collect();
+            assert_eq!(ids, ["ra config/Config#new()."], "{q}");
+        }
+        // The longest suffix wins: `Outer.Config.new`, not `Config.new`.
+        let n = subgraph_for(&conn, "x::Outer::Config::new", 30).unwrap();
+        let ids: Vec<&str> = n.matches.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["ra outer/Outer#Config#new()."]);
     }
 
     #[test]

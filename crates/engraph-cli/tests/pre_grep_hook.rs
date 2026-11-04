@@ -346,3 +346,15 @@ fn dotted_text_without_a_qualified_match_keeps_grepping() {
         Some("deny")
     );
 }
+
+#[test]
+fn module_paths_resolve_by_their_longest_qualified_suffix() {
+    let (_t, db) = db_dir();
+    insert_qualified_entities(&db);
+    // `new` alone has 11 matches; the module path names one of them.
+    for pattern in ["config::Config::new", "crate::config::Config::new"] {
+        let out = run_hook(&db, pattern);
+        assert_eq!(decision(&out).as_deref(), Some("deny"), "{pattern}: {out}");
+        assert!(out.contains("(1 match)"), "{pattern}: {out}");
+    }
+}

@@ -581,8 +581,11 @@ Shared with the native `PreToolUse(Grep)` path:
   a path shape is a separator, not the regex bypass.
 - `try_subgraph_redirect` first compares a path with
   `entities.qualified_name` (§12.1 v12; `::`/`#` normalized to `.`, so
-  `Config::new`, `Config#new`, and `Config.new` are one key). Only when
-  nothing has that qualified name does the last segment go through the
+  `Config::new`, `Config#new`, and `Config.new` are one key), then each
+  shorter suffix of at least two segments (`qualified_candidates`), since
+  qualified names drop the module: `config::Config::new` finds
+  `Config.new`. Only when nothing has any of those qualified names does
+  the last segment go through the
   plain `WHERE name = ?1 OR id = ?1` lookup, and only for a `::` or `#`
   path: a `.`-only path with no qualified match is text (`Cargo.lock`,
   `self.config`) and keeps grepping. Both are `LIMIT 9`: only
@@ -1609,7 +1612,10 @@ also takes the caller's project key — the CLI passes
    turned into `.` and a trailing separator dropped: `Config`,
    `Config::full_path_base`, `Config#full_path_base`, and
    `Config.full_path_base` all work, and `Config::new` finds one symbol
-   when bare `new` has many. Global symbols shadow `local N` ones of the
+   when bare `new` has many. With no match, `?2` becomes each shorter
+   suffix of at least two segments, longest first (`qualified_candidates`):
+   `crate::config::Config::new` and a Java FQN find `Config.new`, and
+   `x::Outer::Config::new` prefers `Outer.Config.new`. Global symbols shadow `local N` ones of the
    same project (`MATCH_WHERE_SQL`, shared with the grep redirect): rust-analyzer
    gives local variables a `display_name`, and a `let full_path_base`
    must not make the `Config.full_path_base` field ambiguous; a name
