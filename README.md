@@ -377,6 +377,8 @@ engraph reindex-embeddings       # embed all stored messages
 
 Symbols are named by their last SCIP descriptor, so a Rust or Python type is `Config` (not `Config#`) and a method is `full_path_base`. Each symbol also has a qualified name — the descriptors after the namespace, joined with `.` — and `engraph subgraph` (like the grep redirect) accepts it in any of the usual spellings: `Config::full_path_base`, `Config#full_path_base`, and `Config.full_path_base` find the same symbol. Use the qualified form when a bare name such as `new` is shared by many types.
 
+After an upgrade to schema 12, the next session start re-indexes each repo that has an automatic refresh, which writes the new names; until then, greps in that repo pass through to grep. In a linked worktree or a bare-repo layout, run `engraph index .` by hand.
+
 ### Subgraph disambiguation
 
 Ambiguous symbol names return a disambiguation block listing each match by qualified name and location rather than a best-guess pick — symbols of the current project first, then files that are not tests, then types before members:
