@@ -311,3 +311,38 @@ fn global_symbols_shadow_locals_in_the_match_count() {
     assert_eq!(decision(&out).as_deref(), Some("deny"), "{out}");
     assert!(out.contains("(1 match)"), "{out}");
 }
+
+#[test]
+fn dotted_text_without_a_qualified_match_keeps_grepping() {
+    let (_t, db) = db_dir();
+    insert_qualified_entities(&db);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "INSERT INTO entities (id, kind, name, qualified_name, project, file_path, line_range)
+         VALUES ('ra io/lock().', 'symbol', 'lock', 'lock', 'testproj', 'src/io.rs', '1:1'),
+                ('ra app/App#config.', 'symbol', 'config', 'App.config', 'testproj', 'src/app.rs', '2:2')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    // `.` is also how text is written: a file name or a field access with no
+    // qualified-name match is a text search, not the last segment's symbol.
+    for pattern in ["Cargo.lock", "self.config"] {
+        let out = run_hook(&db, pattern);
+        assert_eq!(decision(&out), None, "{pattern}: {out}");
+    }
+    // A dotted path that is a qualified name still resolves.
+    assert_eq!(
+        decision(&run_hook(&db, "Config.new")).as_deref(),
+        Some("deny")
+    );
+    // `::` and `#` paths keep the last-segment fallback.
+    assert_eq!(
+        decision(&run_hook(&db, "Other::Config")).as_deref(),
+        Some("deny")
+    );
+    assert_eq!(
+        decision(&run_hook(&db, "Other#Config")).as_deref(),
+        Some("deny")
+    );
+}

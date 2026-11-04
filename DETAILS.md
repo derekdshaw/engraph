@@ -583,7 +583,9 @@ Shared with the native `PreToolUse(Grep)` path:
   `entities.qualified_name` (§12.1 v12; `::`/`#` normalized to `.`, so
   `Config::new`, `Config#new`, and `Config.new` are one key). Only when
   nothing has that qualified name does the last segment go through the
-  plain `WHERE name = ?1 OR id = ?1` lookup. Both are `LIMIT 9`: only
+  plain `WHERE name = ?1 OR id = ?1` lookup, and only for a `::` or `#`
+  path: a `.`-only path with no qualified match is text (`Cargo.lock`,
+  `self.config`) and keeps grepping. Both are `LIMIT 9`: only
   1–8 rows trigger the deny; 0 is a non-indexed name, 9+ is too
   ambiguous to be a useful neighborhood. The deny reason suggests the
   path as typed, so `engraph subgraph Config::new` resolves the same

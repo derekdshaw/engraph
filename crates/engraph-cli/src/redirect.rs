@@ -218,7 +218,12 @@ pub(crate) fn try_subgraph_redirect(
             symbol = query.shown.as_str();
         }
     }
-    if rows.is_empty() {
+    // A `.`-only path is also how text is written (`Cargo.lock`,
+    // `self.config`): with no qualified match it stays a text search. `::`
+    // and `#` only separate code paths, so their last segment still counts.
+    let dotted_only =
+        query.qualified.is_some() && !query.shown.contains("::") && !query.shown.contains('#');
+    if rows.is_empty() && !dotted_only {
         rows = entities_matching(conn, &query.name, &query.name)?;
     }
     let count = rows.len();

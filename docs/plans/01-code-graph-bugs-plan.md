@@ -298,7 +298,9 @@ the same name (rust-analyzer names local variables, which made
 give members the path `Batch.new` and are themselves named `impl Batch`. Note for step 7: the grep redirect accepts `Config.full_path_base`
 as a path shape (identifiers joined by `.`), although `.` is a regex
 character; the input is a path only when each segment is an identifier, so
-`Config.*` and `foo.bar\b` still bypass the redirect.
+`Config.*` and `foo.bar\b` still bypass the redirect. A `.`-only path that
+matches no qualified name also continues as a text search (`Cargo.lock`,
+`self.config`). Only a `::` or `#` path uses its last segment as a name.
 
 1. Write a unit test for `fallback_display_name` with these ids and results:
    - `rust-analyzer cargo fd 0.1.0 config/Config#` → `Config`
