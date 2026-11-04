@@ -63,6 +63,12 @@ The symbol-level Bazel pass (`--bazel-symbols`) indexes TypeScript and Python co
 
 Plan: [`docs/plans/06-bazel-typescript-python-symbols-plan.md`](plans/06-bazel-typescript-python-symbols-plan.md)
 
+## 11. Subgraph results in the grep redirect
+
+When the grep redirect finds the symbol of a search, the deny reason contains the `engraph subgraph` result. The agent does not do a second tool call. The redirect and `engraph subgraph` use one rule to find a symbol. You can do this item at any time.
+
+Plan: [`docs/plans/11-subgraph-in-grep-redirect-plan.md`](plans/11-subgraph-in-grep-redirect-plan.md)
+
 ## 7. LLM reranking
 
 A small model puts the top results of hybrid retrieval (RRF) in a better sequence. This function is off by default, because it uses tokens.
