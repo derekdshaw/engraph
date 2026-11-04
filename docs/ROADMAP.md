@@ -23,9 +23,9 @@ Small performance improvements are not items in this file. They are in
 
 ## 1. Code graph bugs
 
-`engraph subgraph` and the grep redirect find Rust and Python types and methods by their usual names. Python graphs have `CALLS` and `REFERENCES` relations. A sub-project index writes only the files of that sub-project. SCIP local symbols do not replace each other between files. Error messages and the Bazel Go message are correct. The hook rewrites the usual test commands of Gradle, uv, pnpm, and npx. A new untracked file starts `--if-changed`.
+Python graphs have `CALLS` and `REFERENCES` relations. A sub-project index writes only the files of that sub-project. SCIP local symbols do not replace each other between files. Error messages and the Bazel Go message are correct. The hook rewrites the usual test commands of Gradle, uv, pnpm, and npx. A new untracked file starts `--if-changed`.
 
-Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md)
+Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Part 1 (names) is complete.
 
 ## 2. Deeper workspace discovery
 

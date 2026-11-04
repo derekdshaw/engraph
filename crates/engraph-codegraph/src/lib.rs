@@ -27,4 +27,7 @@ pub use lock::{
 };
 pub use relation_kind::RelationKind;
 pub use scip_loader::{LoadStats, load};
-pub use subgraph::{Neighborhood, format_markdown, subgraph_for};
+pub use subgraph::{
+    MATCH_WHERE_SQL, Neighborhood, format_markdown, normalize_qualified, subgraph_for,
+    subgraph_for_in,
+};

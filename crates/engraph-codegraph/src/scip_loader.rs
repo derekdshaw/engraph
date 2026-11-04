@@ -257,11 +257,15 @@ fn load_document(
     // On conflict we claim ownership: a real definition takes the `project`
     // away from any earlier placeholder. Phase 2.2 relies on this so that
     // `entities.project` always names the *defining* repo, never the first
-    // referrer.
+    // referrer. The name is replaced too: the existing row may be a
+    // placeholder a reference wrote (`ensure_placeholder_entity`, which only
+    // guesses from the id), or a row an older loader named differently.
     let mut entity_insert = conn.prepare_cached(
-        "INSERT INTO entities (id, kind, name, project, file_path, line_range, signature)
-         VALUES (?1, 'symbol', ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO entities (id, kind, name, qualified_name, project, file_path, line_range, signature)
+         VALUES (?1, 'symbol', ?2, ?7, ?3, ?4, ?5, ?6)
          ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            qualified_name = excluded.qualified_name,
             project = excluded.project,
             file_path = COALESCE(excluded.file_path, entities.file_path),
             line_range = COALESCE(excluded.line_range, entities.line_range),
@@ -271,10 +275,11 @@ fn load_document(
         if s.symbol.is_empty() {
             continue;
         }
+        let names = symbol_names(&s.symbol);
         let display_name = if !s.display_name.is_empty() {
             s.display_name.clone()
         } else {
-            fallback_display_name(&s.symbol)
+            names.name
         };
         let (file_path, line_range) = match def_loc.get(&s.symbol) {
             Some((start, end)) => (
@@ -291,6 +296,7 @@ fn load_document(
             file_path,
             line_range,
             signature,
+            names.qualified,
         ])?;
         stats.entities_inserted += 1;
 
@@ -455,10 +461,11 @@ fn insert_relation(
 /// SymbolInformation for in this Index. Keeps FK satisfied; later runs that
 /// do see the SymbolInformation will overwrite via ON CONFLICT.
 fn ensure_placeholder_entity(conn: &PooledConn, sym: &str, project: &str) -> Result<()> {
+    let names = symbol_names(sym);
     conn.execute(
-        "INSERT OR IGNORE INTO entities (id, kind, name, project)
-         VALUES (?1, 'symbol', ?2, ?3)",
-        rusqlite::params![sym, fallback_display_name(sym), project],
+        "INSERT OR IGNORE INTO entities (id, kind, name, qualified_name, project)
+         VALUES (?1, 'symbol', ?2, ?3, ?4)",
+        rusqlite::params![sym, names.name, names.qualified, project],
     )?;
     Ok(())
 }
@@ -566,10 +573,121 @@ fn signature_text(s: &scip::types::SymbolInformation) -> Option<String> {
     }
 }
 
-fn fallback_display_name(moniker: &str) -> String {
-    // SCIP moniker structure: "scheme manager package descriptors". The last
-    // descriptor token (e.g. `run_migrations().`) is a reasonable display
-    // name fallback when SymbolInformation.display_name is empty.
+/// The descriptors of a SCIP symbol, parsed by the `scip` crate's grammar
+/// (`scheme manager package version descriptors…`). `None` when the id does
+/// not follow the grammar, so callers can fall back to a textual guess.
+fn parsed_descriptors(moniker: &str) -> Option<Vec<scip::types::Descriptor>> {
+    scip::symbol::parse_symbol(moniker)
+        .ok()
+        .map(|s| s.descriptors)
+        .filter(|d| !d.is_empty())
+}
+
+/// The names engraph derives from a SCIP symbol id.
+struct SymbolNames {
+    /// The name when `SymbolInformation.display_name` is empty (rust-analyzer
+    /// and scip-python never set it): the name of the last descriptor,
+    /// without its suffix character — `Config` for `…/Config#`,
+    /// `full_path_base` for `…/Config#full_path_base().`. Ids the SCIP
+    /// grammar rejects fall back to trimming the punctuation by hand.
+    name: String,
+    /// The descriptors after the namespace, joined with `.`:
+    /// `Config.full_path_base` for `…/Config#full_path_base().`, `Config` for
+    /// `…/Config#`, `load` for `…/load().`. `None` when the id does not follow
+    /// the SCIP grammar, and for a local symbol (`local 129`): its number is
+    /// not a name, and a local is not addressable by a path.
+    qualified: Option<String>,
+}
+
+/// Both names from one parse of the id.
+fn symbol_names(moniker: &str) -> SymbolNames {
+    use scip::types::descriptor::Suffix;
+    let Some(descriptors) = parsed_descriptors(moniker) else {
+        return SymbolNames {
+            name: fallback_display_name_textual(moniker),
+            qualified: None,
+        };
+    };
+    let name = match descriptors.last() {
+        Some(last) if !last.name.is_empty() => last.name.clone(),
+        _ => fallback_display_name_textual(moniker),
+    };
+    if scip::symbol::is_local_symbol(moniker) {
+        return SymbolNames {
+            name,
+            qualified: None,
+        };
+    }
+    // rust-analyzer files the members of an impl block under a type
+    // descriptor named `impl` and its type parameters: the self type, then
+    // the trait (`walk/impl#[Batch]new().`,
+    // `regex_helper/impl#[UppercaseVisitor][Visitor]finish().`). The path
+    // uses the self type (`Batch.new`, `UppercaseVisitor.finish`). The impl
+    // block itself (`impl#[Batch]`) is not the type: it is named `impl Batch`
+    // (`impl Visitor for UppercaseVisitor`) so it does not answer a lookup
+    // of `Batch`, and it has no path.
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < descriptors.len() {
+        let d = &descriptors[i];
+        let suffix = d.suffix.enum_value().ok();
+        if matches!(suffix, Some(Suffix::Type)) && d.name == "impl" {
+            let params: Vec<&str> = descriptors[i + 1..]
+                .iter()
+                .take_while(|p| matches!(p.suffix.enum_value().ok(), Some(Suffix::TypeParameter)))
+                .map(|p| p.name.as_str())
+                .collect();
+            if let Some(self_type) = params.first() {
+                if i + 1 + params.len() == descriptors.len() {
+                    let block = match params.get(1) {
+                        Some(trait_name) => {
+                            format!(
+                                "impl {} for {}",
+                                without_generics(trait_name),
+                                without_generics(self_type)
+                            )
+                        }
+                        None => format!("impl {}", without_generics(self_type)),
+                    };
+                    return SymbolNames {
+                        name: block,
+                        qualified: None,
+                    };
+                }
+                parts.push(without_generics(self_type).to_string());
+                i += 1 + params.len();
+                continue;
+            }
+        }
+        // Namespace and Package share one enum value in SCIP.
+        if !matches!(suffix, Some(Suffix::Namespace) | Some(Suffix::Package)) && !d.name.is_empty()
+        {
+            parts.push(d.name.clone());
+        }
+        i += 1;
+    }
+    let qualified = if parts.is_empty() {
+        Some(name.clone())
+    } else {
+        Some(parts.join("."))
+    };
+    SymbolNames { name, qualified }
+}
+
+/// `ReceiverBuffer<'a, W>` → `ReceiverBuffer`: a type's generic arguments are
+/// not part of its name.
+fn without_generics(type_name: &str) -> &str {
+    type_name
+        .split_once('<')
+        .map(|(head, _)| head)
+        .unwrap_or(type_name)
+        .trim()
+}
+
+/// Last-resort name: the last descriptor token with its trailing `().`
+/// punctuation removed. Keeps `#` and `!`, since it cannot tell a suffix from
+/// a name character without the grammar.
+fn fallback_display_name_textual(moniker: &str) -> String {
     moniker
         .rsplit_once(' ')
         .map(|(_, last)| {
@@ -612,6 +730,10 @@ impl Drop for TxGuard<'_> {
 mod tests {
     use super::*;
 
+    fn fallback_display_name(moniker: &str) -> String {
+        symbol_names(moniker).name
+    }
+
     #[test]
     fn decode_range_handles_three_and_four_element() {
         assert_eq!(decode_range(&[5, 0, 10, 4]), (5, 10));
@@ -653,5 +775,112 @@ mod tests {
             "rust-analyzer cargo engraph-core 0.1.0 schema/run_migrations().",
         );
         assert_eq!(n, "run_migrations");
+    }
+
+    #[test]
+    fn fallback_display_name_is_the_last_descriptor_name() {
+        // A type (`#` suffix) and a method on a type (`Type#method().`):
+        // rust-analyzer and scip-python set no display_name, so these ids
+        // are the only source of the name.
+        assert_eq!(
+            fallback_display_name("rust-analyzer cargo fd 0.1.0 config/Config#"),
+            "Config"
+        );
+        assert_eq!(
+            fallback_display_name("rust-analyzer cargo fd 0.1.0 config/Config#full_path_base()."),
+            "full_path_base"
+        );
+        assert_eq!(
+            fallback_display_name(
+                "scip-python python click 0 `examples.aliases.aliases`/Config#add_alias()."
+            ),
+            "add_alias"
+        );
+        // A macro (`!` suffix), a parameter, and a local symbol.
+        assert_eq!(
+            fallback_display_name("rust-analyzer cargo grep 0.1.0 macros/assert_eq_printed!"),
+            "assert_eq_printed"
+        );
+        assert_eq!(
+            fallback_display_name("scip-python python click 0 `x`/Config#add_alias().(self)"),
+            "self"
+        );
+        assert_eq!(fallback_display_name("local 5"), "5");
+        // An id the SCIP grammar does not accept keeps the old behaviour.
+        assert_eq!(
+            fallback_display_name("rust-analyzer cargo lib 0.1.0 mod/foo()"),
+            "foo"
+        );
+    }
+
+    #[test]
+    fn symbol_names_follow_rust_analyzer_impl_blocks() {
+        // rust-analyzer files impl members under a type descriptor named
+        // `impl` plus type parameters: the self type, then the trait.
+        let n = symbol_names("rust-analyzer cargo fd-find 10.5.0 walk/impl#[Batch]new().");
+        assert_eq!(
+            (n.name.as_str(), n.qualified.as_deref()),
+            ("new", Some("Batch.new"))
+        );
+        let n = symbol_names(
+            "rust-analyzer cargo fd-find 10.5.0 regex_helper/impl#[UppercaseVisitor][Visitor]finish().",
+        );
+        assert_eq!(
+            (n.name.as_str(), n.qualified.as_deref()),
+            ("finish", Some("UppercaseVisitor.finish"))
+        );
+        // Generic arguments of the self type are not part of the name.
+        let n = symbol_names(
+            "rust-analyzer cargo fd-find 10.5.0 walk/impl#[`ReceiverBuffer<'a, W>`]new().",
+        );
+        assert_eq!(n.qualified.as_deref(), Some("ReceiverBuffer.new"));
+        // The impl block itself is not the type: it must not answer a lookup
+        // of the type's name, and has no path of its own.
+        let n = symbol_names("rust-analyzer cargo fd-find 10.5.0 walk/impl#[Batch]");
+        assert_eq!((n.name.as_str(), n.qualified), ("impl Batch", None));
+        let n = symbol_names(
+            "rust-analyzer cargo fd-find 10.5.0 regex_helper/impl#[UppercaseVisitor][Visitor]",
+        );
+        assert_eq!(
+            (n.name.as_str(), n.qualified),
+            ("impl Visitor for UppercaseVisitor", None)
+        );
+    }
+
+    #[test]
+    fn symbol_names_qualified_drops_the_namespace() {
+        let q = |id: &str| symbol_names(id).qualified;
+        assert_eq!(
+            q("rust-analyzer cargo fd 0.1.0 config/Config#full_path_base().").as_deref(),
+            Some("Config.full_path_base")
+        );
+        assert_eq!(
+            q("rust-analyzer cargo fd 0.1.0 config/Config#").as_deref(),
+            Some("Config")
+        );
+        assert_eq!(
+            q("scip-python python click 0 `examples.aliases.aliases`/Config#add_alias().")
+                .as_deref(),
+            Some("Config.add_alias")
+        );
+        assert_eq!(
+            q("scip-java maven . . com/jayway/jsonpath/internal/JsonContext#pathFromCache().")
+                .as_deref(),
+            Some("JsonContext.pathFromCache")
+        );
+        // Only namespaces: the qualified name is the name.
+        assert_eq!(
+            q("rust-analyzer cargo fd 0.1.0 config/").as_deref(),
+            Some("config")
+        );
+        // A local symbol has no qualified name: it is not addressable by a
+        // path, and its id's number is not a name.
+        let n = symbol_names("local 129");
+        assert_eq!(n.name, "129");
+        assert_eq!(n.qualified, None);
+        // Not parseable: no qualified name, textual name.
+        let n = symbol_names("rust-analyzer cargo lib 0.1.0 mod/foo()");
+        assert_eq!(n.name, "foo");
+        assert_eq!(n.qualified, None);
     }
 }

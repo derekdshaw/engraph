@@ -13,6 +13,10 @@ use std::fmt::Write;
 pub struct EntityRow {
     pub id: String,
     pub name: String,
+    /// The SCIP descriptors after the namespace, joined with `.`
+    /// (`Config.full_path_base`); `None` for rows older than schema v12 and
+    /// for Bazel targets.
+    pub qualified_name: Option<String>,
     pub project: Option<String>,
     pub file_path: Option<String>,
     pub line_range: Option<String>,
@@ -48,7 +52,18 @@ pub const DEFAULT_BYTE_CAP: usize = 8192;
 pub const DEFAULT_SIBLINGS_LIMIT: usize = 10;
 
 pub fn subgraph_for(conn: &PooledConn, symbol: &str, max_nodes: usize) -> Result<Neighborhood> {
-    let matches = resolve_matches(conn, symbol)?;
+    subgraph_for_in(conn, symbol, max_nodes, None)
+}
+
+/// `subgraph_for` with the project key of the caller's checkout, which puts
+/// that project's symbols first in a `## Multiple matches` list.
+pub fn subgraph_for_in(
+    conn: &PooledConn,
+    symbol: &str,
+    max_nodes: usize,
+    current_project: Option<&str>,
+) -> Result<Neighborhood> {
+    let matches = resolve_matches(conn, symbol, current_project)?;
     if matches.len() != 1 {
         return Ok(Neighborhood {
             matches,
@@ -102,17 +117,64 @@ pub fn avoided_read_tokens(n: &Neighborhood, current_root: Option<&std::path::Pa
     }
 }
 
-fn resolve_matches(conn: &PooledConn, symbol: &str) -> Result<Vec<EntityRow>> {
-    // Match by name first (the common case), then by exact moniker. Limit to
-    // 8 — more than that is a sign the user needs a more specific identifier.
-    let mut stmt = conn.prepare(
-        "SELECT id, name, project, file_path, line_range, signature FROM entities
-         WHERE name = ?1 OR id = ?1
-         ORDER BY (CASE WHEN id = ?1 THEN 0 ELSE 1 END)
-         LIMIT 8",
-    )?;
+/// A lookup in the form `qualified_name` uses: `::` (Rust) and `#` (SCIP)
+/// become `.`, so `Config::full_path_base`, `Config#full_path_base`, and
+/// `Config.full_path_base` are one key. A trailing `#`/`.` (`Config#`) is
+/// dropped.
+pub fn normalize_qualified(symbol: &str) -> String {
+    symbol
+        .trim()
+        .replace("::", ".")
+        .replace('#', ".")
+        .trim_matches('.')
+        .to_string()
+}
+
+/// True when `path` looks like a test file: a `test`/`tests`/`spec`
+/// directory, or a file name with `test`/`spec` in it. Used only to order
+/// an ambiguous match list; a wrong guess costs a position, not a match.
+const TEST_PATH_SQL: &str =
+    "(instr(lower(file_path), 'test') > 0 OR instr(lower(file_path), 'spec') > 0)";
+
+/// The entities a lookup names: by name, by exact moniker, or by qualified
+/// name (`?1` is the input, `?2` its `normalize_qualified` form). Global
+/// symbols shadow `local N` ones: rust-analyzer names local variables, and a
+/// `let full_path_base` must not make the `Config.full_path_base` field
+/// ambiguous. Locals alone (a TypeScript local function) still match.
+pub const MATCH_WHERE_SQL: &str = "(name = ?1 OR id = ?1 OR qualified_name = ?2)
+    AND (id NOT LIKE 'local %'
+         OR NOT EXISTS (SELECT 1 FROM entities g
+                        WHERE (g.name = ?1 OR g.id = ?1 OR g.qualified_name = ?2)
+                          AND g.id NOT LIKE 'local %'))";
+
+fn resolve_matches(
+    conn: &PooledConn,
+    symbol: &str,
+    current_project: Option<&str>,
+) -> Result<Vec<EntityRow>> {
+    // Match by name (the common case), by exact moniker, or by qualified
+    // name (`Config.new` when plain `new` is shared by many types). Limit to
+    // 8 — more than that is a sign the user needs a more specific identifier;
+    // the order decides which 8 survive: an exact moniker, then the caller's
+    // project, then files that are not tests, then types before members.
+    let qualified = normalize_qualified(symbol);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, name, qualified_name, project, file_path, line_range, signature
+         FROM entities
+         WHERE {MATCH_WHERE_SQL}
+         ORDER BY (CASE WHEN id = ?1 THEN 0 ELSE 1 END),
+                  (CASE WHEN ?3 IS NOT NULL AND project = ?3 THEN 0 ELSE 1 END),
+                  (CASE WHEN file_path IS NOT NULL AND {TEST_PATH_SQL} THEN 1 ELSE 0 END),
+                  (CASE WHEN id LIKE '%#' THEN 0 ELSE 1 END),
+                  COALESCE(qualified_name, name),
+                  COALESCE(file_path, '')
+         LIMIT 8"
+    ))?;
     let rows = stmt
-        .query_map([symbol], row_to_entity)?
+        .query_map(
+            rusqlite::params![symbol, qualified, current_project],
+            row_to_entity,
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -131,7 +193,7 @@ fn query_edges(
 ) -> Result<Vec<EdgeRow>> {
     let sql = match dir {
         EdgeDir::Out => {
-            "SELECT r.kind, e.id, e.name, e.project, e.file_path, e.line_range, e.signature
+            "SELECT r.kind, e.id, e.name, e.qualified_name, e.project, e.file_path, e.line_range, e.signature
              FROM relations r
              JOIN entities e ON e.id = r.dst_entity
              WHERE r.src_entity = ?1 AND r.valid_to IS NULL
@@ -139,7 +201,7 @@ fn query_edges(
              LIMIT ?2"
         }
         EdgeDir::In => {
-            "SELECT r.kind, e.id, e.name, e.project, e.file_path, e.line_range, e.signature
+            "SELECT r.kind, e.id, e.name, e.qualified_name, e.project, e.file_path, e.line_range, e.signature
              FROM relations r
              JOIN entities e ON e.id = r.src_entity
              WHERE r.dst_entity = ?1 AND r.valid_to IS NULL
@@ -155,10 +217,11 @@ fn query_edges(
                 other: EntityRow {
                     id: r.get(1)?,
                     name: r.get(2)?,
-                    project: r.get(3)?,
-                    file_path: r.get(4)?,
-                    line_range: r.get(5)?,
-                    signature: r.get(6)?,
+                    qualified_name: r.get(3)?,
+                    project: r.get(4)?,
+                    file_path: r.get(5)?,
+                    line_range: r.get(6)?,
+                    signature: r.get(7)?,
                 },
             })
         })?
@@ -176,7 +239,7 @@ pub fn entities_in_file(
     limit: usize,
 ) -> Result<Vec<EntityRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, project, file_path, line_range, signature FROM entities
+        "SELECT id, name, qualified_name, project, file_path, line_range, signature FROM entities
          WHERE file_path = ?1 AND (?2 IS NULL OR project = ?2)
          ORDER BY line_range
          LIMIT ?3",
@@ -199,7 +262,7 @@ fn query_siblings(
     limit: usize,
 ) -> Result<Vec<EntityRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, project, file_path, line_range, signature FROM entities
+        "SELECT id, name, qualified_name, project, file_path, line_range, signature FROM entities
          WHERE file_path = ?1 AND project IS ?2 AND id != ?3
          ORDER BY line_range
          LIMIT ?4",
@@ -217,10 +280,11 @@ fn row_to_entity(r: &rusqlite::Row<'_>) -> rusqlite::Result<EntityRow> {
     Ok(EntityRow {
         id: r.get(0)?,
         name: r.get(1)?,
-        project: r.get(2)?,
-        file_path: r.get(3)?,
-        line_range: r.get(4)?,
-        signature: r.get(5)?,
+        qualified_name: r.get(2)?,
+        project: r.get(3)?,
+        file_path: r.get(4)?,
+        line_range: r.get(5)?,
+        signature: r.get(6)?,
     })
 }
 
@@ -231,13 +295,15 @@ pub fn format_markdown(n: &Neighborhood, byte_cap: usize) -> String {
         return out;
     }
     if n.is_ambiguous() {
+        // The qualified name (`Config.new`) tells the matches apart, and is
+        // itself a valid `engraph subgraph` argument.
         out.push_str("## Multiple matches\n");
         for m in &n.matches {
             push_capped(
                 &mut out,
                 &format!(
                     "- `{}` ({})\n",
-                    m.name,
+                    m.qualified_name.as_deref().unwrap_or(&m.name),
                     location(m, None).unwrap_or_else(|| "?".into())
                 ),
                 byte_cap,
@@ -560,6 +626,109 @@ mod tests {
             !md.contains("repo:app_b"),
             "same-project edge should not carry annotation: {md}"
         );
+    }
+
+    /// A `Config` type with `new`, a `Widget` type with `new`, a test-file
+    /// `new`, and a `new` in another project.
+    fn seed_qualified(conn: &PooledConn) {
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, qualified_name, project, file_path, line_range)
+             VALUES ('ra config/Config#', 'symbol', 'Config', 'Config', '/p', 'src/config.rs', '14:40'),
+                    ('ra config/Config#new().', 'symbol', 'new', 'Config.new', '/p', 'src/config.rs', '20:25'),
+                    ('ra config/Config#full_path_base().', 'symbol', 'full_path_base',
+                     'Config.full_path_base', '/p', 'src/config.rs', '30:35'),
+                    ('ra widget/Widget#new().', 'symbol', 'new', 'Widget.new', '/p', 'src/widget.rs', '3:9'),
+                    ('ra tests/Fake#new().', 'symbol', 'new', 'Fake.new', '/p', 'tests/fake.rs', '1:2'),
+                    ('ra other/Other#new().', 'symbol', 'new', 'Other.new', '/q', 'src/lib.rs', '1:2'),
+                    ('ra other/New#', 'symbol', 'new', 'new', '/p', 'src/new.rs', '1:2')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn qualified_forms_resolve_the_same_symbol() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        seed_qualified(&conn);
+        for q in [
+            "Config::full_path_base",
+            "Config#full_path_base",
+            "Config.full_path_base",
+            "full_path_base",
+        ] {
+            let n = subgraph_for(&conn, q, 30).unwrap();
+            assert_eq!(n.matches.len(), 1, "{q}: {:?}", n.matches);
+            assert_eq!(n.matches[0].id, "ra config/Config#full_path_base().", "{q}");
+        }
+        // A type by its bare name, and a qualified method where the bare
+        // name is ambiguous.
+        assert_eq!(
+            subgraph_for(&conn, "Config", 30).unwrap().matches[0].id,
+            "ra config/Config#"
+        );
+        let n = subgraph_for(&conn, "Config::new", 30).unwrap();
+        assert_eq!(n.matches.len(), 1);
+        assert_eq!(n.matches[0].id, "ra config/Config#new().");
+    }
+
+    #[test]
+    fn multiple_matches_show_qualified_names_in_a_useful_sequence() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        seed_qualified(&conn);
+        let n = subgraph_for_in(&conn, "new", 30, Some("/p")).unwrap();
+        assert!(n.is_ambiguous());
+        let ids: Vec<&str> = n.matches.iter().map(|m| m.id.as_str()).collect();
+        // Current project first; then files that are not tests; types
+        // before members; then by name and file.
+        assert_eq!(
+            ids,
+            [
+                "ra other/New#",
+                "ra config/Config#new().",
+                "ra widget/Widget#new().",
+                "ra tests/Fake#new().",
+                "ra other/Other#new().",
+            ]
+        );
+        let md = format_markdown(&n, DEFAULT_BYTE_CAP);
+        assert!(md.starts_with("## Multiple matches"), "{md}");
+        assert!(md.contains("- `Config.new` (src/config.rs:20)"), "{md}");
+        assert!(md.contains("- `Widget.new` (src/widget.rs:3)"), "{md}");
+        assert!(
+            md.find("`Config.new`").unwrap() < md.find("`Fake.new`").unwrap(),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn global_symbols_shadow_locals_of_the_same_name() {
+        // rust-analyzer names `local N` variables; a `let full_path_base`
+        // must not make the `Config.full_path_base` field ambiguous.
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, qualified_name, project, file_path, line_range)
+             VALUES ('ra config/Config#full_path_base.', 'symbol', 'full_path_base',
+                     'Config.full_path_base', '/p', 'src/config.rs', '17:17'),
+                    ('local 129', 'symbol', 'full_path_base', NULL, '/p', 'src/walk.rs', '686:686'),
+                    ('local 137', 'symbol', 'full_path_base', NULL, '/p', 'src/walk.rs', '724:724'),
+                    ('local 5', 'symbol', 'only_local', NULL, '/p', 'src/walk.rs', '10:10')",
+            [],
+        )
+        .unwrap();
+        let n = subgraph_for(&conn, "full_path_base", 30).unwrap();
+        assert_eq!(n.matches.len(), 1, "{:?}", n.matches);
+        assert_eq!(n.matches[0].id, "ra config/Config#full_path_base.");
+        // A name that only locals have (a TypeScript local function) still
+        // resolves.
+        let n = subgraph_for(&conn, "only_local", 30).unwrap();
+        assert_eq!(n.matches.len(), 1);
+        assert_eq!(n.matches[0].id, "local 5");
     }
 
     #[test]

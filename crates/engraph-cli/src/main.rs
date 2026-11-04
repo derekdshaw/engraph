@@ -630,7 +630,14 @@ async fn main() -> Result<()> {
             json,
         } => {
             let start = Instant::now();
-            let neighborhood = engraph_codegraph::subgraph_for(&conn, &symbol, max_nodes)?;
+            // The caller's project goes first in an ambiguous match list.
+            let current_project = std::env::current_dir().ok().map(|c| canonical_repo_key(&c));
+            let neighborhood = engraph_codegraph::subgraph_for_in(
+                &conn,
+                &symbol,
+                max_nodes,
+                current_project.as_deref(),
+            )?;
             // Resolve source against the current worktree first, so a symbol
             // indexed from another checkout still reads from where you're working.
             let cur_root = std::env::current_dir()

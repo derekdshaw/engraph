@@ -291,6 +291,17 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE index_state ADD COLUMN lang TEXT;
     ALTER TABLE index_state ADD COLUMN bazel_symbols INTEGER NOT NULL DEFAULT 0;
     "#,
+    // v12 — entities.qualified_name: the SCIP descriptors after the namespace,
+    // joined with `.` (`Config.full_path_base` for `…/Config#full_path_base().`,
+    // `Config` for `…/Config#`), so `subgraph` and the grep redirect can match
+    // a qualified lookup (`Config::full_path_base`) when the bare name is
+    // shared by many symbols. NULL until the project is indexed again (the
+    // loader fills it); bazel_target rows never have one. ADD COLUMN is
+    // metadata-only, same as v6/v8.
+    r#"
+    ALTER TABLE entities ADD COLUMN qualified_name TEXT;
+    CREATE INDEX IF NOT EXISTS idx_entities_qualified_name ON entities(qualified_name);
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
@@ -483,6 +494,34 @@ mod tests {
             )
             .unwrap();
         assert!(!at.is_empty());
+    }
+
+    #[test]
+    fn migrates_through_v12_entities_qualified_name() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let present: bool = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('entities') WHERE name = 'qualified_name'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        assert!(present, "missing entities.qualified_name column");
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, qualified_name, project)
+             VALUES ('e1', 'symbol', 'full_path_base', 'Config.full_path_base', '/p')",
+            [],
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entities WHERE qualified_name = 'Config.full_path_base'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]

@@ -260,3 +260,151 @@ fn loader_preserves_bazel_depends_on_edges() {
         "BAZEL_DEPENDS_ON edge must survive a same-project SCIP load"
     );
 }
+
+/// One document with `symbol`, whose `display_name` the caller chooses, and
+/// a `main` that calls it, so the row has a relation and the pre-load GC
+/// does not remove it between loads.
+fn build_named(symbol: &str, display_name: &str) -> Vec<u8> {
+    let main = "scip-test cargo demo 0.0.0 main().";
+    let mut lib = Document::new();
+    lib.relative_path = "src/lib.rs".to_string();
+    lib.symbols = vec![
+        sym(symbol, display_name, SymKind::Function),
+        sym(main, "main", SymKind::Function),
+    ];
+    lib.occurrences = vec![
+        occ(symbol, vec![3, 0, 3, 3], SymbolRole::Definition as i32),
+        occ(main, vec![10, 0, 10, 4], SymbolRole::Definition as i32),
+        occ(symbol, vec![11, 4, 11, 7], 0),
+    ];
+    let mut idx = Index::new();
+    idx.metadata = MessageField::some(Default::default());
+    idx.documents.push(lib);
+    idx.write_to_bytes().unwrap()
+}
+
+fn name_of(conn: &engraph_core::db::PooledConn, id: &str) -> String {
+    conn.query_row("SELECT name FROM entities WHERE id = ?1", [id], |r| {
+        r.get(0)
+    })
+    .unwrap()
+}
+
+#[test]
+fn reload_replaces_the_name_of_an_existing_symbol() {
+    // A row written by an older engraph (or by a placeholder) keeps an
+    // incorrect name unless a later load of the same id overwrites it.
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    let id = "scip-test cargo demo 0.0.0 config/Config#full_path_base().";
+
+    load(
+        &conn,
+        "/proj/demo",
+        &build_named(id, "Config#full_path_base"),
+    )
+    .unwrap();
+    assert_eq!(name_of(&conn, id), "Config#full_path_base");
+
+    load(&conn, "/proj/demo", &build_named(id, "full_path_base")).unwrap();
+    assert_eq!(
+        name_of(&conn, id),
+        "full_path_base",
+        "a second load must replace the stored name"
+    );
+}
+
+#[test]
+fn definition_names_a_placeholder_written_by_a_reference() {
+    // Document A references `helper` before document B defines it. The
+    // placeholder row that A's reference creates must take the name that B's
+    // definition gives, whatever the document order.
+    let helper = "scip-test cargo demo 0.0.0 util/Util#helper().";
+    let caller = "scip-test cargo demo 0.0.0 app/run().";
+
+    let mut a = Document::new();
+    a.relative_path = "src/app.rs".to_string();
+    a.symbols = vec![sym(caller, "", SymKind::Function)];
+    a.occurrences = vec![
+        occ(caller, vec![0, 0, 0, 3], SymbolRole::Definition as i32),
+        occ(helper, vec![1, 4, 1, 10], 0),
+    ];
+    let mut b = Document::new();
+    b.relative_path = "src/util.rs".to_string();
+    b.symbols = vec![sym(helper, "Util.helper (display)", SymKind::Method)];
+    b.occurrences = vec![occ(helper, vec![5, 0, 5, 6], SymbolRole::Definition as i32)];
+
+    let mut idx = Index::new();
+    idx.metadata = MessageField::some(Default::default());
+    idx.documents.push(a);
+    idx.documents.push(b);
+    let bytes = idx.write_to_bytes().unwrap();
+
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/demo", &bytes).unwrap();
+    assert_eq!(name_of(&conn, helper), "Util.helper (display)");
+    assert_eq!(name_of(&conn, caller), "run");
+}
+
+#[test]
+fn loader_writes_the_qualified_name_of_each_symbol() {
+    // qualified_name: the descriptors after the namespace, joined with `.`,
+    // so `Config::full_path_base` / `Config#full_path_base` lookups can match.
+    let method = "scip-test cargo demo 0.0.0 config/Config#full_path_base().";
+    let class = "scip-test cargo demo 0.0.0 config/Config#";
+    let func = "scip-test cargo demo 0.0.0 config/load().";
+    let mut lib = Document::new();
+    lib.relative_path = "src/config.rs".to_string();
+    lib.symbols = vec![
+        sym(class, "", SymKind::Struct),
+        sym(method, "", SymKind::Method),
+        sym(func, "", SymKind::Function),
+    ];
+    lib.occurrences = vec![
+        occ(class, vec![0, 0, 0, 6], SymbolRole::Definition as i32),
+        occ(method, vec![2, 4, 2, 18], SymbolRole::Definition as i32),
+        occ(func, vec![8, 0, 8, 4], SymbolRole::Definition as i32),
+        // load() calls the method, so the rows have relations.
+        occ(method, vec![9, 4, 9, 18], 0),
+    ];
+    let mut idx = Index::new();
+    idx.metadata = MessageField::some(Default::default());
+    idx.documents.push(lib);
+    let bytes = idx.write_to_bytes().unwrap();
+
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/demo", &bytes).unwrap();
+
+    let qn = |id: &str| -> Option<String> {
+        conn.query_row(
+            "SELECT qualified_name FROM entities WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(qn(method).as_deref(), Some("Config.full_path_base"));
+    assert_eq!(qn(class).as_deref(), Some("Config"));
+    assert_eq!(qn(func).as_deref(), Some("load"));
+    assert_eq!(name_of(&conn, method), "full_path_base");
+
+    // A placeholder written by a reference gets a qualified name too.
+    let extern_method = "scip-test cargo other 0.0.0 ext/Ext#call().";
+    let mut doc = Document::new();
+    doc.relative_path = "src/use.rs".to_string();
+    doc.symbols = vec![sym(func, "", SymKind::Function)];
+    doc.occurrences = vec![
+        occ(func, vec![0, 0, 0, 4], SymbolRole::Definition as i32),
+        occ(extern_method, vec![1, 4, 1, 8], 0),
+    ];
+    let mut idx = Index::new();
+    idx.metadata = MessageField::some(Default::default());
+    idx.documents.push(doc);
+    load(&conn, "/proj/demo", &idx.write_to_bytes().unwrap()).unwrap();
+    assert_eq!(qn(extern_method).as_deref(), Some("Ext.call"));
+}

@@ -244,7 +244,7 @@ Display-sink pipelines (`git log | head`, `git diff | less`) are rewritten by wr
 
 ### How `pre-grep` redirects symbol lookups
 
-After `engraph index .` populates the codegraph, the PreToolUse hook on Grep watches for symbol-shaped patterns (a bareword like `parse`, or `parse(`, `Foo::new`, `fn parse`; identifiers ≥ 3 characters) that resolve to **1–8 entities** by `name` or moniker. On a hit, it returns `permissionDecision: "deny"` with a message pointing Claude at `engraph subgraph <symbol>` — typically orders of magnitude smaller than the file-read-and-grep loop Claude would otherwise run.
+After `engraph index .` populates the codegraph, the PreToolUse hook on Grep watches for symbol-shaped patterns (a bareword like `parse`, or `parse(`, `fn parse`, or a path like `Foo::new` / `Foo#new` / `Foo.new`; identifiers ≥ 3 characters) that resolve to **1–8 entities** by `name` or moniker — a path is matched as a whole against the qualified name first (`Foo.new`), so it finds one symbol even when bare `new` has dozens. On a hit, it returns `permissionDecision: "deny"` with a message pointing Claude at `engraph subgraph <symbol>` — typically orders of magnitude smaller than the file-read-and-grep loop Claude would otherwise run.
 
 The gate is deliberately narrow:
 
@@ -252,6 +252,7 @@ The gate is deliberately narrow:
 |---|---|---|
 | `processOrder` | 1 entity | deny + suggest `engraph subgraph processOrder` |
 | `parse` | 12 entities | passthrough (ambiguous; subgraph would emit a disambiguation block) |
+| `Config::new` (or `Config#new`, `Config.new`) | 1 entity by qualified name, although `new` alone has 12 | deny + suggest `engraph subgraph Config::new` |
 | `unindexed_helper` | 0 entities | passthrough (not in graph) |
 | `process.*` | — | passthrough (regex metachar) |
 | `id` | — | passthrough (too short) |
@@ -372,16 +373,22 @@ engraph init-embeddings          # download model (~130MB) to ~/.cache/engraph/f
 engraph reindex-embeddings       # embed all stored messages
 ```
 
+### Symbol names and qualified lookups
+
+Symbols are named by their last SCIP descriptor, so a Rust or Python type is `Config` (not `Config#`) and a method is `full_path_base`. Each symbol also has a qualified name — the descriptors after the namespace, joined with `.` — and `engraph subgraph` (like the grep redirect) accepts it in any of the usual spellings: `Config::full_path_base`, `Config#full_path_base`, and `Config.full_path_base` find the same symbol. Use the qualified form when a bare name such as `new` is shared by many types.
+
 ### Subgraph disambiguation
 
-Ambiguous symbol names return a disambiguation block listing each match by location rather than a best-guess pick:
+Ambiguous symbol names return a disambiguation block listing each match by qualified name and location rather than a best-guess pick — symbols of the current project first, then files that are not tests, then types before members:
 
 ```
-Ambiguous: `foo` matches 3 symbols:
-  1. src/lib.rs:12  — fn foo()
-  2. src/util.rs:8  — fn foo(x: i32)
-  3. tests/mod.rs:3 — fn foo()
+## Multiple matches
+- `Config.new` (src/config.rs:20)
+- `Widget.new` (src/widget.rs:3)
+- `Fake.new` (tests/fake.rs:1)
 ```
+
+Any line's qualified name is itself a valid `engraph subgraph` argument.
 
 ---
 
@@ -464,7 +471,7 @@ One SQLite database, WAL mode. Schema migrations are versioned and applied autom
 | `sessions`, `messages` | Session-state snapshot from JSONL ingestion |
 | `scopes`, `scope_members` | Hierarchical scoping (project / topic / time-window) |
 | `context_items`, `bugs`, `do_not_repeat` | Curated decisions and rules |
-| `entities`, `relations` | Knowledge graph; codegraph stores symbols here with `file_path`, `line_range`, `signature` |
+| `entities`, `relations` | Knowledge graph; codegraph stores symbols here with `name`, `qualified_name`, `file_path`, `line_range`, `signature` |
 | `messages_fts`, `context_items_fts` | FTS5 virtual tables auto-synced via triggers |
 | `embeddings` | Vector store (populated only with `--features embeddings`) |
 | `events`, `session_budget` | Telemetry and per-session token budget |

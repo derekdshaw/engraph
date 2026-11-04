@@ -6,8 +6,9 @@ of the plans.
 
 ## Result
 
-- `engraph subgraph` and the grep redirect find Rust and Python types and
-  methods by their usual names, for example `Config` and `full_path_base`.
+- **Complete (part 1, 2026-11-03):** `engraph subgraph` and the grep redirect
+  find Rust and Python types and methods by their usual names, for example
+  `Config` and `full_path_base`.
 - Python graphs have `CALLS` and `REFERENCES` relations.
 - A sub-project index writes only the files of that sub-project.
 - SCIP local symbols do not replace each other between files.
@@ -24,7 +25,7 @@ The test projects in the `engraph-test-repos` directory showed these bugs
 
 | Bug | Effect |
 |---|---|
-| 1. Names keep SCIP descriptor characters | `subgraph Config` finds no Rust type |
+| 1. Names keep SCIP descriptor characters (**corrected**, part 1) | `subgraph Config` finds no Rust type |
 | 2. Python graphs have no `CALLS` and no `REFERENCES` | `subgraph` shows no callers for Python |
 | 3. A Gradle sub-project index writes incorrect paths | Files of other modules get paths that do not exist |
 | 4. SCIP local symbols replace each other | Local symbols show the name of one file and the location of a different file |
@@ -34,6 +35,9 @@ The test projects in the `engraph-test-repos` directory showed these bugs
 | 8. New untracked files do not start `--if-changed` | The graph does not include a new file until a different change occurs |
 
 ### Bug 1: names keep SCIP descriptor characters
+
+**Corrected by part 1 (branch `plan01-part1-names`).** The text below gives
+the condition before the correction.
 
 rust-analyzer and scip-python do not set `SymbolInformation.display_name`.
 Thus, the loader makes the name from the symbol id with
@@ -282,6 +286,19 @@ Some validation steps record a value with the `main` binary before the change.
 For these steps, do steps 1 and 2 on the `main` branch, and then steps 3 to 8.
 
 ### Part 1: names (bug 1)
+
+**Complete.** Steps 1 to 9 are done. Validation step 12, names with more than
+8 entities (before → after): `fd-rust` 7 → 5, `hono-typescript` 57 → 86,
+`jsonpath-java` 17 → 61. Names with `#` after the change: 0 in `fd-rust` and
+`jsonpath-java`; 53 in `hono-typescript`, all real (52 JavaScript private
+members such as `#path`, and one test string symbol). Two conditions found in
+the validation are also corrected: global symbols shadow `local N` symbols of
+the same name (rust-analyzer names local variables, which made
+`full_path_base` ambiguous), and rust-analyzer impl blocks (`impl#[Batch]`)
+give members the path `Batch.new` and are themselves named `impl Batch`. Note for step 7: the grep redirect accepts `Config.full_path_base`
+as a path shape (identifiers joined by `.`), although `.` is a regex
+character; the input is a path only when each segment is an identifier, so
+`Config.*` and `foo.bar\b` still bypass the redirect.
 
 1. Write a unit test for `fallback_display_name` with these ids and results:
    - `rust-analyzer cargo fd 0.1.0 config/Config#` → `Config`
