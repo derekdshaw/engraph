@@ -220,3 +220,141 @@ fn empty_stdin_passes_through() {
         "empty should passthrough, got: {out}"
     );
 }
+
+/// A `Config` type with a `new` method, plus many other `new` methods, so the
+/// bare name is ambiguous (> 8) while the qualified name is unique.
+fn insert_qualified_entities(db: &std::path::Path) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.execute(
+        "INSERT INTO entities (id, kind, name, qualified_name, project, file_path, line_range)
+         VALUES ('rust-analyzer cargo fd 0.1.0 config/Config#', 'symbol', 'Config', 'Config',
+                 'testproj', 'src/config.rs', '14:40'),
+                ('rust-analyzer cargo fd 0.1.0 config/Config#new().', 'symbol', 'new', 'Config.new',
+                 'testproj', 'src/config.rs', '20:25')",
+        [],
+    )
+    .unwrap();
+    for i in 0..10 {
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, qualified_name, project, file_path, line_range)
+             VALUES (?1, 'symbol', 'new', ?2, 'testproj', 'src/other.rs', '1:1')",
+            rusqlite::params![
+                format!("rust-analyzer cargo fd 0.1.0 other/Type{i}#new()."),
+                format!("Type{i}.new")
+            ],
+        )
+        .unwrap();
+    }
+}
+
+fn decision(out: &str) -> Option<String> {
+    parse(out)?
+        .pointer("/hookSpecificOutput/permissionDecision")
+        .and_then(|s| s.as_str())
+        .map(str::to_string)
+}
+
+#[test]
+fn qualified_path_shapes_resolve_by_qualified_name() {
+    let (_t, db) = db_dir();
+    insert_qualified_entities(&db);
+    // The bare name is too ambiguous: the search continues.
+    assert_eq!(decision(&run_hook(&db, "new")), None);
+    // Every qualified shape of the same symbol finds exactly it.
+    for pattern in ["Config::new", "Config#new", "Config.new"] {
+        let out = run_hook(&db, pattern);
+        assert_eq!(decision(&out).as_deref(), Some("deny"), "{pattern}: {out}");
+        let reason = parse(&out)
+            .unwrap()
+            .pointer("/hookSpecificOutput/permissionDecisionReason")
+            .and_then(|s| s.as_str())
+            .unwrap()
+            .to_string();
+        assert!(reason.contains("(1 match)"), "{pattern}: {reason}");
+        assert!(
+            reason.contains(&format!("engraph subgraph {pattern}")),
+            "{pattern}: {reason}"
+        );
+    }
+    // A qualified path with no qualified match falls back to the last
+    // segment's name: `Other::Config` → `Config`, one match.
+    assert_eq!(
+        decision(&run_hook(&db, "Other::Config")).as_deref(),
+        Some("deny")
+    );
+    // A type name with no `#`.
+    assert_eq!(decision(&run_hook(&db, "Config")).as_deref(), Some("deny"));
+}
+
+#[test]
+fn global_symbols_shadow_locals_in_the_match_count() {
+    let (_t, db) = db_dir();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    // One field plus ten local variables of the same name: 1 match, not 11.
+    conn.execute(
+        "INSERT INTO entities (id, kind, name, qualified_name, project, file_path, line_range)
+         VALUES ('ra config/Config#full_path_base.', 'symbol', 'full_path_base',
+                 'Config.full_path_base', 'testproj', 'src/config.rs', '17:17')",
+        [],
+    )
+    .unwrap();
+    for i in 0..10 {
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range)
+             VALUES (?1, 'symbol', 'full_path_base', 'testproj', 'src/walk.rs', '1:1')",
+            [format!("local {i}")],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let out = run_hook(&db, "full_path_base");
+    assert_eq!(decision(&out).as_deref(), Some("deny"), "{out}");
+    assert!(out.contains("(1 match)"), "{out}");
+}
+
+#[test]
+fn dotted_text_without_a_qualified_match_keeps_grepping() {
+    let (_t, db) = db_dir();
+    insert_qualified_entities(&db);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "INSERT INTO entities (id, kind, name, qualified_name, project, file_path, line_range)
+         VALUES ('ra io/lock().', 'symbol', 'lock', 'lock', 'testproj', 'src/io.rs', '1:1'),
+                ('ra app/App#config.', 'symbol', 'config', 'App.config', 'testproj', 'src/app.rs', '2:2')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    // `.` is also how text is written: a file name or a field access with no
+    // qualified-name match is a text search, not the last segment's symbol.
+    for pattern in ["Cargo.lock", "self.config"] {
+        let out = run_hook(&db, pattern);
+        assert_eq!(decision(&out), None, "{pattern}: {out}");
+    }
+    // A dotted path that is a qualified name still resolves.
+    assert_eq!(
+        decision(&run_hook(&db, "Config.new")).as_deref(),
+        Some("deny")
+    );
+    // `::` and `#` paths keep the last-segment fallback.
+    assert_eq!(
+        decision(&run_hook(&db, "Other::Config")).as_deref(),
+        Some("deny")
+    );
+    assert_eq!(
+        decision(&run_hook(&db, "Other#Config")).as_deref(),
+        Some("deny")
+    );
+}
+
+#[test]
+fn module_paths_resolve_by_their_longest_qualified_suffix() {
+    let (_t, db) = db_dir();
+    insert_qualified_entities(&db);
+    // `new` alone has 11 matches; the module path names one of them.
+    for pattern in ["config::Config::new", "crate::config::Config::new"] {
+        let out = run_hook(&db, pattern);
+        assert_eq!(decision(&out).as_deref(), Some("deny"), "{pattern}: {out}");
+        assert!(out.contains("(1 match)"), "{pattern}: {out}");
+    }
+}

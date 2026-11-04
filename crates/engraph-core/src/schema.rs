@@ -291,6 +291,21 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE index_state ADD COLUMN lang TEXT;
     ALTER TABLE index_state ADD COLUMN bazel_symbols INTEGER NOT NULL DEFAULT 0;
     "#,
+    // v12 — entities.qualified_name: the SCIP descriptors after the namespace,
+    // joined with `.` (`Config.full_path_base` for `…/Config#full_path_base().`,
+    // `Config` for `…/Config#`), so `subgraph` and the grep redirect can match
+    // a qualified lookup (`Config::full_path_base`) when the bare name is
+    // shared by many symbols. NULL until the project is indexed again (the
+    // loader fills it); bazel_target rows never have one. ADD COLUMN is
+    // metadata-only, same as v6/v8. Names change in the same load, so the
+    // commit of each driver run is cleared: git can't resolve '', which
+    // counts as changed, so the next `--if-changed` refresh (SessionStart)
+    // re-indexes it. Prebuilt SCIP subtrees are skipped by that refresh.
+    r#"
+    ALTER TABLE entities ADD COLUMN qualified_name TEXT;
+    CREATE INDEX IF NOT EXISTS idx_entities_qualified_name ON entities(qualified_name);
+    UPDATE index_state SET commit_sha = '' WHERE source = 'drivers';
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
@@ -431,6 +446,42 @@ mod tests {
     }
 
     #[test]
+    fn migrates_v11_driver_runs_to_a_commit_that_forces_a_refresh() {
+        // v12 names come from the loader, so a v11 index keeps its old names
+        // until it is indexed again: v12 clears the commit of driver runs so
+        // the next `--if-changed` refresh re-indexes them. Prebuilt SCIP
+        // subtrees are skipped by the refresh, so they keep their commit.
+        let mut conn = Connection::open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        for (i, sql) in MIGRATIONS[..11].iter().enumerate() {
+            tx.execute_batch(sql).unwrap();
+            tx.execute(
+                "INSERT INTO migrations (version) VALUES (?1)",
+                [i as i64 + 1],
+            )
+            .unwrap();
+        }
+        tx.execute(
+            "INSERT INTO index_state (project, subtree, commit_sha, source)
+             VALUES ('/p', '', 'abc', 'drivers'), ('/p', 'gen', 'def', 'scip')",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let commit = |subtree: &str| -> String {
+            conn.query_row(
+                "SELECT commit_sha FROM index_state WHERE project = '/p' AND subtree = ?1",
+                [subtree],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(commit(""), "");
+        assert_eq!(commit("gen"), "def");
+    }
+
+    #[test]
     fn migrates_v9_index_state_rows_to_v10_subtrees() {
         let mut conn = Connection::open_in_memory().unwrap();
         // Apply through v9 (v1 creates `migrations`), with a v9-era row.
@@ -448,8 +499,9 @@ mod tests {
             [],
         )
         .unwrap();
+        // Only v10: v12 clears the commit of driver runs on purpose.
+        tx.execute_batch(MIGRATIONS[9]).unwrap();
         tx.commit().unwrap();
-        run_migrations(&mut conn).unwrap();
         let row: (String, String) = conn
             .query_row(
                 "SELECT subtree, commit_sha FROM index_state WHERE project = '/p'",
@@ -483,6 +535,34 @@ mod tests {
             )
             .unwrap();
         assert!(!at.is_empty());
+    }
+
+    #[test]
+    fn migrates_through_v12_entities_qualified_name() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let present: bool = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('entities') WHERE name = 'qualified_name'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        assert!(present, "missing entities.qualified_name column");
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, qualified_name, project)
+             VALUES ('e1', 'symbol', 'full_path_base', 'Config.full_path_base', '/p')",
+            [],
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entities WHERE qualified_name = 'Config.full_path_base'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]

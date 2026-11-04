@@ -38,11 +38,62 @@ const SYMBOL_KEYWORDS: &[&str] = &[
 /// A bareword identifier of length >= 3 (alpha/underscore start, alphanumeric
 /// body). Short tokens (`id`, `if`) are rejected to avoid noise.
 fn is_bareword(s: &str) -> bool {
-    s.len() >= 3
+    s.len() >= 3 && is_ident(s)
+}
+
+/// An identifier of any length: a leading segment of a path (`io` in
+/// `io::Read`) may be short.
+fn is_ident(s: &str) -> bool {
+    !s.is_empty()
         && s.chars()
             .next()
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// What a grep pattern asks for, as the code graph can answer it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SymbolQuery {
+    /// The last path segment: the symbol's own name.
+    pub(crate) name: String,
+    /// For a path shape (`Config::new`, `Config#new`, `Config.new`): the
+    /// whole path in `qualified_name` form (`Config.new`). Matched first, so
+    /// a qualified search finds one symbol when the bare name has many.
+    pub(crate) qualified: Option<String>,
+    /// The shape as typed, for the `engraph subgraph …` suggestion.
+    pub(crate) shown: String,
+}
+
+impl SymbolQuery {
+    fn bare(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            qualified: None,
+            shown: name.to_string(),
+        }
+    }
+}
+
+/// A path of identifiers joined by `::`, `#`, or `.` (`Config::new`,
+/// `Config#new`, `pkg.Config.new`), with at least two segments and a bareword
+/// last segment. `None` for anything else, including a lone bareword.
+fn symbol_path(s: &str) -> Option<SymbolQuery> {
+    let segments: Vec<&str> = s
+        .split("::")
+        .flat_map(|part| part.split(['#', '.']))
+        .collect();
+    if segments.len() < 2 || !segments.iter().all(|seg| is_ident(seg)) {
+        return None;
+    }
+    let last = *segments.last()?;
+    if !is_bareword(last) {
+        return None;
+    }
+    Some(SymbolQuery {
+        name: last.to_string(),
+        qualified: Some(segments.join(".")),
+        shown: s.to_string(),
+    })
 }
 
 /// The leading identifier of `s` (e.g. `parse` from `parse(input: &str)`).
@@ -69,12 +120,17 @@ fn first_ident(s: &str) -> Option<&str> {
 /// - `parse`                  → `parse`
 /// - `fn parse` / `pub fn p`  → strip leading def keywords, take the name
 /// - `parse(` / `parse(args)` → the callee before `(`
-/// - `Foo::new`               → the last path segment
+/// - `Foo::new` / `Foo#new` / `Foo.new` → the path (`Foo.new`) and its last
+///   segment (`new`)
 ///
 /// Returns `None` for multi-word free text (`error handling`) and regexes, so
 /// those still grep normally.
-fn extract_symbol(pattern: &str) -> Option<String> {
+fn extract_symbol(pattern: &str) -> Option<SymbolQuery> {
     let p = pattern.trim();
+    // Path shape first: its `.` is a separator, not a regex metachar.
+    if let Some(q) = symbol_path(p) {
+        return Some(q);
+    }
     // A regex metachar is the documented "I really want grep" bypass, so it
     // opts out in every shape — the keyword shape below would otherwise read
     // `fn foo\b` as `foo`. Parens stay allowed for the call shape.
@@ -82,18 +138,17 @@ fn extract_symbol(pattern: &str) -> Option<String> {
         return None;
     }
     if is_bareword(p) {
-        return Some(p.to_string());
+        return Some(SymbolQuery::bare(p));
     }
-    // Call shape: `name(` — the identifier immediately before the first paren.
+    // Call shape: `name(` / `Foo::new(` — what stands before the first paren.
     if let Some(idx) = p.find('(') {
         let head = p[..idx].trim();
         if is_bareword(head) {
-            return Some(head.to_string());
+            return Some(SymbolQuery::bare(head));
         }
-    }
-    // Path shape: `Foo::new`, `a::b::c` — every segment a bareword; take the last.
-    if p.contains("::") && p.split("::").all(is_bareword) {
-        return p.rsplit("::").next().map(str::to_string);
+        if let Some(q) = symbol_path(head) {
+            return Some(q);
+        }
     }
     // Keyword shape: strip leading def/visibility keywords, take the next ident.
     let mut rest = p;
@@ -107,9 +162,34 @@ fn extract_symbol(pattern: &str) -> Option<String> {
         }
     }
     if stripped {
-        return first_ident(rest).map(str::to_string);
+        return first_ident(rest).map(SymbolQuery::bare);
     }
     None
+}
+
+/// `(project, file_path)` of the entities a lookup names, at most 9 (the
+/// gate only needs to know whether there are more than 8). Same rule as
+/// `engraph subgraph` (`MATCH_WHERE_SQL`): by name, by exact moniker, or by
+/// qualified name, with global symbols shadowing locals.
+fn entities_matching(
+    conn: &db::PooledConn,
+    symbol: &str,
+    qualified: &str,
+) -> Option<Vec<(Option<String>, Option<String>)>> {
+    let sql = format!(
+        "SELECT project, file_path FROM entities WHERE {} LIMIT 9",
+        engraph_codegraph::MATCH_WHERE_SQL
+    );
+    let mut stmt = conn.prepare(&sql).ok()?;
+    stmt.query_map(rusqlite::params![symbol, qualified], |r| {
+        Ok((
+            r.get::<_, Option<String>>(0)?,
+            r.get::<_, Option<String>>(1)?,
+        ))
+    })
+    .ok()?
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .ok()
 }
 
 /// Shared subgraph-redirect message generator. Returns Some(reason) when the
@@ -123,20 +203,33 @@ pub(crate) fn try_subgraph_redirect(
     conn: &db::PooledConn,
     cwd: Option<&Path>,
 ) -> Option<String> {
-    let symbol = extract_symbol(pattern)?;
-    let mut stmt = conn
-        .prepare("SELECT project, file_path FROM entities WHERE name = ?1 OR id = ?1 LIMIT 9")
-        .ok()?;
-    let rows = stmt
-        .query_map(rusqlite::params![symbol], |r| {
-            Ok((
-                r.get::<_, Option<String>>(0)?,
-                r.get::<_, Option<String>>(1)?,
-            ))
-        })
-        .ok()?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .ok()?;
+    let query = extract_symbol(pattern)?;
+    // A path (`Config::new`) is matched as a whole against `qualified_name`
+    // first; only when nothing has that qualified name does its last segment
+    // count as a plain name lookup.
+    let mut symbol = query.name.as_str();
+    let mut rows = Vec::new();
+    if let Some(qualified) = query.qualified.as_deref() {
+        // Longest suffix first: `config::Config::new` matches `Config.new`,
+        // since qualified names drop the module. A path is never a name
+        // (names have no `.`), so passing it as both parameters leaves only
+        // the qualified-name arm to match.
+        for candidate in engraph_codegraph::qualified_candidates(qualified) {
+            rows = entities_matching(conn, &candidate, &candidate)?;
+            if !rows.is_empty() {
+                symbol = query.shown.as_str();
+                break;
+            }
+        }
+    }
+    // A `.`-only path is also how text is written (`Cargo.lock`,
+    // `self.config`): with no qualified match it stays a text search. `::`
+    // and `#` only separate code paths, so their last segment still counts.
+    let dotted_only =
+        query.qualified.is_some() && !query.shown.contains("::") && !query.shown.contains('#');
+    if rows.is_empty() && !dotted_only {
+        rows = entities_matching(conn, &query.name, &query.name)?;
+    }
     let count = rows.len();
     if !(1..=8).contains(&count) {
         return None;
@@ -212,37 +305,68 @@ pub(crate) fn emit_subgraph_deny(conn: &db::PooledConn, reason: &str, feature: &
 
 #[cfg(test)]
 mod tests {
-    use super::extract_symbol;
+    use super::{SymbolQuery, extract_symbol};
+
+    fn name(pattern: &str) -> Option<String> {
+        extract_symbol(pattern).map(|q| q.name)
+    }
 
     #[test]
     fn extracts_from_common_search_shapes() {
-        assert_eq!(extract_symbol("parse").as_deref(), Some("parse"));
-        assert_eq!(extract_symbol("fn parse").as_deref(), Some("parse"));
-        assert_eq!(extract_symbol("pub fn parse").as_deref(), Some("parse"));
-        assert_eq!(extract_symbol("struct Foo").as_deref(), Some("Foo"));
-        assert_eq!(extract_symbol("impl Widget").as_deref(), Some("Widget"));
-        assert_eq!(extract_symbol("parse(").as_deref(), Some("parse"));
-        assert_eq!(
-            extract_symbol("parse(input: &str)").as_deref(),
-            Some("parse")
-        );
-        assert_eq!(extract_symbol("Foo::new").as_deref(), Some("new"));
+        assert_eq!(name("parse").as_deref(), Some("parse"));
+        assert_eq!(name("fn parse").as_deref(), Some("parse"));
+        assert_eq!(name("pub fn parse").as_deref(), Some("parse"));
+        assert_eq!(name("struct Foo").as_deref(), Some("Foo"));
+        assert_eq!(name("impl Widget").as_deref(), Some("Widget"));
+        assert_eq!(name("parse(").as_deref(), Some("parse"));
+        assert_eq!(name("parse(input: &str)").as_deref(), Some("parse"));
+        assert_eq!(name("Foo::new").as_deref(), Some("new"));
+        assert_eq!(extract_symbol("parse").unwrap().qualified, None);
+    }
+
+    #[test]
+    fn path_shapes_keep_the_whole_path() {
+        for (pattern, qualified) in [
+            ("Config::new", "Config.new"),
+            ("Config#new", "Config.new"),
+            ("Config.new", "Config.new"),
+            ("a::b::Config", "a.b.Config"),
+            ("io::Read", "io.Read"),
+            ("Config::new(", "Config.new"),
+            ("pkg.Config#add_alias", "pkg.Config.add_alias"),
+        ] {
+            assert_eq!(
+                extract_symbol(pattern),
+                Some(SymbolQuery {
+                    name: qualified.rsplit('.').next().unwrap().to_string(),
+                    qualified: Some(qualified.to_string()),
+                    shown: pattern.trim_end_matches('(').to_string(),
+                }),
+                "{pattern}"
+            );
+        }
+        // A short last segment, a regex, and a trailing separator are not paths.
+        assert_eq!(extract_symbol("Config::id"), None);
+        assert_eq!(extract_symbol("Config.*"), None);
+        assert_eq!(extract_symbol("Config.new.*"), None);
+        assert_eq!(extract_symbol("Config::"), None);
+        assert_eq!(extract_symbol("foo.bar\\b"), None);
     }
 
     #[test]
     fn rejects_freetext_and_regex_and_short() {
         // Multi-word natural language must keep grepping.
-        assert_eq!(extract_symbol("error handling"), None);
-        assert_eq!(extract_symbol("the quick brown"), None);
+        assert_eq!(name("error handling"), None);
+        assert_eq!(name("the quick brown"), None);
         // Regex / metachars aren't barewords.
-        assert_eq!(extract_symbol("parse.*"), None);
-        assert_eq!(extract_symbol("^foo$"), None);
+        assert_eq!(name("parse.*"), None);
+        assert_eq!(name("^foo$"), None);
         // The documented bypass (a regex metachar) must work in every shape.
-        assert_eq!(extract_symbol("fn ids_by_project\\b"), None);
-        assert_eq!(extract_symbol("pub fn parse.*"), None);
-        assert_eq!(extract_symbol("struct Foo\\s"), None);
+        assert_eq!(name("fn ids_by_project\\b"), None);
+        assert_eq!(name("pub fn parse.*"), None);
+        assert_eq!(name("struct Foo\\s"), None);
         // Too short.
-        assert_eq!(extract_symbol("id"), None);
-        assert_eq!(extract_symbol("fn x"), None);
+        assert_eq!(name("id"), None);
+        assert_eq!(name("fn x"), None);
     }
 }

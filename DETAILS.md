@@ -572,14 +572,27 @@ Shared with the native `PreToolUse(Grep)` path:
 
 - `extract_symbol` pulls the symbol from the shapes a code search
   takes: a bareword (`parse`), a call (`parse(`), a path
-  (`Foo::new` → `new`), or def/visibility keywords plus a name
-  (`pub fn parse` → `parse`). Identifiers must start with a letter or
-  `_` and be ≥ 3 characters. Multi-word free text, regexes, and short
-  tokens (`if`, `id`) skip the redirect.
-- `try_subgraph_redirect` does a
-  `SELECT project, file_path FROM entities WHERE name = ?1
-  OR id = ?1 LIMIT 9`. Only 1–8 rows trigger the deny; 0 is a
-  non-indexed name, 9+ is too ambiguous to be a useful neighborhood.
+  (`Foo::new`, `Foo#new`, `Foo.new`, also before a paren), or
+  def/visibility keywords plus a name (`pub fn parse` → `parse`). A
+  path keeps its whole qualified form (`Foo.new`) *and* its last
+  segment (`new`). Identifiers must start with a letter or `_`; the
+  symbol's own name must be ≥ 3 characters. Multi-word free text,
+  regexes, and short tokens (`if`, `id`) skip the redirect; the `.` of
+  a path shape is a separator, not the regex bypass.
+- `try_subgraph_redirect` first compares a path with
+  `entities.qualified_name` (§12.1 v12; `::`/`#` normalized to `.`, so
+  `Config::new`, `Config#new`, and `Config.new` are one key), then each
+  shorter suffix of at least two segments (`qualified_candidates`), since
+  qualified names drop the module: `config::Config::new` finds
+  `Config.new`. Only when nothing has any of those qualified names does
+  the last segment go through the
+  plain `WHERE name = ?1 OR id = ?1` lookup, and only for a `::` or `#`
+  path: a `.`-only path with no qualified match is text (`Cargo.lock`,
+  `self.config`) and keeps grepping. Both are `LIMIT 9`: only
+  1–8 rows trigger the deny; 0 is a non-indexed name, 9+ is too
+  ambiguous to be a useful neighborhood. The deny reason suggests the
+  path as typed, so `engraph subgraph Config::new` resolves the same
+  single symbol even when bare `new` has dozens.
 - **Branch divergence** (`divergence.rs`): before denying, it runs
   `git diff --name-only <indexed commit> -- <matched files>` in the
   session's checkout (the hook payload's `cwd`). If the checkout has
@@ -1269,8 +1282,9 @@ but logs a warning if it ever happens.
 | 9 | `index_state` table: the commit each codegraph project was last indexed at (`engraph index` records `git stash create`, a commit of the working tree it indexed, else HEAD; it clears the row outside git), so lookups can detect files a worktree's branch has changed since (§5.5). |
 | 10 | `index_state` keyed by `(project, subtree)`: a monorepo sub-project index (§14) records its own commit; a run replaces the commits of subtrees nested under it. Table rebuilt (SQLite can't change a primary key); v9 rows become subtree `''`. Known gap: the commit is per subtree, not per indexer, so after a Rust-only root run a sub-project's TypeScript symbols (indexed by an earlier sub-project run) are checked against the root's newer commit, and a TypeScript change between the two runs goes unflagged. |
 | 11 | `index_state` records how each subtree was indexed: `source` (`drivers` run by engraph, or prebuilt `scip` / `manifest`), the `--lang` pin, and `bazel_symbols`, so `index --if-changed` repeats the same run (§8.0.1). Older rows default to a plain driver run. |
+| 12 | `entities.qualified_name` + `idx_entities_qualified_name`: the SCIP descriptors after the namespace joined with `.` (`Config.full_path_base`, `Config`), so `subgraph` and the grep redirect can match a qualified lookup (§5.5, §14.4). NULL until the project is indexed again; Bazel targets never have one. Names change in the same load, so v12 also clears the commit of every driver run (`source = 'drivers'`): git can't resolve `''`, which counts as changed, so the next SessionStart refresh re-indexes the project. Until then the per-file divergence check treats its files as changed, and greps on them pass through. Prebuilt SCIP subtrees keep their commit, since the refresh skips them; repos without an automatic refresh (linked worktrees, bare-repo layouts) need one manual `engraph index`. |
 
-(`SCHEMA_VERSION = 11`; the `MIGRATIONS` array has 11 entries.)
+(`SCHEMA_VERSION = 12`; the `MIGRATIONS` array has 12 entries.)
 
 ---
 
@@ -1286,8 +1300,8 @@ the modules they exercise; cross-cutting behavior lives under
 | `engraph-compress` | The compress pipeline is idempotent (a second pass is a no-op), stamps the sentinel header, and reduces ratio below 1 on realistic input. The ranker is deterministic. Per-filter tests pin token-reduction ratios for every command in the dispatcher and check picker↔FilterOutput id agreement. A separate golden-fixture pass guards byte-exact output drift for high-signal filters (git log, cargo check, cargo-nextest). The read-bucket tests cover per-language comment stripping, no head/tail re-windowing, and the empty-filter fallback. |
 | `engraph-retrieve` | FTS query sanitization, scope filtering applied in WHERE not in Rust. Behind the `embeddings` feature: RRF re-ranking actually changes order vs FTS-only, recency tiebreaks toward newer items, missing embeddings produce zero contribution rather than worst-rank, and embedding upserts are idempotent. |
 | `engraph-ingest` | M2-style partial-trailing-line handling on every JSONL chunk; rotation/truncation detection that replays the new file from offset zero; sidechain events are dropped; the per-file transaction commits or rolls back atomically; the compress-existing sweep keeps FTS pointed at the original hash so recall doesn't lose pre-compression matches; an ingest → recall round-trip (`tests/ingest_retrieve_roundtrip.rs`) covers scoped queries and entity search. |
-| `engraph-codegraph` | The SCIP loader's two-pass classifier emits CALLS edges, is idempotent under re-load, and scopes its DELETE to the current project (cross-repo loads don't trample each other). The subgraph renderer covers the four-section markdown shape, disambiguation on ambiguous names, byte-cap truncation, and the cross-repo `repo:<name>` annotation. Driver detection is unit-pinned per build system. Driver end-to-end tests under `tests/drivers_live.rs` soft-skip when the indexer or build tool is absent. Bazel coverage splits into target-level (JSON-proto parsing, location parser, idempotent re-index, target/dep round-trip) and symbol-level (SCIP byte-stream merge that preserves `documents` + `external_symbols`, lang-status display, and a triple-gated live Java integration test). |
-| `engraph-cli` | The Claude Code hooks are integration-tested against the binary. Pre-bash covers every parser shape (sudo, env prefix, absolute path, `git -C`, heredoc, unquoted shell metachars). Pre-grep exercises the subgraph-redirect gate (1–8 match, regex shape, short patterns, ambiguous resolution), and `index_divergence.rs` covers the indexed commit plus the branch-divergence passthrough and subgraph note. Post-read pins the `additionalContext` shape, the no-signature passthrough, and the unindexed-file no-op. Session-start tests the brief content + byte cap. `engraph run` is tested for budget charging, stdin inheritance, and concurrent pipe drain without deadlock under large output. |
+| `engraph-codegraph` | The SCIP loader's two-pass classifier emits CALLS edges, is idempotent under re-load, and scopes its DELETE to the current project (cross-repo loads don't trample each other). Names come from the id's last SCIP descriptor (`Config`, not `Config#`), a re-load replaces a stored name (also one a reference's placeholder guessed before the definition loaded), and `qualified_name` is written for symbols and placeholders. The subgraph renderer covers the four-section markdown shape, disambiguation on ambiguous names (qualified names, ordered: caller's project, non-test files, types before members), lookups by `Config::x` / `Config#x` / `Config.x`, byte-cap truncation, and the cross-repo `repo:<name>` annotation. Driver detection is unit-pinned per build system. Driver end-to-end tests under `tests/drivers_live.rs` soft-skip when the indexer or build tool is absent. Bazel coverage splits into target-level (JSON-proto parsing, location parser, idempotent re-index, target/dep round-trip) and symbol-level (SCIP byte-stream merge that preserves `documents` + `external_symbols`, lang-status display, and a triple-gated live Java integration test). |
+| `engraph-cli` | The Claude Code hooks are integration-tested against the binary. Pre-bash covers every parser shape (sudo, env prefix, absolute path, `git -C`, heredoc, unquoted shell metachars). Pre-grep exercises the subgraph-redirect gate (1–8 match, regex shape, short patterns, ambiguous resolution, qualified path shapes matched by `qualified_name` first), and `index_divergence.rs` covers the indexed commit plus the branch-divergence passthrough and subgraph note. Post-read pins the `additionalContext` shape, the no-signature passthrough, and the unindexed-file no-op. Session-start tests the brief content + byte cap. `engraph run` is tested for budget charging, stdin inheritance, and concurrent pipe drain without deadlock under large output. |
 
 Live-binary tests in `engraph-codegraph/tests/drivers_live.rs`,
 `bazel_live.rs`, and `bazel_symbols_live.rs` soft-skip when the external
@@ -1496,6 +1510,22 @@ and builds `HashMap<String, Kind>`. **Pass 2** walks
   Document.relative_path`, `line_range = "{start+1}:{end+1}"` (SCIP
   ranges are 0-based; engraph stores 1-based for editor compatibility),
   `signature` from `SymbolInformation.signature_documentation.text`.
+  `name` is `SymbolInformation.display_name` when the indexer sets it;
+  rust-analyzer and scip-python (and some TypeScript and Java symbols)
+  don't, so it falls back to the id parsed with the `scip` crate's
+  `parse_symbol`: the name of the last descriptor without its suffix
+  character (`…/Config#` → `Config`, `…/Config#full_path_base().` →
+  `full_path_base`, `…/assert_eq_printed!` → `assert_eq_printed`). Ids
+  the grammar rejects get the old textual trim. The same parse yields
+  `qualified_name`: the descriptors after the namespace, joined with `.`
+  (`Config.full_path_base`; `load` for a free function). rust-analyzer's
+  impl blocks are a type descriptor named `impl` plus type parameters
+  (self type, then trait): members take the self type without its
+  generics (`impl#[Batch]new().` → `Batch.new`,
+  `impl#[UppercaseVisitor][Visitor]finish().` → `UppercaseVisitor.finish`),
+  and the block itself is named `impl Batch` / `impl Visitor for
+  UppercaseVisitor` with no qualified name, so it never answers a lookup
+  of the type's name. Local symbols have no qualified name.
 - `Import` role set → `IMPORTS` edge.
 - Non-definition, target kind ∈ {Function, Method, Constructor,
   StaticMethod, AbstractMethod, Macro} → `CALLS`.
@@ -1534,8 +1564,14 @@ callers (`open_pool` etc.) instead of nearby variable names.
    on re-index; an explicit IN-list would silently leak unknown kinds
    across runs.
 2. Bulk re-insert from the current SCIP run. Entities are upserted;
-   `file_path` / `line_range` / `signature` are refreshed on conflict
-   so a real definition takes ownership from any earlier placeholder.
+   `name` / `qualified_name` / `project` are replaced and
+   `file_path` / `line_range` / `signature` are refreshed on conflict,
+   so a real definition takes ownership from any earlier placeholder —
+   including its name: a reference loaded before the definition writes
+   a placeholder named from the id alone (`ensure_placeholder_entity`,
+   `INSERT OR IGNORE`), and document order varies between runs
+   (scip-java converts in parallel), so without the replacement the same
+   snapshot could yield different names on different runs.
 3. When GC is enabled, delete project-owned `symbol` rows that are absent
    from the new SCIP blob and have no remaining relations. This removes
    moved/renamed stale definitions without dropping current edgeless
@@ -1567,11 +1603,29 @@ items (per-indexer rules, symbol-stability test suite).
 
 ### 14.4 Subgraph query + markdown
 
-`subgraph_for(conn, symbol, max_nodes)` returns a `Neighborhood`:
+`subgraph_for(conn, symbol, max_nodes)` (and `subgraph_for_in`, which
+also takes the caller's project key — the CLI passes
+`canonical_repo_key(cwd)`) returns a `Neighborhood`:
 
-1. **Resolve** name → entity row(s) via `WHERE name = ?1 OR id = ?1`.
-   More than one match → emit a disambiguation block, no edges.
-   No "best guess".
+1. **Resolve** the input → entity row(s) via `WHERE name = ?1 OR id = ?1
+   OR qualified_name = ?2`, where `?2` is the input with `::` and `#`
+   turned into `.` and a trailing separator dropped: `Config`,
+   `Config::full_path_base`, `Config#full_path_base`, and
+   `Config.full_path_base` all work, and `Config::new` finds one symbol
+   when bare `new` has many. With no match, `?2` becomes each shorter
+   suffix of at least two segments, longest first (`qualified_candidates`):
+   `crate::config::Config::new` and a Java FQN find `Config.new`, and
+   `x::Outer::Config::new` prefers `Outer.Config.new`. Global symbols shadow `local N` ones of the
+   same project (`MATCH_WHERE_SQL`, shared with the grep redirect): rust-analyzer
+   gives local variables a `display_name`, and a `let full_path_base`
+   must not make the `Config.full_path_base` field ambiguous; a name
+   only locals have (a TypeScript local function) still resolves, and
+   locals have no `qualified_name`. `LIMIT 8`, ordered so the useful rows
+   survive the cap: exact moniker, then the caller's project, then files
+   that aren't tests (`test`/`spec` in the path), then types (id ending
+   in `#`) before members, then by qualified name and file.
+   More than one match → emit a disambiguation block listing each
+   match's qualified name and location, no edges. No "best guess".
 2. **Outgoing** (CALLS / REFERENCES / IMPORTS): join `relations` and
    `entities` on `dst_entity`, filter `r.src_entity = ?` and
    `r.valid_to IS NULL`, limit `max_nodes / 2`.
