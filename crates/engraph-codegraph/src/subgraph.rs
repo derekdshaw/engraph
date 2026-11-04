@@ -138,14 +138,17 @@ const TEST_PATH_SQL: &str =
 
 /// The entities a lookup names: by name, by exact moniker, or by qualified
 /// name (`?1` is the input, `?2` its `normalize_qualified` form). Global
-/// symbols shadow `local N` ones: rust-analyzer names local variables, and a
-/// `let full_path_base` must not make the `Config.full_path_base` field
-/// ambiguous. Locals alone (a TypeScript local function) still match.
+/// symbols shadow `local N` ones of their own project: rust-analyzer names
+/// local variables, and a `let full_path_base` must not make the
+/// `Config.full_path_base` field ambiguous. Locals alone (a TypeScript local
+/// function), or in a project without that global, still match. The query
+/// using it must select `FROM entities` without an alias.
 pub const MATCH_WHERE_SQL: &str = "(name = ?1 OR id = ?1 OR qualified_name = ?2)
     AND (id NOT LIKE 'local %'
          OR NOT EXISTS (SELECT 1 FROM entities g
                         WHERE (g.name = ?1 OR g.id = ?1 OR g.qualified_name = ?2)
-                          AND g.id NOT LIKE 'local %'))";
+                          AND g.id NOT LIKE 'local %'
+                          AND g.project IS entities.project))";
 
 fn resolve_matches(
     conn: &PooledConn,
@@ -729,6 +732,27 @@ mod tests {
         let n = subgraph_for(&conn, "only_local", 30).unwrap();
         assert_eq!(n.matches.len(), 1);
         assert_eq!(n.matches[0].id, "local 5");
+    }
+
+    #[test]
+    fn a_global_shadows_locals_only_in_its_own_project() {
+        // A global `full_path_base` in project /a must not hide a local of
+        // the same name in project /b (a TypeScript local function there).
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, qualified_name, project, file_path, line_range)
+             VALUES ('ra config/Config#full_path_base.', 'symbol', 'full_path_base',
+                     'Config.full_path_base', '/a', 'src/config.rs', '17:17'),
+                    ('local 7', 'symbol', 'full_path_base', NULL, '/b', 'src/app.ts', '3:9')",
+            [],
+        )
+        .unwrap();
+        let n = subgraph_for(&conn, "full_path_base", 30).unwrap();
+        let ids: Vec<&str> = n.matches.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert!(ids.contains(&"local 7"), "{ids:?}");
     }
 
     #[test]

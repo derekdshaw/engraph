@@ -1609,8 +1609,8 @@ also takes the caller's project key — the CLI passes
    turned into `.` and a trailing separator dropped: `Config`,
    `Config::full_path_base`, `Config#full_path_base`, and
    `Config.full_path_base` all work, and `Config::new` finds one symbol
-   when bare `new` has many. Global symbols shadow `local N` ones
-   (`MATCH_WHERE_SQL`, shared with the grep redirect): rust-analyzer
+   when bare `new` has many. Global symbols shadow `local N` ones of the
+   same project (`MATCH_WHERE_SQL`, shared with the grep redirect): rust-analyzer
    gives local variables a `display_name`, and a `let full_path_base`
    must not make the `Config.full_path_base` field ambiguous; a name
    only locals have (a TypeScript local function) still resolves, and
