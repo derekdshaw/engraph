@@ -9,11 +9,10 @@ of the plans.
 - **Complete (part 1, 2026-11-03):** `engraph subgraph` and the grep redirect
   find Rust and Python types and methods by their usual names, for example
   `Config` and `full_path_base`.
-- **Complete (part 2, 2026-11-06):** Python graphs have `CALLS` and
-  `REFERENCES` relations. TypeScript graphs also have them again:
-  scip-typescript 0.4.0 sets no kind either.
+- **Complete (part 2, 2026-11-08):** Python graphs have `CALLS` and
+  `REFERENCES` relations.
 - A sub-project index writes only the files of that sub-project.
-- **Complete (part 4, 2026-11-06):** SCIP local symbols do not replace
+- **Complete (part 4, 2026-11-08):** SCIP local symbols do not replace
   each other between files.
 - The Bazel Go message shows the Go targets that engraph did not index.
 - The error message of a failed indexer shows the error, also when the
@@ -102,7 +101,7 @@ corrects this also.
 
 ### Bug 2: Python graphs have no `CALLS` and no `REFERENCES`
 
-**Corrected by part 2 (branch `plan01-part2-python-relations`).** The text
+**Corrected by part 2 (branch `plan01-parts-2-4`).** The text
 below gives the condition before the correction.
 
 On `click-python` and `requests-python`, the only relations are `IMPLEMENTS`
@@ -154,7 +153,7 @@ is not done with the merged code.
 
 ### Bug 4: SCIP local symbols replace each other
 
-**Corrected by part 4 (branch `plan01-part4-local-symbols`).** The text
+**Corrected by part 4 (branch `plan01-parts-2-4`).** The text
 below gives the condition before the correction. After part 1, the upsert
 also replaces `name`, so the name and the signature of a row are from the
 same document. The rows still replace each other (refer to part 4).
@@ -386,31 +385,35 @@ Validation of part 1:
 
 ### Part 2: Python relations (bug 2)
 
-**Complete.** Steps 1 to 3 are done. The validation used scip-python 0.6.6,
-rust-analyzer 1.99.1 (with `rust-src`), and scip-java 0.10.3.
+**Complete.** Steps 1 to 3 are done. The validation (2026-11-08) used
+scip-python 0.6.8, scip-typescript 0.6.0, scip-java 0.12.3, scip-go 0.2.7,
+and rust-analyzer 1.99.1. A first validation (2026-11-06) used
+scip-python 0.6.6, scip-typescript 0.4.0, and scip-java 0.10.3; its
+TypeScript results do not apply to scip-typescript 0.6.0 (last item).
 
-- Steps 4 and 8: `click-python` `CALLS` 4,114, `IMPLEMENTS` 267, and
-  `REFERENCES` 4,586; `requests-python` `CALLS` 631, `IMPLEMENTS` 64, and
-  `REFERENCES` 1,217. Steps 5 and 8: `0`. Steps 6 and 9: the output has
+- Steps 4 and 8: `click-python` `CALLS` 3,599, `IMPLEMENTS` 267, and
+  `REFERENCES` 4,455; `requests-python` `CALLS` 616, `IMPLEMENTS` 64, and
+  `REFERENCES` 1,177. Steps 5 and 8: `0`. Steps 6 and 9: the output has
   `**Called by**` (`get_best_encoding`: 3 callers; `to_native_string`: 7).
 - Step 11: `fd-rust` `CALLS` 2,943 and `REFERENCES` 2,353 with the two
-  binaries, the same as on 2026-11-02. `jsoup-java`: `IMPLEMENTS` 1,729 and
-  `REFERENCES` 24,906 with the two binaries; `CALLS` 36,908 (`main`) and
-  36,912 (branch). The difference is not from this part. A load of one SCIP
-  file with the `main` binary gives 36,909 to 36,912 `CALLS` in different
-  runs. All edges that are different touch a `local N` symbol (bug 4), and
-  anchors with the same line and specificity come from a `HashMap` in a
-  different sequence in each process. A load of the same SCIP file with
-  the two binaries gives the same counts for `fd-rust` and `jsoup-java`.
-- `cobra-go` was not validated: Go and scip-go were not available.
-- Also found: scip-typescript 0.4.0 sets no kind on any symbol, so
-  TypeScript graphs had the same bug. Part 2 corrects it too. With the
-  `main` binary, `ky-typescript` has only `IMPLEMENTS` (34), and
-  `hono-typescript` only `IMPLEMENTS` (204). With this part, `ky-typescript`
-  has `CALLS` 474 and `REFERENCES` 1,708, and no relation from or to a
-  parameter; `hono-typescript` has `CALLS` 13,044 and `REFERENCES` 27,504.
-  `subgraph isForceRetryError` shows the callers `#run`,
-  `#calculateRetryDelay`, and `#retryFromError` in `Ky.ts`.
+  binaries. `cobra-go`: `CALLS` 4,686 and `IMPLEMENTS` 19 with the two
+  binaries; `REFERENCES` 1,534 → 1,526. The 8 edges are edges of `local`
+  symbols (21 → 13), a change of part 4. `jsoup-java` was not indexed
+  again with scip-java 0.12.3. With 0.10.3: `IMPLEMENTS` 1,729 and
+  `REFERENCES` 24,906 with the two binaries; `CALLS` 36,915 → 36,897, also
+  from part 4 (refer to "Validation of parts 2 and 4 together").
+- Many new Python callers are not correct. The loader gives each
+  occurrence to the nearest anchor above it, so a decorator and
+  module-level code go to the function above them. A check of the
+  `CALLS` and `REFERENCES` edges against the Python AST: `requests-python`
+  1,539 of 1,657 correct (92.9%), `click-python` 6,380 of 7,913 (80.6%).
+  For example, `check_compatibility` at `src/requests/__init__.py:113`
+  (module level) has the caller `_check_cryptography`. The correction
+  (`enclosing_range`) is a separate pull request.
+- scip-typescript 0.6.0 sets a kind on every symbol, locals included, so
+  part 2 does not change TypeScript graphs. scip-typescript 0.4.0 sets no
+  kind: with it, the `main` binary gave `ky-typescript` and
+  `hono-typescript` only `IMPLEMENTS`.
 
 1. Write a loader test with a document in which no symbol has a kind:
    - a class `pkg/C#`,
@@ -509,35 +512,54 @@ Validation of part 3:
 - Validation step 8 uses `substr(id, instr(id, '@') + 18)`: the path
   follows the `@`, the 16-digit tag, and `:`.
 
-Validation (scip-typescript 0.4.0, scip-java 0.10.3, rust-analyzer 1.99.1
-with `rust-src`):
+Validation (2026-11-08: scip-typescript 0.6.0, scip-java 0.12.3,
+rust-analyzer 1.99.1 with `rust-src`):
 
 | Project | Step 2 → step 9 (relations) | Step 3 → step 10 (`local` entities) |
 |---|---|---|
 | `fd-rust` | `CALLS` 2,943 → 2,943; `REFERENCES` 2,353 → 2,353 | 224 → 1,067 |
-| `jsonpath-java` | `CALLS` 11,247 → 10,984; `IMPLEMENTS` 1,506 → 1,506; `REFERENCES` 8,888 → 8,888 | 161 → 3,376 |
-| `hono-typescript` | `IMPLEMENTS` 204 → 204 | 2,801 → 18,544 |
+| `jsonpath-java` | `CALLS` 11,002 → 10,984; `IMPLEMENTS` 1,506 → 1,506; `REFERENCES` 8,888 → 8,888 | 161 → 3,376 |
+| `hono-typescript` | `CALLS` 7,120 → 4,702; `IMPLEMENTS` 109 → 109; `REFERENCES` 12,401 → 9,609 | 2,826 → 18,478 |
 
-- Steps 5, 7, and 8: `0` in the three copies. Step 4 also tested the
-  migration: the `fd-rust` database of the `main` binary (v12) became v13.
+- Steps 5, 7, and 8: `0` in the three copies, and also in `cobra-go`,
+  `zap-go`, `ky-typescript`, `click-python`, and `requests-python`. The
+  migration was also tested on a copy of a live v12 database: 281 old
+  `local` rows → 0, and `PRAGMA foreign_key_check` gives no rows.
+- Step 9 is not true for `hono-typescript`: the counts are less. The
+  edges that the branch does not write are not correct. 3,407 `CALLS` and
+  4,984 `REFERENCES` came from the old `local N` rows (one row with the
+  edges of all documents), and 674 `CALLS` went to a parameter. The branch
+  adds 655 `CALLS` and 2,083 `REFERENCES` from global anchors, and 1,039
+  `CALLS` and 1,045 `REFERENCES` from the locals of each document. The
+  symbols that have a caller: 155 → 150. Of the 9 that have no caller now,
+  the 6 that were examined had only an incorrect caller, for example
+  `local 195` in `src/utils/types.test.ts`.
+- `ky-typescript` (not a step): `CALLS` 478 → 263. 216 of the 221 edges
+  that the branch does not write went to a parameter. In `ky-typescript`,
+  `jsonpath-java`, and `fd-rust`, no symbol loses its callers.
+- `zap-go` and `cobra-go` (not a step): the counts are in part 2. Go ids
+  include the commit of the baseline, so the edges of two indexes were
+  not compared one by one.
 - Step 11: `0`. Without steps 3 and 4, 12 of the 30 entries of that list
-  are `let` variables.
-- `jsonpath-java` `CALLS`: 249 of the 263 are different SCIP files from two
-  scip-java runs. A load of one SCIP file gives 10,998 (`main`) and 10,984
-  (branch). The 14 edges that the branch does not write are not correct:
-  for example 7 `CALLS` from `item()` of an anonymous class in
-  `IssuesTest.java:815`, which calls nothing. Also, 139 edges move from a
-  method to the local method of an anonymous class that contains the call.
-- `hono-typescript`: scip-typescript 0.4.0 sets no kind, so with the `main`
-  binary (without part 2) no TypeScript symbol is an anchor. With parts 2
-  and 4 (step 9): `CALLS` 13,044, `IMPLEMENTS` 204, and `REFERENCES`
-  27,504. A load of one SCIP file with the binary of part 2 only and with
-  the binary of parts 2 and 4 gives the same relations (`CALLS` 13,042,
-  `REFERENCES` 27,504): part 4 changes only the local rows (2,809 →
-  18,544). scip-typescript gives no kind to local symbols, so a TypeScript
-  local function is not an anchor.
-- `jsoup-java` (not a step): with `main`, 1,306 of 2,121 edges from a local
-  anchor go to a name that is not in the file of the anchor. For example,
+  are `let` variables. Also, the list leaves out a local that has only its
+  number as a name: scip-typescript gives locals no display name, so a
+  local function is `8`, and `subgraph 8` gives nothing useful.
+- Also changed: the grep redirect. Each document has its own local rows,
+  so a variable name in a few files has 1 to 8 matches, and the redirect
+  denies the search; `subgraph` then shows only a list of locations.
+  `MATCH_WHERE_SQL` now matches a local only when a relation goes from it.
+  The names that only locals have and that have 1 to 8 matches: `fd-rust`
+  44 (`main`) → 0, `cobra-go` 87 → 1, `zap-go` 44 → 4, `jsonpath-java`
+  17 → 0. Without this change: 169, 345, 427, and 357.
+- The database becomes larger: `hono-typescript` 15.3 MB → 23.3 MB,
+  `jsonpath-java` 16.8 → 19.6, `zap-go` 6.7 → 8.9, `cobra-go` 5.0 → 6.3,
+  `fd-rust` 4.0 → 4.5. Only 0% to 1.6% of the local rows have a relation.
+- Not corrected: a document with only local symbols has no scheme, so its
+  locals get `scheme` NULL, and a load never removes them (also not after
+  the file is deleted). No such row was found in the test projects.
+- `jsoup-java` (not a step, 2026-11-06, scip-java 0.10.3): with `main`,
+  1,306 of 2,121 edges from a local anchor go to a name that is not in the
+  file of the anchor. For example,
   `subgraph 'NodeEvaluator.MatchesValue.<init>'` shows the caller `tail`
   in `NodeTest.java:476`. With the branch: 79 of 3,341, all
   constructors (`<init>`, a name that is not in the source text), and the
@@ -595,7 +617,8 @@ Validation of part 4:
 
 ### Validation of parts 2 and 4 together
 
-On 2026-11-06, after the merge of the two parts, all validation steps of
+On 2026-11-06 (scip-typescript 0.4.0, scip-java 0.10.3), after the merge of
+the two parts, all validation steps of
 parts 2 and 4 were done again, in sequence, on new copies. The `main`
 binary is the binary before the two parts. The results are the same as the
 results of each part, with these notes:

@@ -1540,8 +1540,7 @@ and builds `HashMap<String, Kind>`. **Pass 2** walks
   StaticMethod, AbstractMethod, Macro} → `CALLS`.
 - Non-definition, target kind ∈ {Class, Struct, Interface, Trait, Enum,
   TypeAlias, Type, Protocol} → `REFERENCES`.
-- Target kind not set (scip-python and scip-typescript set no kind at
-  all; cross-crate targets often have no `SymbolInformation`) → the
+- Target kind not set (scip-python sets no kind at all; cross-crate targets often have no `SymbolInformation`) → the
   suffix of the id's last descriptor decides (see *Suffix-fallback kind
   detection*, §14.7): a method gives `CALLS`, a type `REFERENCES`.
 - Any other target (Variable, Parameter, Field, …, or a term, parameter,
@@ -1564,9 +1563,10 @@ indexer sets no kind, the suffix of the definition's last descriptor
 (`parse_symbol`) gives it: a method (`…().`) is anchorable like a
 function, a type (`…#`) like a class, a namespace (`…/`) like a module;
 parameters, terms, and locals are not. scip-python sets no kind on any
-symbol (and scip-typescript 0.4.0 sets none either), so without this
-fallback no definition in their indexes was an anchor, and their graphs
-had only `IMPLEMENTS` edges.
+symbol, so without this fallback no definition in its indexes was an
+anchor, and Python graphs had only `IMPLEMENTS` edges. (scip-typescript
+0.4.0 sets no kind either; 0.6.0 sets one on every symbol, locals
+included.)
 
 **Idempotent atomic swap.** A `TxGuard` (same pattern as
 `engraph-ingest`) wraps the whole load:
