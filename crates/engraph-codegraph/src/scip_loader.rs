@@ -371,6 +371,7 @@ fn load_document(
                     &rel.symbol,
                     RelationKind::Implements,
                     "extracted",
+                    None,
                 )?;
                 stats.relations_inserted += 1;
             } else if rel.is_reference {
@@ -380,6 +381,7 @@ fn load_document(
                     &rel.symbol,
                     RelationKind::Extends,
                     "extracted",
+                    None,
                 )?;
                 stats.relations_inserted += 1;
             }
@@ -468,7 +470,14 @@ fn load_document(
             // adding signal.
             continue;
         }
-        insert_relation(conn, &src_sym, &occ.symbol, rel_kind, provenance)?;
+        insert_relation(
+            conn,
+            &src_sym,
+            &occ.symbol,
+            rel_kind,
+            provenance,
+            Some(start_line + 1),
+        )?;
         stats.relations_inserted += 1;
     }
 
@@ -497,18 +506,22 @@ fn nearest_enclosing(def_anchors: &[(i32, u8, String)], occ_line: i32) -> Option
     best.map(|(_, _, s)| s.to_string())
 }
 
+/// `line`: the 1-based line of the occurrence the edge comes from, in the
+/// document of `src`; `None` for an edge from a `SymbolInformation`
+/// relationship, which has no occurrence.
 fn insert_relation(
     conn: &PooledConn,
     src: &str,
     dst: &str,
     kind: RelationKind,
     provenance: &str,
+    line: Option<i32>,
 ) -> Result<()> {
     let id = Uuid::now_v7().to_string();
     conn.execute(
-        "INSERT INTO relations (id, src_entity, dst_entity, kind, provenance, confidence)
-         VALUES (?1, ?2, ?3, ?4, ?5, 1.0)",
-        rusqlite::params![id, src, dst, kind.as_str(), provenance],
+        "INSERT INTO relations (id, src_entity, dst_entity, kind, provenance, confidence, line)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1.0, ?6)",
+        rusqlite::params![id, src, dst, kind.as_str(), provenance, line],
     )?;
     Ok(())
 }

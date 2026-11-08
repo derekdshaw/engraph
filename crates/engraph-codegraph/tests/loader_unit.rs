@@ -694,3 +694,41 @@ fn the_loader_writes_the_scheme_of_each_symbol() {
         assert_eq!(scheme.as_deref(), Some("scip-test"));
     }
 }
+
+#[test]
+fn loader_records_the_line_of_each_occurrence_edge() {
+    // build_fixture: foo() calls bar() on line 5 (0-based), so line 6.
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/demo", &build_fixture()).unwrap();
+    let line: Option<i64> = conn
+        .query_row("SELECT line FROM relations WHERE kind = 'CALLS'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(line, Some(6));
+
+    // An edge from SymbolInformation.relationships has no occurrence.
+    let mut doc = Document::new();
+    doc.relative_path = "src/impl.rs".to_string();
+    let mut class = sym(
+        "scip-test cargo demo 0.0.0 x/Impl#",
+        "Impl",
+        SymKind::Struct,
+    );
+    let mut rel = scip::types::Relationship::new();
+    rel.symbol = "scip-test cargo demo 0.0.0 x/Trait#".to_string();
+    rel.is_implementation = true;
+    class.relationships.push(rel);
+    doc.symbols = vec![class];
+    load(&conn, "/proj/demo", &index_of(vec![doc])).unwrap();
+    let line: Option<i64> = conn
+        .query_row(
+            "SELECT line FROM relations WHERE kind = 'IMPLEMENTS'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(line, None);
+}
