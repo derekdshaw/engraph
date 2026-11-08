@@ -408,8 +408,12 @@ TypeScript results do not apply to scip-typescript 0.6.0 (last item).
   `CALLS` and `REFERENCES` edges against the Python AST: `requests-python`
   1,539 of 1,657 correct (92.9%), `click-python` 6,380 of 7,913 (80.6%).
   For example, `check_compatibility` at `src/requests/__init__.py:113`
-  (module level) has the caller `_check_cryptography`. The correction
-  (`enclosing_range`) is a separate pull request.
+  (module level) has the caller `_check_cryptography`. Corrected after
+  part 2 (branch `scip-caller-scopes`): an occurrence after the end of an
+  anchor's `enclosing_range` does not go to that anchor. Then 8,157 of
+  8,157 (`click-python`) and 1,535 of 1,535 (`requests-python`) are
+  correct; module-level Python code has no relation, because a Python
+  module is not an anchor.
 - scip-typescript 0.6.0 sets a kind on every symbol, locals included, so
   part 2 does not change TypeScript graphs. scip-typescript 0.4.0 sets no
   kind: with it, the `main` binary gave `ky-typescript` and
