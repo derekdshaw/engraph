@@ -254,18 +254,32 @@ fn query_edges(
 /// All entities defined in `file_path` (of `project`, when given), ordered by
 /// line. Used by the PostToolUse(Read) augment to enrich Claude's view of a
 /// just-read file with the indexed-symbol map.
+/// The rows a list of a file's symbols shows (the post-read list, the
+/// sibling list): all but variables, parameters, and type parameters that
+/// no relation goes from, which only add tokens. Those are local symbols
+/// (`local 3@…`), and the global parameters (`…m().(self)`, the last
+/// descriptor ends with `)`) and type parameters (`…f().[T]`, ends with
+/// `]`) that scip-python and scip-typescript write. A rust-analyzer impl
+/// block (`…/impl#[Batch]`, named `impl Batch`) also ends with `]`, and
+/// stays; so does a local function, which anchors calls. Unqualified
+/// columns, for `entities` statements.
+const LISTED_IN_FILE: &str = "(NOT (id LIKE 'local %'
+          OR id LIKE '%)'
+          OR (id LIKE '%]' AND name NOT LIKE 'impl %'))
+     OR EXISTS (SELECT 1 FROM relations r WHERE r.src_entity = entities.id))";
+
 pub fn entities_in_file(
     conn: &PooledConn,
     project: Option<&str>,
     file_path: &str,
     limit: usize,
 ) -> Result<Vec<EntityRow>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, name, qualified_name, project, file_path, line_range, signature FROM entities
-         WHERE file_path = ?1 AND (?2 IS NULL OR project = ?2)
+         WHERE file_path = ?1 AND (?2 IS NULL OR project = ?2) AND {LISTED_IN_FILE}
          ORDER BY line_range
-         LIMIT ?3",
-    )?;
+         LIMIT ?3"
+    ))?;
     let rows = stmt
         .query_map(
             rusqlite::params![file_path, project, limit as i64],
@@ -283,12 +297,12 @@ fn query_siblings(
     file_path: &str,
     limit: usize,
 ) -> Result<Vec<EntityRow>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, name, qualified_name, project, file_path, line_range, signature FROM entities
-         WHERE file_path = ?1 AND project IS ?2 AND id != ?3
+         WHERE file_path = ?1 AND project IS ?2 AND id != ?3 AND {LISTED_IN_FILE}
          ORDER BY line_range
-         LIMIT ?4",
-    )?;
+         LIMIT ?4"
+    ))?;
     let rows = stmt
         .query_map(
             rusqlite::params![file_path, target.project, target.id, limit as i64],
@@ -724,6 +738,71 @@ mod tests {
             md.find("`Config.new`").unwrap() < md.find("`Fake.new`").unwrap(),
             "{md}"
         );
+    }
+
+    /// `src/walk.rs` with a function, a local variable (nothing goes from it),
+    /// and a local function (it calls `run`).
+    fn seed_locals(conn: &PooledConn) {
+        conn.execute_batch(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range, signature)
+             VALUES ('ra walk/run().', 'symbol', 'run', '/p', 'src/walk.rs', '1:1', 'fn run()'),
+                    ('local 1@t:src/walk.rs', 'symbol', 'count', '/p', 'src/walk.rs', '2:2', 'let count: usize'),
+                    ('local 2@t:src/walk.rs', 'symbol', 'visit', '/p', 'src/walk.rs', '3:3', 'fn visit()');
+             INSERT INTO relations (id, src_entity, dst_entity, kind)
+             VALUES ('r1', 'local 2@t:src/walk.rs', 'ra walk/run().', 'CALLS'),
+                    ('r2', 'ra walk/run().', 'local 1@t:src/walk.rs', 'REFERENCES');",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn file_lists_skip_locals_with_no_outgoing_relation() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        seed_locals(&conn);
+
+        // The post-read list.
+        let names: Vec<String> = entities_in_file(&conn, Some("/p"), "src/walk.rs", 30)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["run", "visit"]);
+
+        // The sibling list of `run`.
+        let n = subgraph_for(&conn, "run", 30).unwrap();
+        let siblings: Vec<&str> = n.siblings.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(siblings, vec!["visit"]);
+    }
+
+    #[test]
+    fn file_lists_skip_parameters_and_type_parameters() {
+        // scip-python and scip-typescript write parameters (`…m().(self)`)
+        // and type parameters (`…f().[T]`) as global symbols, not locals.
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute_batch(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range) VALUES
+                ('py m `a`/C#', 'symbol', 'C', '/p', 'a.py', '1:1'),
+                ('py m `a`/C#m().', 'symbol', 'm', '/p', 'a.py', '2:2'),
+                ('py m `a`/C#m().(self)', 'symbol', 'self', '/p', 'a.py', '2:2'),
+                ('py m `a`/C#m().(size)', 'symbol', 'size', '/p', 'a.py', '2:2'),
+                ('py m `a`/f().[T]', 'symbol', 'T', '/p', 'a.py', '5:5'),
+                ('py m `a`/f().', 'symbol', 'f', '/p', 'a.py', '5:5'),
+                ('ra cargo x 1 walk/impl#[Batch]', 'symbol', 'impl Batch', '/p', 'a.py', '8:8');",
+        )
+        .unwrap();
+        let names: Vec<String> = entities_in_file(&conn, Some("/p"), "a.py", 30)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["C", "m", "f", "impl Batch"]);
+        let n = subgraph_for(&conn, "C", 30).unwrap();
+        let siblings: Vec<&str> = n.siblings.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(siblings, vec!["m", "f", "impl Batch"]);
     }
 
     #[test]

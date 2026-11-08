@@ -54,10 +54,13 @@ impl Default for LoadOptions<'_> {
 /// The rows of `?1`'s project that a load may replace: symbols from the SCIP
 /// schemes (indexers) in this load — so another indexer's symbols survive —
 /// plus scheme-less legacy/placeholder rows, under the `?2` path prefix (empty
-/// for the whole project). Unqualified columns, for `entities` statements.
+/// for the whole project). A local symbol has no scheme in its id; its
+/// `scheme` column (the scheme of its document) decides. Unqualified columns,
+/// for `entities` statements.
 const IN_SCOPE: &str = "project = ?1
     AND (instr(id, ' ') = 0
-         OR substr(id, 1, instr(id, ' ') - 1) IN (SELECT s FROM current_scip_schemes))
+         OR substr(id, 1, instr(id, ' ') - 1) IN (SELECT s FROM current_scip_schemes)
+         OR (id LIKE 'local %' AND scheme IN (SELECT s FROM current_scip_schemes)))
     AND (?2 = '' OR substr(file_path, 1, length(?2)) = ?2)";
 
 /// The SCIP scheme (indexer name) a symbol starts with; `None` for
@@ -81,6 +84,55 @@ pub fn normalize_moniker(s: &str) -> &str {
     s
 }
 
+/// A SCIP local symbol (`local 0`) names a symbol only inside its document,
+/// and `entities.id` is one key for the whole database. Give each local the
+/// id `local <n>@<project tag>:<relative_path>`, so the `local 0` of two
+/// documents, or of two projects with the same file path, are different rows.
+/// The tag is [`project_tag`]. Changes the id in the document's symbols, their
+/// relationships, and its occurrences; the name still comes from the original
+/// id (`symbol_names` ignores the scope). The `local ` prefix stays, so
+/// `suffix_kind` still skips locals.
+fn scope_local_symbols(index: &mut Index, project: &str) {
+    let tag = project_tag(project);
+    for doc in &mut index.documents {
+        let scope = |symbol: &mut String| {
+            if symbol.starts_with("local ") && !symbol.contains('@') {
+                symbol.push_str(&format!("@{tag}:{}", doc.relative_path));
+            }
+        };
+        for info in &mut doc.symbols {
+            scope(&mut info.symbol);
+            for rel in &mut info.relationships {
+                scope(&mut rel.symbol);
+            }
+        }
+        for occ in &mut doc.occurrences {
+            scope(&mut occ.symbol);
+        }
+    }
+}
+
+/// The first 16 hex digits of the SHA-256 of a project key: a short, fixed
+/// part of a local symbol id that differs between projects.
+fn project_tag(project: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(project.as_bytes())
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// `local 7@<tag>:src/a.rs` → `local 7`: a local symbol id as the indexer
+/// wrote it. Other ids are unchanged.
+fn unscoped_local(symbol: &str) -> &str {
+    if symbol.starts_with("local ") {
+        symbol.split_once('@').map_or(symbol, |(id, _)| id)
+    } else {
+        symbol
+    }
+}
+
 pub fn load(conn: &PooledConn, project: &str, scip_bytes: &[u8]) -> Result<LoadStats> {
     load_with_options(conn, project, scip_bytes, LoadOptions::default())
 }
@@ -91,7 +143,8 @@ pub fn load_with_options(
     scip_bytes: &[u8],
     options: LoadOptions,
 ) -> Result<LoadStats> {
-    let index = Index::parse_from_bytes(scip_bytes).context("decoding SCIP protobuf")?;
+    let mut index = Index::parse_from_bytes(scip_bytes).context("decoding SCIP protobuf")?;
+    scope_local_symbols(&mut index, project);
 
     // Pass 1: gather every symbol's Kind across all documents (and the
     // external_symbols list). The CALLS vs REFERENCES distinction is based on
@@ -238,6 +291,7 @@ fn load_document(
     // the symbol below. Until then file_path = doc.relative_path,
     // line_range = NULL.
     let mut def_loc: HashMap<String, (i32, i32)> = HashMap::new(); // sym -> (start_line, end_line)
+    let doc_scheme = document_scheme(doc);
     let mut def_generated: HashMap<String, bool> = HashMap::new();
 
     for occ in &doc.occurrences {
@@ -261,12 +315,13 @@ fn load_document(
     // placeholder a reference wrote (`ensure_placeholder_entity`, which only
     // guesses from the id), or a row an older loader named differently.
     let mut entity_insert = conn.prepare_cached(
-        "INSERT INTO entities (id, kind, name, qualified_name, project, file_path, line_range, signature)
-         VALUES (?1, 'symbol', ?2, ?7, ?3, ?4, ?5, ?6)
+        "INSERT INTO entities (id, kind, name, qualified_name, project, file_path, line_range, signature, scheme)
+         VALUES (?1, 'symbol', ?2, ?7, ?3, ?4, ?5, ?6, ?8)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             qualified_name = excluded.qualified_name,
             project = excluded.project,
+            scheme = COALESCE(excluded.scheme, entities.scheme),
             file_path = COALESCE(excluded.file_path, entities.file_path),
             line_range = COALESCE(excluded.line_range, entities.line_range),
             signature = COALESCE(excluded.signature, entities.signature)",
@@ -297,6 +352,7 @@ fn load_document(
             line_range,
             signature,
             names.qualified,
+            symbol_scheme(&s.symbol, doc_scheme),
         ])?;
         stats.entities_inserted += 1;
 
@@ -307,7 +363,7 @@ fn load_document(
             if rel.symbol.is_empty() {
                 continue;
             }
-            ensure_placeholder_entity(conn, &rel.symbol, project)?;
+            ensure_placeholder_entity(conn, &rel.symbol, project, doc_scheme)?;
             if rel.is_implementation {
                 insert_relation(
                     conn,
@@ -351,7 +407,7 @@ fn load_document(
         .iter()
         .filter_map(|(sym, (start, _))| {
             let kind = sym_kind.get(sym).copied();
-            let spec = anchor_specificity(kind);
+            let spec = anchor_specificity(kind, sym);
             if spec == 0 {
                 None
             } else {
@@ -377,7 +433,7 @@ fn load_document(
         // Insert a placeholder entity row for it so the FK holds; the real
         // row (if present elsewhere in this Index) will overwrite via
         // ON CONFLICT.
-        ensure_placeholder_entity(conn, &occ.symbol, project)?;
+        ensure_placeholder_entity(conn, &occ.symbol, project, doc_scheme)?;
 
         let target_kind = sym_kind.get(&occ.symbol).copied();
         let provenance = if role_set(roles, SymbolRole::Generated) {
@@ -460,14 +516,46 @@ fn insert_relation(
 /// Insert a stub entity row for a referenced symbol that we haven't seen a
 /// SymbolInformation for in this Index. Keeps FK satisfied; later runs that
 /// do see the SymbolInformation will overwrite via ON CONFLICT.
-fn ensure_placeholder_entity(conn: &PooledConn, sym: &str, project: &str) -> Result<()> {
+fn ensure_placeholder_entity(
+    conn: &PooledConn,
+    sym: &str,
+    project: &str,
+    doc_scheme: Option<&str>,
+) -> Result<()> {
     let names = symbol_names(sym);
     conn.execute(
-        "INSERT OR IGNORE INTO entities (id, kind, name, qualified_name, project)
-         VALUES (?1, 'symbol', ?2, ?3, ?4)",
-        rusqlite::params![sym, names.name, names.qualified, project],
+        "INSERT OR IGNORE INTO entities (id, kind, name, qualified_name, project, scheme)
+         VALUES (?1, 'symbol', ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            sym,
+            names.name,
+            names.qualified,
+            project,
+            symbol_scheme(sym, doc_scheme)
+        ],
     )?;
     Ok(())
+}
+
+/// The scheme (indexer) of a document: that of its first global symbol, in
+/// its symbols, then in its occurrences (references to other packages carry
+/// the indexer's scheme too). `None` when the document has only locals.
+fn document_scheme(doc: &Document) -> Option<&str> {
+    doc.symbols
+        .iter()
+        .map(|s| s.symbol.as_str())
+        .chain(doc.occurrences.iter().map(|o| o.symbol.as_str()))
+        .find_map(scheme)
+}
+
+/// The `entities.scheme` of a symbol: the first word of a global id, and the
+/// scheme of the document for a local.
+fn symbol_scheme<'a>(symbol: &'a str, doc_scheme: Option<&'a str>) -> Option<&'a str> {
+    if symbol.starts_with("local ") {
+        doc_scheme
+    } else {
+        scheme(symbol)
+    }
 }
 
 fn role_set(bitset: i32, role: SymbolRole) -> bool {
@@ -495,7 +583,13 @@ fn is_callable_kind(k: Option<SymKind>) -> bool {
 /// matters more than the absolute numbers — Function beats Module so calls
 /// inside a function at line 0 anchor to the function, not to the enclosing
 /// crate module.
-fn anchor_specificity(k: Option<SymKind>) -> u8 {
+///
+/// When the indexer sets no kind (scip-python sets none), the suffix of the
+/// symbol's last descriptor gives it: a method (`…().`) is 100, a type (`…#`)
+/// 50, a namespace or package (`…/`) 10. Parameters, terms, locals, and ids
+/// the SCIP grammar rejects are not anchors.
+fn anchor_specificity(k: Option<SymKind>, symbol: &str) -> u8 {
+    use scip::types::descriptor::Suffix;
     match k {
         Some(SymKind::Method)
         | Some(SymKind::StaticMethod)
@@ -509,8 +603,22 @@ fn anchor_specificity(k: Option<SymKind>) -> u8 {
         | Some(SymKind::Trait)
         | Some(SymKind::Enum) => 50,
         Some(SymKind::Module) | Some(SymKind::Namespace) | Some(SymKind::Package) => 10,
+        None | Some(SymKind::UnspecifiedKind) => match last_suffix(symbol) {
+            Some(Suffix::Method) => 100,
+            Some(Suffix::Type) => 50,
+            // Namespace and Package share one enum value in SCIP.
+            Some(Suffix::Namespace) => 10,
+            _ => 0,
+        },
         _ => 0,
     }
+}
+
+/// The suffix of a symbol's last descriptor (`Method` for `…/C#m().`,
+/// `Parameter` for `…/C#m().(self)`); `None` when the id does not follow the
+/// SCIP grammar.
+fn last_suffix(symbol: &str) -> Option<scip::types::descriptor::Suffix> {
+    parsed_descriptors(symbol)?.last()?.suffix.enum_value().ok()
 }
 
 fn is_type_kind(k: Option<SymKind>) -> bool {
@@ -528,19 +636,34 @@ fn is_type_kind(k: Option<SymKind>) -> bool {
 }
 
 /// Last-resort kind guess from a SCIP symbol's descriptor suffix. SCIP
-/// descriptors encode kind in their trailing punctuation:
-///   - `()` or `().` → method / function
-///   - `#`           → class / struct / interface / trait / enum / typealias
-///   - everything else (`. `, `:`, `[…]`, `local …`) → unknown / low-signal
+/// descriptors encode kind in their trailing punctuation; the suffix of the
+/// last descriptor (`parse_symbol`) gives:
+///   - method (`().`)  → CALLS (function / method)
+///   - type (`#`)      → REFERENCES (class / struct / interface / trait / enum)
+///   - everything else → no relation: terms (`.`), parameters (`(x)`), type
+///     parameters (`[T]`), meta (`:`), macros (`!`), and locals
 ///
-/// This is used when `SymbolInformation.kind` isn't available, which is
-/// common for cross-crate references when the indexer was pointed at only
-/// the consumer crate. Without this fallback the loader drops cross-crate
-/// CALLS edges entirely (the Phase 2.2 cross-repo regression we hit).
+/// A parameter id also ends with `)` (`…/C#m().(self)`), so the grammar, not
+/// the last character, has to tell it from a method. Ids the grammar rejects
+/// fall back to that textual check.
+///
+/// This is used when `SymbolInformation.kind` isn't available: scip-python
+/// sets no kind at all, and cross-crate references often have none when the
+/// indexer was pointed at only the consumer crate. Without this fallback the
+/// loader drops cross-crate CALLS edges entirely (the Phase 2.2 cross-repo
+/// regression we hit).
 fn suffix_kind(symbol: &str) -> Option<RelationKind> {
+    use scip::types::descriptor::Suffix;
     // Skip locals — they're per-document and never navigable cross-repo.
     if symbol.starts_with("local ") {
         return None;
+    }
+    if let Some(descriptors) = parsed_descriptors(symbol) {
+        return match descriptors.last().and_then(|d| d.suffix.enum_value().ok()) {
+            Some(Suffix::Method) => Some(RelationKind::Calls),
+            Some(Suffix::Type) => Some(RelationKind::References),
+            _ => None,
+        };
     }
     // Trim a trailing `.` (definition disambiguator) so `foo().` matches.
     let trimmed = symbol.trim_end_matches('.');
@@ -602,6 +725,7 @@ struct SymbolNames {
 /// Both names from one parse of the id.
 fn symbol_names(moniker: &str) -> SymbolNames {
     use scip::types::descriptor::Suffix;
+    let moniker = unscoped_local(moniker);
     let Some(descriptors) = parsed_descriptors(moniker) else {
         return SymbolNames {
             name: fallback_display_name_textual(moniker),
@@ -750,6 +874,89 @@ mod tests {
     }
 
     #[test]
+    fn anchor_specificity_uses_the_descriptor_suffix_without_a_kind() {
+        let py = |d: &str| format!("scip-python python demo 0 `pkg.mod`/{d}");
+        for kind in [None, Some(SymKind::UnspecifiedKind)] {
+            assert_eq!(anchor_specificity(kind, &py("C#m().")), 100);
+            assert_eq!(anchor_specificity(kind, &py("f().")), 100);
+            assert_eq!(anchor_specificity(kind, &py("C#")), 50);
+            assert_eq!(
+                anchor_specificity(kind, "rust-analyzer cargo demo 0.1.0 config/"),
+                10
+            );
+            assert_eq!(anchor_specificity(kind, &py("C#m().(self)")), 0);
+            assert_eq!(anchor_specificity(kind, &py("C#attr.")), 0);
+            assert_eq!(anchor_specificity(kind, &py("__init__:")), 0);
+            assert_eq!(anchor_specificity(kind, "local 3"), 0);
+            assert_eq!(
+                anchor_specificity(kind, "local 3@0123456789abcdef:src/a.py"),
+                0
+            );
+            assert_eq!(anchor_specificity(kind, "not a scip symbol"), 0);
+        }
+        // A kind the indexer set wins over the suffix.
+        assert_eq!(
+            anchor_specificity(Some(SymKind::Variable), &py("C#m().")),
+            0
+        );
+        assert_eq!(anchor_specificity(Some(SymKind::Function), &py("x.")), 100);
+    }
+
+    #[test]
+    fn scope_local_symbols_adds_the_project_and_the_document() {
+        use scip::types::{Occurrence, Relationship, SymbolInformation};
+        let global = "scip-java maven . . pkg/C#run().";
+        let mut info = SymbolInformation::new();
+        info.symbol = "local 3".into();
+        let mut rel = Relationship::new();
+        rel.symbol = "local 4".into();
+        info.relationships.push(rel);
+        let mut rel = Relationship::new();
+        rel.symbol = global.into();
+        info.relationships.push(rel);
+        let mut doc = Document::new();
+        doc.relative_path = "src/A.java".into();
+        doc.symbols.push(info);
+        for symbol in ["local 3", global] {
+            let mut occ = Occurrence::new();
+            occ.symbol = symbol.into();
+            doc.occurrences.push(occ);
+        }
+        let mut index = Index::new();
+        index.documents.push(doc);
+
+        scope_local_symbols(&mut index, "/home/me/repo");
+        let tag = project_tag("/home/me/repo");
+        assert_eq!(tag.len(), 16);
+        assert_ne!(tag, project_tag("/home/me/other"));
+        let doc = &index.documents[0];
+        let local3 = format!("local 3@{tag}:src/A.java");
+        assert_eq!(doc.symbols[0].symbol, local3);
+        assert_eq!(
+            doc.symbols[0].relationships[0].symbol,
+            format!("local 4@{tag}:src/A.java")
+        );
+        assert_eq!(doc.symbols[0].relationships[1].symbol, global);
+        assert_eq!(doc.occurrences[0].symbol, local3);
+        assert_eq!(doc.occurrences[1].symbol, global);
+
+        // A second pass does not scope an id again.
+        scope_local_symbols(&mut index, "/home/me/repo");
+        assert_eq!(index.documents[0].symbols[0].symbol, local3);
+    }
+
+    #[test]
+    fn a_scoped_local_keeps_the_name_of_its_original_id() {
+        let n = symbol_names("local 129@0123456789abcdef:src/a.ts");
+        assert_eq!((n.name.as_str(), n.qualified), ("129", None));
+        assert_eq!(unscoped_local("local 1@0123456789abcdef:a.rs"), "local 1");
+        assert_eq!(
+            unscoped_local("scip-x a b c x@y/f()."),
+            "scip-x a b c x@y/f()."
+        );
+    }
+
+    #[test]
     fn suffix_kind_classifies_descriptors() {
         assert_eq!(
             suffix_kind("rust-analyzer cargo lib 0.1.0 mod/foo()."),
@@ -767,6 +974,35 @@ mod tests {
         assert_eq!(suffix_kind("rust-analyzer cargo lib 0.1.0 mod/MAX."), None);
         // Local → never emit.
         assert_eq!(suffix_kind("local 5"), None);
+        assert_eq!(suffix_kind("local 5@0123456789abcdef:src/a.ts"), None);
+        // A parameter id also ends with `)`, but it is not a call.
+        assert_eq!(
+            suffix_kind("scip-python python demo 0 `pkg.mod`/C#m().(self)"),
+            None
+        );
+        assert_eq!(
+            suffix_kind("scip-typescript npm demo 1.0.0 src/`a.ts`/f().(x)"),
+            None
+        );
+        // Python methods, functions, and types.
+        assert_eq!(
+            suffix_kind("scip-python python demo 0 `pkg.mod`/C#m()."),
+            Some(RelationKind::Calls)
+        );
+        assert_eq!(
+            suffix_kind("scip-python python demo 0 `pkg.mod`/C#"),
+            Some(RelationKind::References)
+        );
+        // A module (meta), a type parameter, and a macro give no relation.
+        assert_eq!(
+            suffix_kind("scip-python python demo 0 `pkg.mod`/__init__:"),
+            None
+        );
+        assert_eq!(
+            suffix_kind("rust-analyzer cargo lib 0.1.0 mod/f().[T]"),
+            None
+        );
+        assert_eq!(suffix_kind("rust-analyzer cargo lib 0.1.0 mod/m!"), None);
     }
 
     #[test]

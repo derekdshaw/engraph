@@ -266,7 +266,7 @@ When Claude wants the raw grep anyway (e.g. to search for a literal occurrence i
 
 ### How `post-read` enriches Read results
 
-PostToolUse(Read) appends a brief listing of indexed symbols in the just-read file as `hookSpecificOutput.additionalContext` — name, line range, and signature for up to 30 entities. Often answers "what's in this file" without a follow-up grep or subgraph call. Silent passthrough for files that aren't in the graph; the augment never displaces or rewrites the actual Read output.
+PostToolUse(Read) appends a brief listing of indexed symbols in the just-read file as `hookSpecificOutput.additionalContext` — name, line range, and signature for up to 30 entities (local variables and parameters are left out; local functions stay). Often answers "what's in this file" without a follow-up grep or subgraph call. Silent passthrough for files that aren't in the graph; the augment never displaces or rewrites the actual Read output.
 
 ## Wire into Codex
 
@@ -473,7 +473,7 @@ One SQLite database, WAL mode. Schema migrations are versioned and applied autom
 | `sessions`, `messages` | Session-state snapshot from JSONL ingestion |
 | `scopes`, `scope_members` | Hierarchical scoping (project / topic / time-window) |
 | `context_items`, `bugs`, `do_not_repeat` | Curated decisions and rules |
-| `entities`, `relations` | Knowledge graph; codegraph stores symbols here with `name`, `qualified_name`, `file_path`, `line_range`, `signature` |
+| `entities`, `relations` | Knowledge graph; codegraph stores symbols here with `name`, `qualified_name`, `file_path`, `line_range`, `signature`, and the `scheme` of the indexer; SCIP local symbols get an id per project and file (`local 3@<project tag>:src/a.rs`) |
 | `messages_fts`, `context_items_fts` | FTS5 virtual tables auto-synced via triggers |
 | `embeddings` | Vector store (populated only with `--features embeddings`) |
 | `events`, `session_budget` | Telemetry and per-session token budget |
