@@ -413,7 +413,14 @@ TypeScript results do not apply to scip-typescript 0.6.0 (last item).
   anchor's `enclosing_range` does not go to that anchor. Then 8,157 of
   8,157 (`click-python`) and 1,535 of 1,535 (`requests-python`) are
   correct; module-level Python code has no relation, because a Python
-  module is not an anchor.
+  module is not an anchor. For TypeScript, a module (kind `File`) is now
+  an anchor, so module-level code goes to its file: `handleMiddleware`
+  shows the caller `handler.test.ts` (the `describe` callbacks) and no
+  longer `createEventContext`, and `hono-typescript` has `CALLS` 4,701 →
+  11,309 and `REFERENCES` 9,609 → 19,571 (a load of one SCIP file). Of
+  the edges before, 3 are not written and 5,918 move to another anchor;
+  the others are new, mostly test code in `describe` callbacks, which
+  had no anchor before.
 - scip-typescript 0.6.0 sets a kind on every symbol, locals included, so
   part 2 does not change TypeScript graphs. scip-typescript 0.4.0 sets no
   kind: with it, the `main` binary gave `ky-typescript` and

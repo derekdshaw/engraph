@@ -850,3 +850,34 @@ fn an_occurrence_after_an_anchor_range_does_not_go_to_that_anchor() {
         vec![(SCOPE_OUTER.to_string(), SCOPE_DECO.to_string())]
     );
 }
+
+#[test]
+fn module_level_typescript_code_goes_to_its_file() {
+    // scip-typescript gives a module the kind File, with a range over the
+    // whole file. A call after a function's range (a `describe` callback)
+    // goes to the file, not to the function above it.
+    let module = "scip-typescript npm demo 1.0.0 src/`a.test.ts`/";
+    let make = "scip-typescript npm demo 1.0.0 src/`a.test.ts`/makeContext().";
+    let target = "scip-typescript npm demo 1.0.0 src/`a.ts`/handle().";
+    let mut doc = Document::new();
+    doc.relative_path = "src/a.test.ts".to_string();
+    doc.symbols = vec![
+        sym(module, "a.test.ts", SymKind::File),
+        sym(make, "makeContext", SymKind::Function),
+    ];
+    let mut module_def = scoped_def(module, 0, vec![0, 0, 40, 0]);
+    module_def.range = vec![0, 0, 0];
+    doc.occurrences = vec![
+        module_def,
+        scoped_def(make, 2, vec![2, 0, 10, 1]),
+        occ(target, vec![30, 4, 30, 10], 0),
+    ];
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/demo", &index_of(vec![doc])).unwrap();
+    assert_eq!(
+        callers_by_line(&conn, target),
+        vec![(module.to_string(), target.to_string())]
+    );
+}

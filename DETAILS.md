@@ -1589,7 +1589,9 @@ took it: a decorator went to the function above, module-level Python
 code to the last function of the file, the caller of a nested function
 (`KD` in `build_digest_header`) to the nested function, and a
 TypeScript `describe` callback to the last helper defined above it. An
-anchor without a range keeps the old rule. A Python module
+anchor without a range keeps the old rule. scip-typescript gives a
+module the kind `File`, which is anchorable like a module, so
+module-level TypeScript code goes to its file. A Python module
 (`__init__:`, a meta descriptor) is not an anchor, so module-level
 Python code has no relation. Edges checked against the Python AST:
 `click-python` 6,380 of 7,913 correct → 8,157 of 8,157,
@@ -1786,7 +1788,7 @@ the file's `crate/` module def sits at line 0 alongside the first
 function def). v2.1's "nearest preceding by line" picked arbitrarily on
 ties and would attribute calls to `crate/` instead of the actual
 enclosing function. v2.2 ranks anchor candidates by kind specificity
-(Function/Method = 100, Class/Struct/Enum = 50, Module/Namespace =
+(Function/Method = 100, Class/Struct/Enum = 50, Module/Namespace/File =
 10; with no kind, the descriptor suffix: method 100, type 50, namespace
 10) and breaks line ties in favor of the more specific kind. This is
 what makes the workspace test pin `app_caller → lib_foo` instead of

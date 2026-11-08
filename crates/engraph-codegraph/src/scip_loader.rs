@@ -654,7 +654,11 @@ fn anchor_specificity(k: Option<SymKind>, symbol: &str) -> u8 {
         | Some(SymKind::Interface)
         | Some(SymKind::Trait)
         | Some(SymKind::Enum) => 50,
-        Some(SymKind::Module) | Some(SymKind::Namespace) | Some(SymKind::Package) => 10,
+        // scip-typescript gives a module (`…/`a.ts`/`) the kind File.
+        Some(SymKind::Module)
+        | Some(SymKind::Namespace)
+        | Some(SymKind::Package)
+        | Some(SymKind::File) => 10,
         None | Some(SymKind::UnspecifiedKind) => match last_suffix(symbol) {
             Some(Suffix::Method) => 100,
             Some(Suffix::Type) => 50,
