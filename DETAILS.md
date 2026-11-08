@@ -647,7 +647,9 @@ Flow:
    global parameters (`…m().(self)`) and type parameters (`…f().[T]`)
    that scip-python and scip-typescript write — in click's `_compat.py`,
    96 of 185 entities. A local function and a rust-analyzer impl block
-   (`impl Batch`) stay. Empty result → Passthrough (file isn't
+   (`impl Batch`) stay, but not a local named only by its number
+   (scip-typescript gives locals no display name, so `local 8` is `8`).
+   Empty result → Passthrough (file isn't
    indexed).
 3. `build_read_context` renders each entity as
    `` - `name` @ line_range — `signature` `` (signatureless entities

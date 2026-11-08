@@ -262,12 +262,15 @@ fn query_edges(
 /// descriptor ends with `)`) and type parameters (`…f().[T]`, ends with
 /// `]`) that scip-python and scip-typescript write. A rust-analyzer impl
 /// block (`…/impl#[Batch]`, named `impl Batch`) also ends with `]`, and
-/// stays; so does a local function, which anchors calls. Unqualified
-/// columns, for `entities` statements.
+/// stays; so does a local function, which anchors calls, unless its name is
+/// only its number (`local 8@…` named `8`: scip-typescript gives locals no
+/// display name), which the agent cannot look up. Unqualified columns, for
+/// `entities` statements.
 const LISTED_IN_FILE: &str = "(NOT (id LIKE 'local %'
           OR id LIKE '%)'
           OR (id LIKE '%]' AND name NOT LIKE 'impl %'))
-     OR EXISTS (SELECT 1 FROM relations r WHERE r.src_entity = entities.id))";
+     OR (EXISTS (SELECT 1 FROM relations r WHERE r.src_entity = entities.id)
+         AND NOT (id LIKE 'local %' AND name = substr(id, 7, instr(id, '@') - 7))))";
 
 /// All entities defined in `file_path` (of `project`, when given), ordered by
 /// line. Used by the PostToolUse(Read) augment to enrich Claude's view of a
@@ -807,6 +810,29 @@ mod tests {
         let n = subgraph_for(&conn, "C", 30).unwrap();
         let siblings: Vec<&str> = n.siblings.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(siblings, vec!["m", "f", "impl Batch"]);
+    }
+
+    #[test]
+    fn file_lists_skip_locals_named_only_by_their_number() {
+        // scip-typescript gives locals no display name, so a local function
+        // is named by its number (`8`); `subgraph 8` finds nothing useful.
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        seed_locals(&conn);
+        conn.execute_batch(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range)
+             VALUES ('local 8@t:src/walk.rs', 'symbol', '8', '/p', 'src/walk.rs', '4:4');
+             INSERT INTO relations (id, src_entity, dst_entity, kind)
+             VALUES ('r3', 'local 8@t:src/walk.rs', 'ra walk/run().', 'CALLS');",
+        )
+        .unwrap();
+        let names: Vec<String> = entities_in_file(&conn, Some("/p"), "src/walk.rs", 30)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["run", "visit"]);
     }
 
     #[test]
