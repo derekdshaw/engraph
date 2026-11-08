@@ -168,6 +168,7 @@ pub fn load_with_options(
                 .or_insert_with(|| enum_or_unspecified(&s.kind));
         }
     }
+    let multi_document = defined_in_several_documents(&index);
 
     // One transaction for the whole load: atomic swap from the reader's POV.
     conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -249,7 +250,7 @@ pub fn load_with_options(
 
     for doc in &index.documents {
         stats.documents_seen += 1;
-        load_document(conn, project, doc, &sym_kind, &mut stats)?;
+        load_document(conn, project, doc, &sym_kind, &multi_document, &mut stats)?;
     }
     if options.prune_stale {
         stats.entities_pruned += prune_stale_symbols(conn, project, &prefix)?;
@@ -284,6 +285,7 @@ fn load_document(
     project: &str,
     doc: &Document,
     sym_kind: &HashMap<String, SymKind>,
+    multi_document: &HashSet<String>,
     stats: &mut LoadStats,
 ) -> Result<()> {
     // Insert one entity per SymbolInformation in this doc. We capture
@@ -470,18 +472,33 @@ fn load_document(
             // adding signal.
             continue;
         }
-        insert_relation(
-            conn,
-            &src_sym,
-            &occ.symbol,
-            rel_kind,
-            provenance,
-            Some(start_line + 1),
-        )?;
+        // The line is in this document, but `subgraph` shows it with the
+        // anchor's one `file_path`. A Go package is defined in each of its
+        // files, so its line would point into the wrong file.
+        let line = (!multi_document.contains(&src_sym)).then_some(start_line + 1);
+        insert_relation(conn, &src_sym, &occ.symbol, rel_kind, provenance, line)?;
         stats.relations_inserted += 1;
     }
 
     Ok(())
+}
+
+/// Symbols with a definition in more than one document (a Go package, which
+/// each of its files defines).
+fn defined_in_several_documents(index: &Index) -> HashSet<String> {
+    let mut first_doc: HashMap<&str, usize> = HashMap::new();
+    let mut several = HashSet::new();
+    for (i, doc) in index.documents.iter().enumerate() {
+        for occ in &doc.occurrences {
+            if occ.symbol.is_empty() || !role_set(occ.symbol_roles, SymbolRole::Definition) {
+                continue;
+            }
+            if *first_doc.entry(occ.symbol.as_str()).or_insert(i) != i {
+                several.insert(occ.symbol.clone());
+            }
+        }
+    }
+    several
 }
 
 fn nearest_enclosing(def_anchors: &[(i32, u8, String)], occ_line: i32) -> Option<String> {
@@ -508,7 +525,8 @@ fn nearest_enclosing(def_anchors: &[(i32, u8, String)], occ_line: i32) -> Option
 
 /// `line`: the 1-based line of the occurrence the edge comes from, in the
 /// document of `src`; `None` for an edge from a `SymbolInformation`
-/// relationship, which has no occurrence.
+/// relationship, which has no occurrence, and for a `src` defined in more
+/// than one document.
 fn insert_relation(
     conn: &PooledConn,
     src: &str,

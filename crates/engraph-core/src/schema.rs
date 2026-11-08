@@ -328,7 +328,8 @@ const MIGRATIONS: &[&str] = &[
     // v14 — `relations.line`: the 1-based line of the occurrence an edge comes
     // from (the call or the reference), in the file of its source, so
     // `subgraph` can show where a caller calls. NULL for edges from
-    // SymbolInformation relationships and Bazel dependencies. Driver-indexed subtrees are cleared
+    // SymbolInformation relationships, Bazel dependencies, and sources
+    // defined in more than one document. Driver-indexed subtrees are cleared
     // for a new index, as in v12, so the next refresh writes the lines.
     r#"
     ALTER TABLE relations ADD COLUMN line INTEGER;

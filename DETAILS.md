@@ -1294,7 +1294,7 @@ but logs a warning if it ever happens.
 | 12 | `entities.qualified_name` + `idx_entities_qualified_name`: the SCIP descriptors after the namespace joined with `.` (`Config.full_path_base`, `Config`), so `subgraph` and the grep redirect can match a qualified lookup (§5.5, §14.4). NULL until the project is indexed again; Bazel targets never have one. Names change in the same load, so v12 also clears the commit of every driver run (`source = 'drivers'`): git can't resolve `''`, which counts as changed, so the next SessionStart refresh re-indexes the project. Until then the per-file divergence check treats its files as changed, and greps on them pass through. Prebuilt SCIP subtrees keep their commit, since the refresh skips them; repos without an automatic refresh (linked worktrees, bare-repo layouts) need one manual `engraph index`. |
 
 | 13 | SCIP local symbols per project and document (§14.3). `entities.scheme`: the SCIP scheme of the indexer that wrote a symbol (the first word of a global id; for a local, the scheme of its document; NULL for Bazel targets), filled for existing global symbols. The old `local <n>` rows, one row for the locals of all documents and projects, are deleted with their edges. Like v12, v13 clears the commit of every driver run, so the next refresh writes the local edges again. |
-| 14 | `relations.line`: the line of the occurrence (call or reference) an edge comes from, NULL for relationship edges and Bazel dependencies (§14.4). Clears the commit of every driver run, as v12 does, so the next refresh writes the lines. |
+| 14 | `relations.line`: the line of the occurrence (call or reference) an edge comes from, NULL for relationship edges, Bazel dependencies, and sources defined in more than one document (a Go package) (§14.4). Clears the commit of every driver run, as v12 does, so the next refresh writes the lines. |
 
 (`SCHEMA_VERSION = 14`; the `MIGRATIONS` array has 14 entries.)
 
@@ -1542,7 +1542,10 @@ and builds `HashMap<String, Kind>`. **Pass 2** walks
 - Each edge from an occurrence records `line`, the 1-based start line of
   the occurrence (schema v14): the call or the reference, in the
   document of the anchor. `subgraph` shows these lines for **Called
-  by**. Edges from `relationships` (`IMPLEMENTS`, `EXTENDS`) have none.
+  by**. Edges from `relationships` (`IMPLEMENTS`, `EXTENDS`) have none,
+  and nor do edges from an anchor defined in more than one document (a
+  Go package): its entity has one `file_path`, and a line from another
+  file would point at the wrong code.
 - Non-definition, target kind ∈ {Function, Method, Constructor,
   StaticMethod, AbstractMethod, Macro} → `CALLS`.
 - Non-definition, target kind ∈ {Class, Struct, Interface, Trait, Enum,
@@ -1695,7 +1698,8 @@ also takes the caller's project key — the CLI passes
 3. **Incoming** (Called by): same shape, swap src/dst. The markdown
    shows the lines of the calls (`caller` (file:30, 45)) — where a
    search for the symbol finds it — and the caller's definition only
-   for an edge without a line (an index from before schema v14).
+   for an edge without a line (an index from before schema v14, or a
+   source defined in several documents).
    Outgoing edges show where the target is defined.
 4. **Siblings** (same file): the 10 entities nearest the symbol's start
    line (`ORDER BY abs(start - target)`), shown in line order; rows

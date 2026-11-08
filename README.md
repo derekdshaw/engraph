@@ -335,7 +335,7 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()>
 **Sibling symbols** (same file): `current_version`, `run_migrations_to`, `check_drift`
 ````
 
-**Calls** and **References** give where each target is defined. **Called by** gives the lines of the calls themselves, so they match a search for the symbol; a caller that calls twice shows both lines. The sibling list is the symbols defined nearest the symbol, in line order, without local variables and parameters.
+**Calls** and **References** give where each target is defined. **Called by** gives the lines of the calls themselves, so they match a search for the symbol; a caller that calls twice shows both lines, and a caller defined in several files (a Go package) shows its definition. The sibling list is the symbols defined nearest the symbol, in line order, without local variables and parameters.
 
 ```bash
 # JSON output for programmatic use
