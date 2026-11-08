@@ -251,9 +251,6 @@ fn query_edges(
     Ok(rows)
 }
 
-/// All entities defined in `file_path` (of `project`, when given), ordered by
-/// line. Used by the PostToolUse(Read) augment to enrich Claude's view of a
-/// just-read file with the indexed-symbol map.
 /// The rows a list of a file's symbols shows (the post-read list, the
 /// sibling list): all but variables, parameters, and type parameters that
 /// no relation goes from, which only add tokens. Those are local symbols
@@ -268,6 +265,9 @@ const LISTED_IN_FILE: &str = "(NOT (id LIKE 'local %'
           OR (id LIKE '%]' AND name NOT LIKE 'impl %'))
      OR EXISTS (SELECT 1 FROM relations r WHERE r.src_entity = entities.id))";
 
+/// All entities defined in `file_path` (of `project`, when given), ordered by
+/// line. Used by the PostToolUse(Read) augment to enrich Claude's view of a
+/// just-read file with the indexed-symbol map.
 pub fn entities_in_file(
     conn: &PooledConn,
     project: Option<&str>,
