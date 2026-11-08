@@ -1666,8 +1666,12 @@ also takes the caller's project key — the CLI passes
    same project (`MATCH_WHERE_SQL`, shared with the grep redirect): rust-analyzer
    gives local variables a `display_name`, and a `let full_path_base`
    must not make the `Config.full_path_base` field ambiguous; a name
-   only locals have (a TypeScript local function) still resolves, and
-   locals have no `qualified_name`. `LIMIT 8`, ordered so the useful rows
+   only locals have (a TypeScript local function) still resolves when a
+   relation goes from one of them, and locals have no `qualified_name`.
+   Locals that no relation goes from (variables) never match: each file
+   has its own local rows (§14.3), so a variable name used in a few
+   files would otherwise fall in the grep redirect's 1–8 range and deny a
+   search that `subgraph` can only answer with a list of locations. `LIMIT 8`, ordered so the useful rows
    survive the cap: exact moniker, then the caller's project, then files
    that aren't tests (`test`/`spec` in the path), then types (id ending
    in `#`) before members, then by qualified name and file.

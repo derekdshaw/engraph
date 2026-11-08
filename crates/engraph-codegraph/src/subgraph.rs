@@ -156,14 +156,18 @@ const TEST_PATH_SQL: &str =
 /// symbols shadow `local N` ones of their own project: rust-analyzer names
 /// local variables, and a `let full_path_base` must not make the
 /// `Config.full_path_base` field ambiguous. Locals alone (a TypeScript local
-/// function), or in a project without that global, still match. The query
-/// using it must select `FROM entities` without an alias.
+/// function), or in a project without that global, still match, but only
+/// when a relation goes from them: each file has its own local rows, so a
+/// variable name used in a few files would otherwise make the grep redirect
+/// deny a search that `subgraph` can only answer with a list of locations.
+/// The query using it must select `FROM entities` without an alias.
 pub const MATCH_WHERE_SQL: &str = "(name = ?1 OR id = ?1 OR qualified_name = ?2)
     AND (id NOT LIKE 'local %'
-         OR NOT EXISTS (SELECT 1 FROM entities g
-                        WHERE (g.name = ?1 OR g.id = ?1 OR g.qualified_name = ?2)
-                          AND g.id NOT LIKE 'local %'
-                          AND g.project IS entities.project))";
+         OR (EXISTS (SELECT 1 FROM relations r WHERE r.src_entity = entities.id)
+             AND NOT EXISTS (SELECT 1 FROM entities g
+                             WHERE (g.name = ?1 OR g.id = ?1 OR g.qualified_name = ?2)
+                               AND g.id NOT LIKE 'local %'
+                               AND g.project IS entities.project)))";
 
 fn resolve_matches(
     conn: &PooledConn,
@@ -818,7 +822,14 @@ mod tests {
                      'Config.full_path_base', '/p', 'src/config.rs', '17:17'),
                     ('local 129', 'symbol', 'full_path_base', NULL, '/p', 'src/walk.rs', '686:686'),
                     ('local 137', 'symbol', 'full_path_base', NULL, '/p', 'src/walk.rs', '724:724'),
-                    ('local 5', 'symbol', 'only_local', NULL, '/p', 'src/walk.rs', '10:10')",
+                    ('local 5', 'symbol', 'only_local', NULL, '/p', 'src/walk.rs', '10:10'),
+                    ('local 6', 'symbol', 'only_a_variable', NULL, '/p', 'src/walk.rs', '11:11')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO relations (id, src_entity, dst_entity, kind)
+             VALUES ('r1', 'local 5', 'ra config/Config#full_path_base.', 'REFERENCES')",
             [],
         )
         .unwrap();
@@ -826,10 +837,13 @@ mod tests {
         assert_eq!(n.matches.len(), 1, "{:?}", n.matches);
         assert_eq!(n.matches[0].id, "ra config/Config#full_path_base.");
         // A name that only locals have (a TypeScript local function) still
-        // resolves.
+        // resolves when a relation goes from it.
         let n = subgraph_for(&conn, "only_local", 30).unwrap();
         assert_eq!(n.matches.len(), 1);
         assert_eq!(n.matches[0].id, "local 5");
+        // A local that no relation goes from (a variable) does not.
+        let n = subgraph_for(&conn, "only_a_variable", 30).unwrap();
+        assert!(n.matches.is_empty(), "{:?}", n.matches);
     }
 
     #[test]
@@ -875,6 +889,12 @@ mod tests {
              VALUES ('ra config/Config#full_path_base.', 'symbol', 'full_path_base',
                      'Config.full_path_base', '/a', 'src/config.rs', '17:17'),
                     ('local 7', 'symbol', 'full_path_base', NULL, '/b', 'src/app.ts', '3:9')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO relations (id, src_entity, dst_entity, kind)
+             VALUES ('r1', 'local 7', 'ra config/Config#full_path_base.', 'REFERENCES')",
             [],
         )
         .unwrap();
