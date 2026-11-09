@@ -326,14 +326,16 @@ engraph subgraph run_migrations
 ```
 
 ````markdown
-## Symbol `run_migrations` (defined in crates/engraph-core/src/schema.rs:244)
+## Symbol `run_migrations` (defined in crates/engraph-core/src/schema.rs:359)
 ```
 pub fn run_migrations(conn: &mut Connection) -> Result<()>
 ```
-**Calls**: `current_version` (crates/engraph-core/src/schema.rs:225)
-**Called by**: `open_pool` (crates/engraph-core/src/db.rs:30)
-**Sibling symbols** (same file): `current_version`, `check_drift`, `MIGRATIONS`
+**Calls**: `run_migrations_to` (crates/engraph-core/src/schema.rs:365)
+**Called by**: `migrations_apply_idempotently` (crates/engraph-core/src/schema.rs:402, 404), `open_pool` (crates/engraph-core/src/db.rs:81)
+**Sibling symbols** (same file): `current_version`, `run_migrations_to`, `check_drift`
 ````
+
+**Calls** and **References** give where each target is defined. **Called by** gives the lines of the calls themselves, so they match a search for the symbol; a caller that calls twice shows both lines, and a caller defined in several files (a Go package) shows its definition. The sibling list is the symbols defined nearest the symbol, in line order, without local variables and parameters.
 
 ```bash
 # JSON output for programmatic use

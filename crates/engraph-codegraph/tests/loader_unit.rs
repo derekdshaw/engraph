@@ -694,3 +694,76 @@ fn the_loader_writes_the_scheme_of_each_symbol() {
         assert_eq!(scheme.as_deref(), Some("scip-test"));
     }
 }
+
+#[test]
+fn loader_records_the_line_of_each_occurrence_edge() {
+    // build_fixture: foo() calls bar() on line 5 (0-based), so line 6.
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/demo", &build_fixture()).unwrap();
+    let line: Option<i64> = conn
+        .query_row("SELECT line FROM relations WHERE kind = 'CALLS'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(line, Some(6));
+
+    // An edge from SymbolInformation.relationships has no occurrence.
+    let mut doc = Document::new();
+    doc.relative_path = "src/impl.rs".to_string();
+    let mut class = sym(
+        "scip-test cargo demo 0.0.0 x/Impl#",
+        "Impl",
+        SymKind::Struct,
+    );
+    let mut rel = scip::types::Relationship::new();
+    rel.symbol = "scip-test cargo demo 0.0.0 x/Trait#".to_string();
+    rel.is_implementation = true;
+    class.relationships.push(rel);
+    doc.symbols = vec![class];
+    load(&conn, "/proj/demo", &index_of(vec![doc])).unwrap();
+    let line: Option<i64> = conn
+        .query_row(
+            "SELECT line FROM relations WHERE kind = 'IMPLEMENTS'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(line, None);
+}
+
+#[test]
+fn an_anchor_defined_in_several_documents_records_no_line() {
+    // A Go package is defined in each of its files, but its entity has one
+    // file_path; a line from another file would point at the wrong code.
+    let pkg = "scip-go gomod demo v1 `demo`/";
+    let func = "scip-go gomod demo v1 `demo`/New().";
+    let doc = |path: &str, call_line: i32| {
+        let def = SymbolRole::Definition as i32;
+        let mut d = Document::new();
+        d.relative_path = path.to_string();
+        d.symbols = vec![sym(pkg, "demo", SymKind::Package)];
+        d.occurrences = vec![
+            occ(pkg, vec![0, 8, 0, 12], def),
+            occ(func, vec![call_line, 4, call_line, 7], 0),
+        ];
+        d
+    };
+    let mut a = doc("a.go", 1);
+    a.symbols.push(sym(func, "New", SymKind::Function));
+    a.occurrences
+        .push(occ(func, vec![2, 5, 2, 8], SymbolRole::Definition as i32));
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/demo", &index_of(vec![a, doc("b.go", 9)])).unwrap();
+    let lines: Vec<Option<i64>> = conn
+        .prepare("SELECT line FROM relations WHERE src_entity = ?1 AND kind = 'CALLS'")
+        .unwrap()
+        .query_map([pkg], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(lines, vec![None, None]);
+}

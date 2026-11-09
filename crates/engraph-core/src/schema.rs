@@ -325,6 +325,16 @@ const MIGRATIONS: &[&str] = &[
     DELETE FROM entities WHERE id LIKE 'local %' AND instr(id, '@') = 0;
     UPDATE index_state SET commit_sha = '' WHERE source = 'drivers';
     "#,
+    // v14 — `relations.line`: the 1-based line of the occurrence an edge comes
+    // from (the call or the reference), in the file of its source, so
+    // `subgraph` can show where a caller calls. NULL for edges from
+    // SymbolInformation relationships, Bazel dependencies, and sources
+    // defined in more than one document. Driver-indexed subtrees are cleared
+    // for a new index, as in v12, so the next refresh writes the lines.
+    r#"
+    ALTER TABLE relations ADD COLUMN line INTEGER;
+    UPDATE index_state SET commit_sha = '' WHERE source = 'drivers';
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
@@ -611,7 +621,7 @@ mod tests {
                 ('/p', '', 'abc', 'drivers'), ('/p', 'sub', 'def', 'scip');",
         )
         .unwrap();
-        run_migrations(&mut conn).unwrap();
+        run_migrations_to(&mut conn, 13).unwrap();
         assert_eq!(current_version(&conn).unwrap(), 13);
 
         let scheme = |id: &str| -> Option<String> {
@@ -644,6 +654,39 @@ mod tests {
         assert_eq!(old, 0);
         // Driver-indexed subtrees are indexed again at the next refresh, so
         // the local edges come back; a prebuilt one keeps its commit.
+        let commits: Vec<(String, String)> = conn
+            .prepare("SELECT subtree, commit_sha FROM index_state ORDER BY subtree")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            commits,
+            vec![("".into(), "".into()), ("sub".into(), "def".into())]
+        );
+    }
+
+    #[test]
+    fn migrates_through_v14_relations_line() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations_to(&mut conn, 13).unwrap();
+        conn.execute_batch(
+            "INSERT INTO index_state (project, subtree, commit_sha, source) VALUES
+                ('/p', '', 'abc', 'drivers'), ('/p', 'sub', 'def', 'scip');",
+        )
+        .unwrap();
+        run_migrations(&mut conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 14);
+        let line_column: bool = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('relations') WHERE name = 'line'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        assert!(line_column, "missing relations.line column");
+        // The next refresh indexes driver subtrees again to write the lines.
         let commits: Vec<(String, String)> = conn
             .prepare("SELECT subtree, commit_sha FROM index_state ORDER BY subtree")
             .unwrap()

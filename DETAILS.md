@@ -151,7 +151,7 @@ backup-and-restore story trivial.
 | `messages_fts`, `context_items_fts` | FTS5 external-content indexes. `INSERT`/`DELETE` triggers keep them aligned; `UPDATE` triggers were intentionally dropped in v5 so `compress-existing` doesn't overwrite the index with compressed text (see §6.4). |
 | `embeddings` | `(target_kind, target_id, model_id)` PK so vectors under different model versions coexist; cosine search ignores wrong-model rows. |
 | `events`, `session_budget` | The telemetry + budget surface. |
-| `entities`, `relations` | Knowledge-graph tables with `provenance ∈ {extracted, inferred, ambiguous, generated}`. The codegraph populates these from SCIP per-language indexers; `entities` carries `file_path`, `line_range`, `signature` (v6), `qualified_name` (v12), and `scheme`, the indexer that wrote the symbol (v13). |
+| `entities`, `relations` | Knowledge-graph tables with `provenance ∈ {extracted, inferred, ambiguous, generated}`; `relations.line` is the line of the call or reference an edge comes from (v14). The codegraph populates these from SCIP per-language indexers; `entities` carries `file_path`, `line_range`, `signature` (v6), `qualified_name` (v12), and `scheme`, the indexer that wrote the symbol (v13). |
 | `scopes`, `scope_members` | Mempalace-style hierarchical scoping (project / topic / time-window / custom). Used by recall to restrict results to a `cwd` or named scope. |
 | `ingestion_log` | One row per JSONL path with `(last_offset, last_inode, last_size, last_mtime)` so we can detect rotation/truncation (§6.1). |
 
@@ -642,7 +642,9 @@ Flow:
    is matched as given against any project.
 2. `engraph_codegraph::subgraph::entities_in_file(conn, project, path, 30)`
    — `WHERE file_path = ?1 AND (?2 IS NULL OR project = ?2) ORDER BY
-   line_range LIMIT ?3`. The list leaves out variables, parameters, and type parameters that
+   <start line> LIMIT ?3`. `line_range` is text (`"101:120"`), so the
+   order uses `CAST(line_range AS INTEGER)`, rows without a line last.
+   The list leaves out variables, parameters, and type parameters that
    no relation goes from (`LISTED_IN_FILE`): local symbols, and the
    global parameters (`…m().(self)`) and type parameters (`…f().[T]`)
    that scip-python and scip-typescript write — in click's `_compat.py`,
@@ -1292,8 +1294,9 @@ but logs a warning if it ever happens.
 | 12 | `entities.qualified_name` + `idx_entities_qualified_name`: the SCIP descriptors after the namespace joined with `.` (`Config.full_path_base`, `Config`), so `subgraph` and the grep redirect can match a qualified lookup (§5.5, §14.4). NULL until the project is indexed again; Bazel targets never have one. Names change in the same load, so v12 also clears the commit of every driver run (`source = 'drivers'`): git can't resolve `''`, which counts as changed, so the next SessionStart refresh re-indexes the project. Until then the per-file divergence check treats its files as changed, and greps on them pass through. Prebuilt SCIP subtrees keep their commit, since the refresh skips them; repos without an automatic refresh (linked worktrees, bare-repo layouts) need one manual `engraph index`. |
 
 | 13 | SCIP local symbols per project and document (§14.3). `entities.scheme`: the SCIP scheme of the indexer that wrote a symbol (the first word of a global id; for a local, the scheme of its document; NULL for Bazel targets), filled for existing global symbols. The old `local <n>` rows, one row for the locals of all documents and projects, are deleted with their edges. Like v12, v13 clears the commit of every driver run, so the next refresh writes the local edges again. |
+| 14 | `relations.line`: the line of the occurrence (call or reference) an edge comes from, NULL for relationship edges, Bazel dependencies, and sources defined in more than one document (a Go package) (§14.4). Clears the commit of every driver run, as v12 does, so the next refresh writes the lines. |
 
-(`SCHEMA_VERSION = 13`; the `MIGRATIONS` array has 13 entries.)
+(`SCHEMA_VERSION = 14`; the `MIGRATIONS` array has 14 entries.)
 
 ---
 
@@ -1536,6 +1539,13 @@ and builds `HashMap<String, Kind>`. **Pass 2** walks
   UppercaseVisitor` with no qualified name, so it never answers a lookup
   of the type's name. Local symbols have no qualified name.
 - `Import` role set → `IMPORTS` edge.
+- Each edge from an occurrence records `line`, the 1-based start line of
+  the occurrence (schema v14): the call or the reference, in the
+  document of the anchor. `subgraph` shows these lines for **Called
+  by**. Edges from `relationships` (`IMPLEMENTS`, `EXTENDS`) have none,
+  and nor do edges from an anchor defined in more than one document (a
+  Go package): its entity has one `file_path`, and a line from another
+  file would point at the wrong code.
 - Non-definition, target kind ∈ {Function, Method, Constructor,
   StaticMethod, AbstractMethod, Macro} → `CALLS`.
 - Non-definition, target kind ∈ {Class, Struct, Interface, Trait, Enum,
@@ -1681,16 +1691,26 @@ also takes the caller's project key — the CLI passes
    match's qualified name and location, no edges. No "best guess".
 2. **Outgoing** (CALLS / REFERENCES / IMPORTS): join `relations` and
    `entities` on `dst_entity`, filter `r.src_entity = ?` and
-   `r.valid_to IS NULL`, limit `max_nodes / 2`.
-3. **Incoming** (Called by): same shape, swap src/dst.
-4. **Siblings** (same file): `WHERE file_path = ? AND id != ?
-   ORDER BY line_range LIMIT 10`, with the filter of the post-read
-   list (§5.6): no variables, parameters, or type parameters.
+   `r.valid_to IS NULL`, `GROUP BY r.kind, e.id` with
+   `group_concat(r.line)`, limit `max_nodes / 2`. One row per neighbour:
+   the limit counts neighbours, not edges, and `EdgeRow.lines` has the
+   lines of all the edges (ascending).
+3. **Incoming** (Called by): same shape, swap src/dst. The markdown
+   shows the lines of the calls (`caller` (file:30, 45)) — where a
+   search for the symbol finds it — and the caller's definition only
+   for an edge without a line (an index from before schema v14, or a
+   source defined in several documents).
+   Outgoing edges show where the target is defined.
+4. **Siblings** (same file): the 10 entities nearest the symbol's start
+   line (`ORDER BY abs(start - target)`), shown in line order; rows
+   without a line last. The same filter as the post-read list (§5.6)
+   leaves out variables, parameters, and type parameters.
 
 `format_markdown()` lays out the four sections, dedupes by
 `(kind, target_id)` for outgoing and by `target_id` for incoming
-(rust-analyzer emits one occurrence per call site, which would
-otherwise list `migrations_apply_idempotently` twice), filters out
+(the query already groups the edges of one neighbour, so
+`migrations_apply_idempotently`, which calls `run_migrations` twice,
+shows once with both lines), filters out
 empty-name entries, and stops appending lines once cumulative byte
 size hits `DEFAULT_BYTE_CAP = 8192`. `engraph subgraph <sym> --json`
 emits the raw `Neighborhood` struct for programmatic callers.

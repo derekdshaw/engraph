@@ -27,6 +27,13 @@ pub struct EntityRow {
 pub struct EdgeRow {
     pub kind: String,
     pub other: EntityRow,
+    /// The lines (1-based, ascending) of the occurrences behind the edges of
+    /// this `kind` between the symbol and `other`: the calls or references,
+    /// in the file of the edge's source — `other`'s file for an incoming
+    /// edge, the symbol's own file for an outgoing one. Empty when no edge
+    /// records a line (relationship edges, Bazel dependencies, and indexes
+    /// from before schema v14).
+    pub lines: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -217,20 +224,26 @@ fn query_edges(
     dir: EdgeDir,
     limit: usize,
 ) -> Result<Vec<EdgeRow>> {
+    // One row per (kind, neighbour): a caller that calls three times is one
+    // row with three lines, and `limit` counts neighbours, not edges.
     let sql = match dir {
         EdgeDir::Out => {
-            "SELECT r.kind, e.id, e.name, e.qualified_name, e.project, e.file_path, e.line_range, e.signature
+            "SELECT r.kind, e.id, e.name, e.qualified_name, e.project, e.file_path, e.line_range, e.signature,
+                    group_concat(r.line)
              FROM relations r
              JOIN entities e ON e.id = r.dst_entity
              WHERE r.src_entity = ?1 AND r.valid_to IS NULL
+             GROUP BY r.kind, e.id
              ORDER BY r.kind, e.name
              LIMIT ?2"
         }
         EdgeDir::In => {
-            "SELECT r.kind, e.id, e.name, e.qualified_name, e.project, e.file_path, e.line_range, e.signature
+            "SELECT r.kind, e.id, e.name, e.qualified_name, e.project, e.file_path, e.line_range, e.signature,
+                    group_concat(r.line)
              FROM relations r
              JOIN entities e ON e.id = r.src_entity
              WHERE r.dst_entity = ?1 AND r.valid_to IS NULL
+             GROUP BY r.kind, e.id
              ORDER BY r.kind, e.name
              LIMIT ?2"
         }
@@ -249,6 +262,7 @@ fn query_edges(
                     line_range: r.get(6)?,
                     signature: r.get(7)?,
                 },
+                lines: parse_lines(r.get::<_, Option<String>>(8)?.as_deref()),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -272,6 +286,10 @@ const LISTED_IN_FILE: &str = "(NOT (id LIKE 'local %'
      OR (EXISTS (SELECT 1 FROM relations r WHERE r.src_entity = entities.id)
          AND NOT (id LIKE 'local %' AND name = substr(id, 7, instr(id, '@') - 7))))";
 
+/// The start line of `line_range` (`"101:120"` → 101) as a number, for
+/// `ORDER BY`: the text sorts `"101:…"` before `"22:…"`. NULL stays NULL.
+const START_LINE: &str = "CAST(line_range AS INTEGER)";
+
 /// All entities defined in `file_path` (of `project`, when given), ordered by
 /// line. Used by the PostToolUse(Read) augment to enrich Claude's view of a
 /// just-read file with the indexed-symbol map.
@@ -284,7 +302,7 @@ pub fn entities_in_file(
     let mut stmt = conn.prepare(&format!(
         "SELECT id, name, qualified_name, project, file_path, line_range, signature FROM entities
          WHERE file_path = ?1 AND (?2 IS NULL OR project = ?2) AND {LISTED_IN_FILE}
-         ORDER BY line_range
+         ORDER BY line_range IS NULL, {START_LINE}, id
          LIMIT ?3"
     ))?;
     let rows = stmt
@@ -298,21 +316,36 @@ pub fn entities_in_file(
 
 /// Other entities in the target's file — the same `file_path` in the same
 /// project, since another repo can have a file at the same relative path.
+/// The `limit` nearest the target's line, in line order; entities without a
+/// line come last.
 fn query_siblings(
     conn: &PooledConn,
     target: &EntityRow,
     file_path: &str,
     limit: usize,
 ) -> Result<Vec<EntityRow>> {
+    let target_line: Option<i64> = target
+        .line_range
+        .as_deref()
+        .and_then(|r| r.split(':').next())
+        .and_then(|l| l.parse().ok());
     let mut stmt = conn.prepare(&format!(
-        "SELECT id, name, qualified_name, project, file_path, line_range, signature FROM entities
-         WHERE file_path = ?1 AND project IS ?2 AND id != ?3 AND {LISTED_IN_FILE}
-         ORDER BY line_range
-         LIMIT ?4"
+        "SELECT id, name, qualified_name, project, file_path, line_range, signature FROM (
+           SELECT *, {START_LINE} AS start FROM entities
+           WHERE file_path = ?1 AND project IS ?2 AND id != ?3 AND {LISTED_IN_FILE}
+           ORDER BY start IS NULL, abs(start - ?5), start, id
+           LIMIT ?4)
+         ORDER BY start IS NULL, start, id"
     ))?;
     let rows = stmt
         .query_map(
-            rusqlite::params![file_path, target.project, target.id, limit as i64],
+            rusqlite::params![
+                file_path,
+                target.project,
+                target.id,
+                limit as i64,
+                target_line
+            ],
             row_to_entity,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -421,7 +454,7 @@ pub fn format_markdown(n: &Neighborhood, byte_cap: usize) -> String {
         if !inc.is_empty() {
             push_capped(
                 &mut out,
-                &format!("**Called by**: {}\n", join_short(&inc, head_project)),
+                &format!("**Called by**: {}\n", join_callers(&inc, head_project)),
                 byte_cap,
             );
         }
@@ -458,10 +491,15 @@ pub fn format_markdown(n: &Neighborhood, byte_cap: usize) -> String {
 /// "repo:<basename> :: " so cross-repo edges are visually distinct in the
 /// subgraph markdown.
 fn location(e: &EntityRow, head_project: Option<&str>) -> Option<String> {
+    let start = e.line_range.as_deref().and_then(|s| s.split(':').next());
+    location_at(e, start, head_project)
+}
+
+/// `e`'s file with `lines` (`"30"`, `"30, 45"`) after it, and a
+/// `repo:<name>` prefix when `e` is in another project than the head.
+fn location_at(e: &EntityRow, lines: Option<&str>, head_project: Option<&str>) -> Option<String> {
     let path = e.file_path.as_deref()?;
-    let line = e.line_range.as_deref();
-    let line_head = line.and_then(|s| s.split(':').next());
-    let base = match line_head {
+    let base = match lines {
         Some(l) if !l.is_empty() => format!("{path}:{l}"),
         _ => path.to_string(),
     };
@@ -479,6 +517,39 @@ fn location(e: &EntityRow, head_project: Option<&str>) -> Option<String> {
         }
         None => base,
     })
+}
+
+/// `group_concat(line)` → the distinct lines, ascending.
+fn parse_lines(concat: Option<&str>) -> Vec<i64> {
+    let mut lines: Vec<i64> = concat
+        .unwrap_or("")
+        .split(',')
+        .filter_map(|l| l.trim().parse().ok())
+        .collect();
+    lines.sort_unstable();
+    lines.dedup();
+    lines
+}
+
+/// Callers with the location of their calls: `caller` (file:30, 45). An edge
+/// without a line shows where the caller is defined, as before schema v14.
+fn join_callers(edges: &[&EdgeRow], head_project: Option<&str>) -> String {
+    edges
+        .iter()
+        .map(|e| {
+            let loc = if e.lines.is_empty() {
+                location(&e.other, head_project)
+            } else {
+                let lines: Vec<String> = e.lines.iter().map(i64::to_string).collect();
+                location_at(&e.other, Some(&lines.join(", ")), head_project)
+            };
+            match loc {
+                Some(loc) if !loc.is_empty() => format!("`{}` ({loc})", e.other.name),
+                _ => format!("`{}`", e.other.name),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn join_short(edges: &[&EdgeRow], head_project: Option<&str>) -> String {
@@ -784,6 +855,54 @@ mod tests {
     }
 
     #[test]
+    fn file_lists_are_in_line_order() {
+        // `line_range` is text: "101:101" sorts before "22:30" as text.
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute_batch(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range) VALUES
+                ('s a/x.', 'symbol', 'no_line', '/p', 'a.py', NULL),
+                ('s a/l101.', 'symbol', 'l101', '/p', 'a.py', '101:101'),
+                ('s a/l22.', 'symbol', 'l22', '/p', 'a.py', '22:30'),
+                ('s a/l9.', 'symbol', 'l9', '/p', 'a.py', '9:9');",
+        )
+        .unwrap();
+        let names: Vec<String> = entities_in_file(&conn, Some("/p"), "a.py", 30)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["l9", "l22", "l101", "no_line"]);
+    }
+
+    #[test]
+    fn siblings_are_the_symbols_nearest_the_target() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute_batch(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range) VALUES
+                ('s a/target().', 'symbol', 'target', '/p', 'a.py', '51:51'),
+                ('s a/l3().', 'symbol', 'l3', '/p', 'a.py', '3:3'),
+                ('s a/l45().', 'symbol', 'l45', '/p', 'a.py', '45:45'),
+                ('s a/l60().', 'symbol', 'l60', '/p', 'a.py', '60:60'),
+                ('s a/l101().', 'symbol', 'l101', '/p', 'a.py', '101:101'),
+                ('s a/l200().', 'symbol', 'l200', '/p', 'a.py', '200:200'),
+                ('s a/none().', 'symbol', 'none', '/p', 'a.py', NULL);",
+        )
+        .unwrap();
+        let target = &resolve_matches(&conn, "target", None).unwrap()[0];
+        let names: Vec<String> = query_siblings(&conn, target, "a.py", 3)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        // The three nearest to line 51, in line order.
+        assert_eq!(names, vec!["l3", "l45", "l60"]);
+    }
+
+    #[test]
     fn file_lists_skip_parameters_and_type_parameters() {
         // scip-python and scip-typescript write parameters (`…m().(self)`)
         // and type parameters (`…f().[T]`) as global symbols, not locals.
@@ -833,6 +952,34 @@ mod tests {
             .map(|e| e.name)
             .collect();
         assert_eq!(names, vec!["run", "visit"]);
+    }
+
+    #[test]
+    fn called_by_shows_the_lines_of_the_calls() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute_batch(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range) VALUES
+                ('s a/target().', 'symbol', 'target', '/p', 'a.py', '51:51'),
+                ('s a/twice().', 'symbol', 'twice', '/p', 'a.py', '22:22'),
+                ('s b/old().', 'symbol', 'old', '/p', 'b.py', '7:7');
+             INSERT INTO relations (id, src_entity, dst_entity, kind, line) VALUES
+                ('r1', 's a/twice().', 's a/target().', 'CALLS', 45),
+                ('r2', 's a/twice().', 's a/target().', 'CALLS', 30),
+                ('r3', 's b/old().', 's a/target().', 'CALLS', NULL);",
+        )
+        .unwrap();
+        let n = subgraph_for(&conn, "target", 30).unwrap();
+        let twice = n.incoming.iter().find(|e| e.other.name == "twice").unwrap();
+        assert_eq!(twice.lines, vec![30, 45]);
+        let md = format_markdown(&n, DEFAULT_BYTE_CAP);
+        // The lines of the calls; an edge without a line (an index from
+        // before schema v14) shows the caller's definition.
+        assert!(
+            md.contains("**Called by**: `old` (b.py:7), `twice` (a.py:30, 45)"),
+            "{md}"
+        );
     }
 
     #[test]
