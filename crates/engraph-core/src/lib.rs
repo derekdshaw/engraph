@@ -11,4 +11,4 @@ pub mod tokens;
 
 pub use error::{Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;

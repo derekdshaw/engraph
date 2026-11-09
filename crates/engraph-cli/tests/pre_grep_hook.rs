@@ -313,6 +313,39 @@ fn global_symbols_shadow_locals_in_the_match_count() {
 }
 
 #[test]
+fn local_variables_do_not_redirect_a_search() {
+    // Each file has its own local rows (`local 3@<tag>:src/a.rs`), so a
+    // variable name used in a few files has 1-8 matches. `subgraph` has no
+    // edges for them, so the search must continue. A local function (a
+    // relation goes from it) still redirects.
+    let (_t, db) = db_dir();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    for i in 0..3 {
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range)
+             VALUES (?1, 'symbol', 'paths', 'testproj', ?2, '1:1')",
+            [
+                format!("local {i}@0123456789abcdef:src/f{i}.rs"),
+                format!("src/f{i}.rs"),
+            ],
+        )
+        .unwrap();
+    }
+    conn.execute_batch(
+        "INSERT INTO entities (id, kind, name, project, file_path, line_range) VALUES
+            ('local 7@0123456789abcdef:src/a.ts', 'symbol', 'visit', 'testproj', 'src/a.ts', '3:3'),
+            ('ra walk/run().', 'symbol', 'run', 'testproj', 'src/walk.rs', '1:1');
+         INSERT INTO relations (id, src_entity, dst_entity, kind) VALUES
+            ('r1', 'local 7@0123456789abcdef:src/a.ts', 'ra walk/run().', 'CALLS');",
+    )
+    .unwrap();
+    drop(conn);
+    let out = run_hook(&db, "paths");
+    assert!(out.trim().is_empty(), "expected passthrough, got: {out}");
+    assert_eq!(decision(&run_hook(&db, "visit")).as_deref(), Some("deny"));
+}
+
+#[test]
 fn dotted_text_without_a_qualified_match_keeps_grepping() {
     let (_t, db) = db_dir();
     insert_qualified_entities(&db);

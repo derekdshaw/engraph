@@ -306,6 +306,25 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_entities_qualified_name ON entities(qualified_name);
     UPDATE index_state SET commit_sha = '' WHERE source = 'drivers';
     "#,
+    // v13 — SCIP local symbols per project and document. The loader now gives
+    // each local the id `local <n>@<project tag>:<relative_path>`; before, one
+    // `local <n>` row stood for the locals of all documents and projects, with
+    // the edges of all of them. Those rows and their edges are removed. The
+    // new `scheme` column is the SCIP scheme (indexer) that wrote a symbol:
+    // the first word of a global id, and for a local the scheme of its
+    // document, so a load replaces only the locals of its own indexers. NULL
+    // for bazel_target rows. Driver-indexed subtrees are cleared for a new
+    // index, as in v12, so the next refresh writes the local edges.
+    r#"
+    ALTER TABLE entities ADD COLUMN scheme TEXT;
+    UPDATE entities SET scheme = substr(id, 1, instr(id, ' ') - 1)
+        WHERE kind = 'symbol' AND instr(id, ' ') > 0 AND id NOT LIKE 'local %';
+    DELETE FROM relations
+        WHERE (src_entity LIKE 'local %' AND instr(src_entity, '@') = 0)
+           OR (dst_entity LIKE 'local %' AND instr(dst_entity, '@') = 0);
+    DELETE FROM entities WHERE id LIKE 'local %' AND instr(id, '@') = 0;
+    UPDATE index_state SET commit_sha = '' WHERE source = 'drivers';
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
@@ -328,10 +347,16 @@ pub fn current_version(conn: &Connection) -> Result<i64> {
 }
 
 pub fn run_migrations(conn: &mut Connection) -> Result<()> {
+    run_migrations_to(conn, MIGRATIONS.len() as i64)
+}
+
+/// Apply the migrations after the current version, up to and including
+/// version `last`. Tests use it to make a database of an older version.
+fn run_migrations_to(conn: &mut Connection, last: i64) -> Result<()> {
     let current = current_version(conn)?;
     for (idx, sql) in MIGRATIONS.iter().enumerate() {
         let target = (idx as i64) + 1;
-        if target <= current {
+        if target <= current || target > last {
             continue;
         }
         let tx = conn.transaction()?;
@@ -563,6 +588,73 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn migrates_through_v13_entities_scheme_and_scoped_locals() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations_to(&mut conn, 12).unwrap();
+        // A v12 database: a symbol, a Bazel target, a `local 0` of the old
+        // form (one row for the whole database) with an edge in and out, and
+        // a scoped local with an edge.
+        conn.execute_batch(
+            "INSERT INTO entities (id, kind, name, project) VALUES
+                ('rust-analyzer cargo x 0.1.0 a/f().', 'symbol', 'f', '/p'),
+                ('//a:b', 'bazel_target', 'b', '/p'),
+                ('local 0', 'symbol', 'old', '/p'),
+                ('local 1@0123456789abcdef:src/a.rs', 'symbol', 'new', '/p');
+             INSERT INTO relations (id, src_entity, dst_entity, kind) VALUES
+                ('r1', 'local 0', 'rust-analyzer cargo x 0.1.0 a/f().', 'CALLS'),
+                ('r2', 'rust-analyzer cargo x 0.1.0 a/f().', 'local 0', 'REFERENCES'),
+                ('r3', 'local 1@0123456789abcdef:src/a.rs', 'rust-analyzer cargo x 0.1.0 a/f().', 'CALLS');
+             INSERT INTO index_state (project, subtree, commit_sha, source) VALUES
+                ('/p', '', 'abc', 'drivers'), ('/p', 'sub', 'def', 'scip');",
+        )
+        .unwrap();
+        run_migrations(&mut conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 13);
+
+        let scheme = |id: &str| -> Option<String> {
+            conn.query_row("SELECT scheme FROM entities WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            scheme("rust-analyzer cargo x 0.1.0 a/f().").as_deref(),
+            Some("rust-analyzer")
+        );
+        assert_eq!(scheme("//a:b"), None);
+        // The old local and its edges are gone; the scoped local stays.
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM relations ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(ids, vec!["r3"]);
+        let old: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entities WHERE id = 'local 0'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old, 0);
+        // Driver-indexed subtrees are indexed again at the next refresh, so
+        // the local edges come back; a prebuilt one keeps its commit.
+        let commits: Vec<(String, String)> = conn
+            .prepare("SELECT subtree, commit_sha FROM index_state ORDER BY subtree")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            commits,
+            vec![("".into(), "".into()), ("sub".into(), "def".into())]
+        );
     }
 
     #[test]

@@ -151,7 +151,7 @@ backup-and-restore story trivial.
 | `messages_fts`, `context_items_fts` | FTS5 external-content indexes. `INSERT`/`DELETE` triggers keep them aligned; `UPDATE` triggers were intentionally dropped in v5 so `compress-existing` doesn't overwrite the index with compressed text (see §6.4). |
 | `embeddings` | `(target_kind, target_id, model_id)` PK so vectors under different model versions coexist; cosine search ignores wrong-model rows. |
 | `events`, `session_budget` | The telemetry + budget surface. |
-| `entities`, `relations` | Knowledge-graph tables with `provenance ∈ {extracted, inferred, ambiguous, generated}`. The codegraph populates these from SCIP per-language indexers; `entities` carries `file_path`, `line_range`, `signature` (v6). |
+| `entities`, `relations` | Knowledge-graph tables with `provenance ∈ {extracted, inferred, ambiguous, generated}`. The codegraph populates these from SCIP per-language indexers; `entities` carries `file_path`, `line_range`, `signature` (v6), `qualified_name` (v12), and `scheme`, the indexer that wrote the symbol (v13). |
 | `scopes`, `scope_members` | Mempalace-style hierarchical scoping (project / topic / time-window / custom). Used by recall to restrict results to a `cwd` or named scope. |
 | `ingestion_log` | One row per JSONL path with `(last_offset, last_inode, last_size, last_mtime)` so we can detect rotation/truncation (§6.1). |
 
@@ -642,7 +642,14 @@ Flow:
    is matched as given against any project.
 2. `engraph_codegraph::subgraph::entities_in_file(conn, project, path, 30)`
    — `WHERE file_path = ?1 AND (?2 IS NULL OR project = ?2) ORDER BY
-   line_range LIMIT ?3`. Empty result → Passthrough (file isn't
+   line_range LIMIT ?3`. The list leaves out variables, parameters, and type parameters that
+   no relation goes from (`LISTED_IN_FILE`): local symbols, and the
+   global parameters (`…m().(self)`) and type parameters (`…f().[T]`)
+   that scip-python and scip-typescript write — in click's `_compat.py`,
+   96 of 185 entities. A local function and a rust-analyzer impl block
+   (`impl Batch`) stay, but not a local named only by its number
+   (scip-typescript gives locals no display name, so `local 8` is `8`).
+   Empty result → Passthrough (file isn't
    indexed).
 3. `build_read_context` renders each entity as
    `` - `name` @ line_range — `signature` `` (signatureless entities
@@ -1284,7 +1291,9 @@ but logs a warning if it ever happens.
 | 11 | `index_state` records how each subtree was indexed: `source` (`drivers` run by engraph, or prebuilt `scip` / `manifest`), the `--lang` pin, and `bazel_symbols`, so `index --if-changed` repeats the same run (§8.0.1). Older rows default to a plain driver run. |
 | 12 | `entities.qualified_name` + `idx_entities_qualified_name`: the SCIP descriptors after the namespace joined with `.` (`Config.full_path_base`, `Config`), so `subgraph` and the grep redirect can match a qualified lookup (§5.5, §14.4). NULL until the project is indexed again; Bazel targets never have one. Names change in the same load, so v12 also clears the commit of every driver run (`source = 'drivers'`): git can't resolve `''`, which counts as changed, so the next SessionStart refresh re-indexes the project. Until then the per-file divergence check treats its files as changed, and greps on them pass through. Prebuilt SCIP subtrees keep their commit, since the refresh skips them; repos without an automatic refresh (linked worktrees, bare-repo layouts) need one manual `engraph index`. |
 
-(`SCHEMA_VERSION = 12`; the `MIGRATIONS` array has 12 entries.)
+| 13 | SCIP local symbols per project and document (§14.3). `entities.scheme`: the SCIP scheme of the indexer that wrote a symbol (the first word of a global id; for a local, the scheme of its document; NULL for Bazel targets), filled for existing global symbols. The old `local <n>` rows, one row for the locals of all documents and projects, are deleted with their edges. Like v12, v13 clears the commit of every driver run, so the next refresh writes the local edges again. |
+
+(`SCHEMA_VERSION = 13`; the `MIGRATIONS` array has 13 entries.)
 
 ---
 
@@ -1300,7 +1309,7 @@ the modules they exercise; cross-cutting behavior lives under
 | `engraph-compress` | The compress pipeline is idempotent (a second pass is a no-op), stamps the sentinel header, and reduces ratio below 1 on realistic input. The ranker is deterministic. Per-filter tests pin token-reduction ratios for every command in the dispatcher and check picker↔FilterOutput id agreement. A separate golden-fixture pass guards byte-exact output drift for high-signal filters (git log, cargo check, cargo-nextest). The read-bucket tests cover per-language comment stripping, no head/tail re-windowing, and the empty-filter fallback. |
 | `engraph-retrieve` | FTS query sanitization, scope filtering applied in WHERE not in Rust. Behind the `embeddings` feature: RRF re-ranking actually changes order vs FTS-only, recency tiebreaks toward newer items, missing embeddings produce zero contribution rather than worst-rank, and embedding upserts are idempotent. |
 | `engraph-ingest` | M2-style partial-trailing-line handling on every JSONL chunk; rotation/truncation detection that replays the new file from offset zero; sidechain events are dropped; the per-file transaction commits or rolls back atomically; the compress-existing sweep keeps FTS pointed at the original hash so recall doesn't lose pre-compression matches; an ingest → recall round-trip (`tests/ingest_retrieve_roundtrip.rs`) covers scoped queries and entity search. |
-| `engraph-codegraph` | The SCIP loader's two-pass classifier emits CALLS edges, is idempotent under re-load, and scopes its DELETE to the current project (cross-repo loads don't trample each other). Names come from the id's last SCIP descriptor (`Config`, not `Config#`), a re-load replaces a stored name (also one a reference's placeholder guessed before the definition loaded), and `qualified_name` is written for symbols and placeholders. The subgraph renderer covers the four-section markdown shape, disambiguation on ambiguous names (qualified names, ordered: caller's project, non-test files, types before members), lookups by `Config::x` / `Config#x` / `Config.x`, byte-cap truncation, and the cross-repo `repo:<name>` annotation. Driver detection is unit-pinned per build system. Driver end-to-end tests under `tests/drivers_live.rs` soft-skip when the indexer or build tool is absent. Bazel coverage splits into target-level (JSON-proto parsing, location parser, idempotent re-index, target/dep round-trip) and symbol-level (SCIP byte-stream merge that preserves `documents` + `external_symbols`, lang-status display, and a triple-gated live Java integration test). |
+| `engraph-codegraph` | The SCIP loader's two-pass classifier emits CALLS edges, is idempotent under re-load, and scopes its DELETE to the current project (cross-repo loads don't trample each other). Names come from the id's last SCIP descriptor (`Config`, not `Config#`), a re-load replaces a stored name (also one a reference's placeholder guessed before the definition loaded), and `qualified_name` is written for symbols and placeholders. The `local 0` of two documents, or of two projects with one file path, are two entities with their own edges; a re-index removes the locals of a deleted file but keeps those of another indexer; `scheme` is written for globals and locals. Without a kind (scip-python), a method anchors a `CALLS` edge by its descriptor suffix, and a parameter is neither an anchor nor a target (`kindless_method_anchors_a_call_by_its_descriptor_suffix`). The subgraph renderer and the post-read list leave out locals that no relation goes from; the renderer covers the four-section markdown shape, disambiguation on ambiguous names (qualified names, ordered: caller's project, non-test files, types before members), lookups by `Config::x` / `Config#x` / `Config.x`, byte-cap truncation, and the cross-repo `repo:<name>` annotation. Driver detection is unit-pinned per build system. Driver end-to-end tests under `tests/drivers_live.rs` soft-skip when the indexer or build tool is absent. Bazel coverage splits into target-level (JSON-proto parsing, location parser, idempotent re-index, target/dep round-trip) and symbol-level (SCIP byte-stream merge that preserves `documents` + `external_symbols`, lang-status display, and a triple-gated live Java integration test). |
 | `engraph-cli` | The Claude Code hooks are integration-tested against the binary. Pre-bash covers every parser shape (sudo, env prefix, absolute path, `git -C`, heredoc, unquoted shell metachars). Pre-grep exercises the subgraph-redirect gate (1–8 match, regex shape, short patterns, ambiguous resolution, qualified path shapes matched by `qualified_name` first), and `index_divergence.rs` covers the indexed commit plus the branch-divergence passthrough and subgraph note. Post-read pins the `additionalContext` shape, the no-signature passthrough, and the unindexed-file no-op. Session-start tests the brief content + byte cap. `engraph run` is tested for budget charging, stdin inheritance, and concurrent pipe drain without deadlock under large output. |
 
 Live-binary tests in `engraph-codegraph/tests/drivers_live.rs`,
@@ -1531,9 +1540,13 @@ and builds `HashMap<String, Kind>`. **Pass 2** walks
   StaticMethod, AbstractMethod, Macro} → `CALLS`.
 - Non-definition, target kind ∈ {Class, Struct, Interface, Trait, Enum,
   TypeAlias, Type, Protocol} → `REFERENCES`.
-- Target kind is a local (Variable, Parameter, Field, …) or unknown →
-  edge is **skipped entirely**. Recording these would flood the
-  subgraph with un-navigable noise (e.g. `Called by conn in budget.rs`).
+- Target kind not set (scip-python sets no kind at all; cross-crate targets often have no `SymbolInformation`) → the
+  suffix of the id's last descriptor decides (see *Suffix-fallback kind
+  detection*, §14.7): a method gives `CALLS`, a type `REFERENCES`.
+- Any other target (Variable, Parameter, Field, …, or a term, parameter,
+  type-parameter, meta, or macro suffix, or a local) → edge is
+  **skipped entirely**. Recording these would flood the subgraph with
+  un-navigable noise (e.g. `Called by conn in budget.rs`).
 - `SymbolInformation.relationships[].is_implementation` → `IMPLEMENTS`.
 - `SymbolInformation.relationships[].is_reference` (and not also
   is_implementation) → `EXTENDS`.
@@ -1543,9 +1556,17 @@ and builds `HashMap<String, Kind>`. **Pass 2** walks
 **Anchor heuristic.** Occurrences don't carry their enclosing function
 directly. The loader anchors each non-definition occurrence to the
 nearest preceding definition *whose kind is anchorable* (function,
-method, class, struct, etc.) — never to a local variable or field.
-This is what makes `engraph subgraph run_migrations` produce real
-callers (`open_pool` etc.) instead of nearby variable names.
+method, class, struct, etc.) — never to a local variable, parameter, or
+field. This is what makes `engraph subgraph run_migrations` produce real
+callers (`open_pool` etc.) instead of nearby variable names. When the
+indexer sets no kind, the suffix of the definition's last descriptor
+(`parse_symbol`) gives it: a method (`…().`) is anchorable like a
+function, a type (`…#`) like a class, a namespace (`…/`) like a module;
+parameters, terms, and locals are not. scip-python sets no kind on any
+symbol, so without this fallback no definition in its indexes was an
+anchor, and Python graphs had only `IMPLEMENTS` edges. (scip-typescript
+0.4.0 sets no kind either; 0.6.0 sets one on every symbol, locals
+included.)
 
 **Idempotent atomic swap.** A `TxGuard` (same pattern as
 `engraph-ingest`) wraps the whole load:
@@ -1593,6 +1614,34 @@ Regression test `loader_preserves_bazel_depends_on_edges`
 entity under project X, runs `load(X, ...)`, asserts the row
 survives.
 
+**Local symbols.** A SCIP local symbol (`local 0`) names a symbol only
+inside its document, but `entities.id` is one key for the whole
+database. Before pass 1, the loader gives each local the id
+`local <n>@<project tag>:<relative_path>` — in the document's symbols,
+their relationships, and its occurrences. The tag is the first 16 hex
+digits of the SHA-256 of the project key, so two projects with the same
+file path (`src/main.rs`) also get different rows. The name comes from
+the original id. Without this, each document wrote over the `local <n>`
+rows of the documents before it, and the edges of all of them collected
+on one row (in `jsoup-java`, 12,152 locals became 920 rows, and most
+edges from a local anchor showed in a file that did not contain the
+call). The tag makes local ids machine-specific; nothing links locals
+across repos, so only a snapshot of ids must remove it.
+
+Locals are anchors when their kind is (scip-java gives the methods of
+anonymous and local classes the kind `Method`), so they are not removed.
+The post-read list and the sibling list leave out locals that no
+relation goes from (variables, parameters), and also the global
+parameters and type parameters of scip-python and scip-typescript
+(§5.6).
+
+A load replaces only the rows of its own indexers (`IN_SCOPE`): global
+symbols whose id starts with one of its schemes, and locals whose
+`scheme` column (schema v13: the scheme of the local's document, that
+of its first global symbol or reference) is one of them. Thus a load
+removes the locals of a deleted file, and a `--lang` run or a prebuilt
+SCIP file of one language keeps the locals of the others.
+
 **ID strategy.** `entities.id` is the raw SCIP moniker
 (`rust-analyzer cargo engraph-core 0.1.0 schema/run_migrations().`).
 Cross-machine moniker normalization has a wire-in hook
@@ -1619,8 +1668,12 @@ also takes the caller's project key — the CLI passes
    same project (`MATCH_WHERE_SQL`, shared with the grep redirect): rust-analyzer
    gives local variables a `display_name`, and a `let full_path_base`
    must not make the `Config.full_path_base` field ambiguous; a name
-   only locals have (a TypeScript local function) still resolves, and
-   locals have no `qualified_name`. `LIMIT 8`, ordered so the useful rows
+   only locals have (a TypeScript local function) still resolves when a
+   relation goes from one of them, and locals have no `qualified_name`.
+   Locals that no relation goes from (variables) never match: each file
+   has its own local rows (§14.3), so a variable name used in a few
+   files would otherwise fall in the grep redirect's 1–8 range and deny a
+   search that `subgraph` can only answer with a list of locations. `LIMIT 8`, ordered so the useful rows
    survive the cap: exact moniker, then the caller's project, then files
    that aren't tests (`test`/`spec` in the path), then types (id ending
    in `#`) before members, then by qualified name and file.
@@ -1631,7 +1684,8 @@ also takes the caller's project key — the CLI passes
    `r.valid_to IS NULL`, limit `max_nodes / 2`.
 3. **Incoming** (Called by): same shape, swap src/dst.
 4. **Siblings** (same file): `WHERE file_path = ? AND id != ?
-   ORDER BY line_range LIMIT 10`.
+   ORDER BY line_range LIMIT 10`, with the filter of the post-read
+   list (§5.6): no variables, parameters, or type parameters.
 
 `format_markdown()` lays out the four sections, dedupes by
 `(kind, target_id)` for outgoing and by `target_id` for incoming
@@ -1694,6 +1748,7 @@ function def). v2.1's "nearest preceding by line" picked arbitrarily on
 ties and would attribute calls to `crate/` instead of the actual
 enclosing function. v2.2 ranks anchor candidates by kind specificity
 (Function/Method = 100, Class/Struct/Enum = 50, Module/Namespace =
+10; with no kind, the descriptor suffix: method 100, type 50, namespace
 10) and breaks line ties in favor of the more specific kind. This is
 what makes the workspace test pin `app_caller → lib_foo` instead of
 `crate/ → lib_foo`.
@@ -1701,10 +1756,15 @@ what makes the workspace test pin `app_caller → lib_foo` instead of
 **Suffix-fallback kind detection.** When the indexer is pointed at only
 the consumer crate, the producer's symbols arrive as occurrences with
 no matching `SymbolInformation` — `target_kind` is therefore unknown
-and the v2.1 loader dropped the edge. v2.2 falls back to parsing the
-SCIP descriptor suffix when kind is missing: `()` / `().` → CALLS,
-`#` → REFERENCES, anything else (locals, terms) → skip. Without this
-fallback every cross-repo call goes missing.
+and the v2.1 loader dropped the edge. v2.2 falls back to the SCIP
+descriptor suffix when kind is missing. The id is parsed with
+`parse_symbol`, and the suffix of its last descriptor decides: method
+(`().`) → CALLS, type (`#`) → REFERENCES, anything else (parameters,
+terms, type parameters, meta, macros, locals) → skip. The parse matters
+for parameters: `…/C#m().(self)` also ends with `)`, and the older
+last-character test made every use of a parameter a CALLS edge. Ids the
+grammar rejects keep that textual test. Without this fallback every
+cross-repo call goes missing.
 
 **`engraph index --workspace <dir>`.** New subcommand. If `<dir>` itself
 carries a build manifest, indexes just `<dir>`. Otherwise, walks

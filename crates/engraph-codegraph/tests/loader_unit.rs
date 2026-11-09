@@ -408,3 +408,289 @@ fn loader_writes_the_qualified_name_of_each_symbol() {
     load(&conn, "/proj/demo", &idx.write_to_bytes().unwrap()).unwrap();
     assert_eq!(qn(extern_method).as_deref(), Some("Ext.call"));
 }
+
+// scip-python sets neither `SymbolInformation.kind` nor `display_name`; the
+// symbol id is the only source of the kind. The document models:
+//
+//   0  class C:
+//   1      def m(self):
+//   2          f(self)
+//   4  def f(): ...
+const PY_CLASS: &str = "scip-python python demo 0 `pkg.mod`/C#";
+const PY_METHOD: &str = "scip-python python demo 0 `pkg.mod`/C#m().";
+const PY_PARAM: &str = "scip-python python demo 0 `pkg.mod`/C#m().(self)";
+const PY_FUNC: &str = "scip-python python demo 0 `pkg.mod`/f().";
+
+fn build_kindless_python() -> Vec<u8> {
+    let no_kind = |symbol: &str| {
+        let mut s = SymbolInformation::new();
+        s.symbol = symbol.to_string();
+        s
+    };
+    let def = SymbolRole::Definition as i32;
+    let mut doc = Document::new();
+    doc.relative_path = "pkg/mod.py".to_string();
+    doc.symbols = vec![
+        no_kind(PY_CLASS),
+        no_kind(PY_METHOD),
+        no_kind(PY_PARAM),
+        no_kind(PY_FUNC),
+    ];
+    doc.occurrences = vec![
+        occ(PY_CLASS, vec![0, 6, 0, 7], def),
+        occ(PY_METHOD, vec![1, 8, 1, 9], def),
+        occ(PY_PARAM, vec![1, 10, 1, 14], def),
+        occ(PY_FUNC, vec![2, 8, 2, 9], 0),
+        occ(PY_PARAM, vec![2, 10, 2, 14], 0),
+        occ(PY_FUNC, vec![4, 4, 4, 5], def),
+    ];
+    let mut idx = Index::new();
+    idx.metadata = MessageField::some(Default::default());
+    idx.documents.push(doc);
+    idx.write_to_bytes().unwrap()
+}
+
+fn count_relations(conn: &engraph_core::db::PooledConn, sql_where: &str, id: &str) -> i64 {
+    conn.query_row(
+        &format!("SELECT COUNT(*) FROM relations WHERE {sql_where}"),
+        [id],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn kindless_method_anchors_a_call_by_its_descriptor_suffix() {
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/demo", &build_kindless_python()).unwrap();
+
+    let calls: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM relations
+             WHERE src_entity = ?1 AND dst_entity = ?2 AND kind = 'CALLS'",
+            rusqlite::params![PY_METHOD, PY_FUNC],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(calls, 1, "expected one C#m() -> f() CALLS edge");
+    // A parameter is not an anchor, and a use of it is not a call.
+    assert_eq!(count_relations(&conn, "src_entity = ?1", PY_PARAM), 0);
+    assert_eq!(count_relations(&conn, "dst_entity = ?1", PY_PARAM), 0);
+}
+
+// SCIP local symbols (`local 0`) name a symbol only inside one document. Two
+// documents that both use `local 0` mean two different symbols.
+const LOCAL_FUNC: &str = "scip-test cargo demo 0.0.0 pkg/f().";
+
+fn doc_with_local_zero(path: &str, local_name: &str, def_line: i32) -> Document {
+    let def = SymbolRole::Definition as i32;
+    let mut doc = Document::new();
+    doc.relative_path = path.to_string();
+    doc.symbols = vec![sym("local 0", local_name, SymKind::Function)];
+    doc.occurrences = vec![
+        occ("local 0", vec![def_line, 0, def_line, 4], def),
+        // A call of pkg/f() in the body of `local 0`.
+        occ(LOCAL_FUNC, vec![def_line + 1, 4, def_line + 1, 5], 0),
+    ];
+    doc
+}
+
+fn build_two_documents_with_local_zero() -> Vec<u8> {
+    let def = SymbolRole::Definition as i32;
+    let mut lib = Document::new();
+    lib.relative_path = "src/pkg.rs".to_string();
+    lib.symbols = vec![sym(LOCAL_FUNC, "f", SymKind::Function)];
+    lib.occurrences = vec![occ(LOCAL_FUNC, vec![0, 0, 0, 1], def)];
+    let mut idx = Index::new();
+    idx.metadata = MessageField::some(Default::default());
+    idx.documents.push(lib);
+    idx.documents
+        .push(doc_with_local_zero("src/a.rs", "helper_a", 3));
+    idx.documents
+        .push(doc_with_local_zero("src/b.rs", "helper_b", 7));
+    idx.write_to_bytes().unwrap()
+}
+
+#[test]
+fn local_symbols_of_two_documents_stay_two_entities() {
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/demo", &build_two_documents_with_local_zero()).unwrap();
+
+    // One entity per `local 0`, each with the name and file of its document.
+    let mut stmt = conn
+        .prepare(
+            "SELECT name, file_path, line_range FROM entities
+             WHERE id LIKE 'local %' ORDER BY file_path",
+        )
+        .unwrap();
+    let locals: Vec<(String, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        locals,
+        vec![
+            ("helper_a".into(), "src/a.rs".into(), "4:4".into()),
+            ("helper_b".into(), "src/b.rs".into(), "8:8".into()),
+        ]
+    );
+
+    // Each of the two has its own CALLS edge to pkg/f().
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.file_path FROM relations r JOIN entities e ON e.id = r.src_entity
+             WHERE r.dst_entity = ?1 AND r.kind = 'CALLS' ORDER BY e.file_path",
+        )
+        .unwrap();
+    let callers: Vec<String> = stmt
+        .query_map([LOCAL_FUNC], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(callers, vec!["src/a.rs", "src/b.rs"]);
+}
+
+#[test]
+fn local_symbols_of_two_projects_with_one_path_stay_apart() {
+    // Two repos with the same file (`src/a.rs`) and the same `local 0`: the
+    // load of the second must not take the row, or the edges, of the first.
+    let bytes = |name: &str| {
+        let mut idx = Index::new();
+        idx.metadata = MessageField::some(Default::default());
+        idx.documents.push(doc_with_local_zero("src/a.rs", name, 3));
+        idx.write_to_bytes().unwrap()
+    };
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/one", &bytes("helper_one")).unwrap();
+    load(&conn, "/proj/two", &bytes("helper_two")).unwrap();
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.project, e.name FROM relations r JOIN entities e ON e.id = r.src_entity
+             WHERE r.dst_entity = ?1 AND r.kind = 'CALLS' ORDER BY e.project",
+        )
+        .unwrap();
+    let callers: Vec<(String, String)> = stmt
+        .query_map([LOCAL_FUNC], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        callers,
+        vec![
+            ("/proj/one".into(), "helper_one".into()),
+            ("/proj/two".into(), "helper_two".into()),
+        ]
+    );
+}
+
+fn index_of(docs: Vec<Document>) -> Vec<u8> {
+    let mut idx = Index::new();
+    idx.metadata = MessageField::some(Default::default());
+    idx.documents = docs;
+    idx.write_to_bytes().unwrap()
+}
+
+fn pkg_doc() -> Document {
+    let mut lib = Document::new();
+    lib.relative_path = "src/pkg.rs".to_string();
+    lib.symbols = vec![sym(LOCAL_FUNC, "f", SymKind::Function)];
+    lib.occurrences = vec![occ(
+        LOCAL_FUNC,
+        vec![0, 0, 0, 1],
+        SymbolRole::Definition as i32,
+    )];
+    lib
+}
+
+fn local_rows(conn: &engraph_core::db::PooledConn) -> (i64, i64) {
+    let entities = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE id LIKE 'local %'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let relations = conn
+        .query_row(
+            "SELECT COUNT(*) FROM relations WHERE src_entity LIKE 'local %'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    (entities, relations)
+}
+
+#[test]
+fn a_reindex_removes_the_locals_of_a_deleted_file() {
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    let a = || doc_with_local_zero("src/a.rs", "helper_a", 3);
+    let b = || doc_with_local_zero("src/b.rs", "helper_b", 7);
+    load(&conn, "/proj/demo", &index_of(vec![pkg_doc(), a(), b()])).unwrap();
+    assert_eq!(local_rows(&conn), (2, 2));
+    // src/a.rs is deleted: its local and the local's edge go.
+    load(&conn, "/proj/demo", &index_of(vec![pkg_doc(), b()])).unwrap();
+    assert_eq!(local_rows(&conn), (1, 1));
+}
+
+#[test]
+fn a_load_of_another_indexer_keeps_the_locals() {
+    // `engraph index --lang …` runs, or one prebuilt SCIP file per language,
+    // load one project in parts. A part must not remove the locals (or their
+    // edges) of an indexer that is not in it.
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    let a = doc_with_local_zero("src/a.rs", "helper_a", 3);
+    load(&conn, "/proj/demo", &index_of(vec![pkg_doc(), a])).unwrap();
+    assert_eq!(local_rows(&conn), (1, 1));
+
+    let other = "other-indexer npm demo 1.0.0 src/`x.ts`/g().";
+    let mut doc = Document::new();
+    doc.relative_path = "src/x.ts".to_string();
+    doc.symbols = vec![
+        sym(other, "g", SymKind::Function),
+        sym("local 0", "inner", SymKind::Variable),
+    ];
+    doc.occurrences = vec![
+        occ(other, vec![0, 0, 0, 1], SymbolRole::Definition as i32),
+        occ("local 0", vec![1, 0, 1, 1], SymbolRole::Definition as i32),
+    ];
+    load(&conn, "/proj/demo", &index_of(vec![doc])).unwrap();
+    // The scip-test local and its edge stay; the other indexer adds its own.
+    assert_eq!(local_rows(&conn), (2, 1));
+}
+
+#[test]
+fn the_loader_writes_the_scheme_of_each_symbol() {
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    let a = doc_with_local_zero("src/a.rs", "helper_a", 3);
+    load(&conn, "/proj/demo", &index_of(vec![pkg_doc(), a])).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT id, scheme FROM entities ORDER BY id")
+        .unwrap();
+    let rows: Vec<(String, Option<String>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    // The id of a global symbol starts with its scheme; a local gets the
+    // scheme of the other symbols of its document.
+    assert!(rows[0].0.starts_with("local 0@"), "{rows:?}");
+    assert_eq!(rows[1].0, LOCAL_FUNC);
+    for (_, scheme) in &rows {
+        assert_eq!(scheme.as_deref(), Some("scip-test"));
+    }
+}

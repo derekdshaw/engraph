@@ -156,14 +156,18 @@ const TEST_PATH_SQL: &str =
 /// symbols shadow `local N` ones of their own project: rust-analyzer names
 /// local variables, and a `let full_path_base` must not make the
 /// `Config.full_path_base` field ambiguous. Locals alone (a TypeScript local
-/// function), or in a project without that global, still match. The query
-/// using it must select `FROM entities` without an alias.
+/// function), or in a project without that global, still match, but only
+/// when a relation goes from them: each file has its own local rows, so a
+/// variable name used in a few files would otherwise make the grep redirect
+/// deny a search that `subgraph` can only answer with a list of locations.
+/// The query using it must select `FROM entities` without an alias.
 pub const MATCH_WHERE_SQL: &str = "(name = ?1 OR id = ?1 OR qualified_name = ?2)
     AND (id NOT LIKE 'local %'
-         OR NOT EXISTS (SELECT 1 FROM entities g
-                        WHERE (g.name = ?1 OR g.id = ?1 OR g.qualified_name = ?2)
-                          AND g.id NOT LIKE 'local %'
-                          AND g.project IS entities.project))";
+         OR (EXISTS (SELECT 1 FROM relations r WHERE r.src_entity = entities.id)
+             AND NOT EXISTS (SELECT 1 FROM entities g
+                             WHERE (g.name = ?1 OR g.id = ?1 OR g.qualified_name = ?2)
+                               AND g.id NOT LIKE 'local %'
+                               AND g.project IS entities.project)))";
 
 fn resolve_matches(
     conn: &PooledConn,
@@ -251,6 +255,23 @@ fn query_edges(
     Ok(rows)
 }
 
+/// The rows a list of a file's symbols shows (the post-read list, the
+/// sibling list): all but variables, parameters, and type parameters that
+/// no relation goes from, which only add tokens. Those are local symbols
+/// (`local 3@…`), and the global parameters (`…m().(self)`, the last
+/// descriptor ends with `)`) and type parameters (`…f().[T]`, ends with
+/// `]`) that scip-python and scip-typescript write. A rust-analyzer impl
+/// block (`…/impl#[Batch]`, named `impl Batch`) also ends with `]`, and
+/// stays; so does a local function, which anchors calls, unless its name is
+/// only its number (`local 8@…` named `8`: scip-typescript gives locals no
+/// display name), which the agent cannot look up. Unqualified columns, for
+/// `entities` statements.
+const LISTED_IN_FILE: &str = "(NOT (id LIKE 'local %'
+          OR id LIKE '%)'
+          OR (id LIKE '%]' AND name NOT LIKE 'impl %'))
+     OR (EXISTS (SELECT 1 FROM relations r WHERE r.src_entity = entities.id)
+         AND NOT (id LIKE 'local %' AND name = substr(id, 7, instr(id, '@') - 7))))";
+
 /// All entities defined in `file_path` (of `project`, when given), ordered by
 /// line. Used by the PostToolUse(Read) augment to enrich Claude's view of a
 /// just-read file with the indexed-symbol map.
@@ -260,12 +281,12 @@ pub fn entities_in_file(
     file_path: &str,
     limit: usize,
 ) -> Result<Vec<EntityRow>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, name, qualified_name, project, file_path, line_range, signature FROM entities
-         WHERE file_path = ?1 AND (?2 IS NULL OR project = ?2)
+         WHERE file_path = ?1 AND (?2 IS NULL OR project = ?2) AND {LISTED_IN_FILE}
          ORDER BY line_range
-         LIMIT ?3",
-    )?;
+         LIMIT ?3"
+    ))?;
     let rows = stmt
         .query_map(
             rusqlite::params![file_path, project, limit as i64],
@@ -283,12 +304,12 @@ fn query_siblings(
     file_path: &str,
     limit: usize,
 ) -> Result<Vec<EntityRow>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, name, qualified_name, project, file_path, line_range, signature FROM entities
-         WHERE file_path = ?1 AND project IS ?2 AND id != ?3
+         WHERE file_path = ?1 AND project IS ?2 AND id != ?3 AND {LISTED_IN_FILE}
          ORDER BY line_range
-         LIMIT ?4",
-    )?;
+         LIMIT ?4"
+    ))?;
     let rows = stmt
         .query_map(
             rusqlite::params![file_path, target.project, target.id, limit as i64],
@@ -726,6 +747,94 @@ mod tests {
         );
     }
 
+    /// `src/walk.rs` with a function, a local variable (nothing goes from it),
+    /// and a local function (it calls `run`).
+    fn seed_locals(conn: &PooledConn) {
+        conn.execute_batch(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range, signature)
+             VALUES ('ra walk/run().', 'symbol', 'run', '/p', 'src/walk.rs', '1:1', 'fn run()'),
+                    ('local 1@t:src/walk.rs', 'symbol', 'count', '/p', 'src/walk.rs', '2:2', 'let count: usize'),
+                    ('local 2@t:src/walk.rs', 'symbol', 'visit', '/p', 'src/walk.rs', '3:3', 'fn visit()');
+             INSERT INTO relations (id, src_entity, dst_entity, kind)
+             VALUES ('r1', 'local 2@t:src/walk.rs', 'ra walk/run().', 'CALLS'),
+                    ('r2', 'ra walk/run().', 'local 1@t:src/walk.rs', 'REFERENCES');",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn file_lists_skip_locals_with_no_outgoing_relation() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        seed_locals(&conn);
+
+        // The post-read list.
+        let names: Vec<String> = entities_in_file(&conn, Some("/p"), "src/walk.rs", 30)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["run", "visit"]);
+
+        // The sibling list of `run`.
+        let n = subgraph_for(&conn, "run", 30).unwrap();
+        let siblings: Vec<&str> = n.siblings.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(siblings, vec!["visit"]);
+    }
+
+    #[test]
+    fn file_lists_skip_parameters_and_type_parameters() {
+        // scip-python and scip-typescript write parameters (`…m().(self)`)
+        // and type parameters (`…f().[T]`) as global symbols, not locals.
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute_batch(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range) VALUES
+                ('py m `a`/C#', 'symbol', 'C', '/p', 'a.py', '1:1'),
+                ('py m `a`/C#m().', 'symbol', 'm', '/p', 'a.py', '2:2'),
+                ('py m `a`/C#m().(self)', 'symbol', 'self', '/p', 'a.py', '2:2'),
+                ('py m `a`/C#m().(size)', 'symbol', 'size', '/p', 'a.py', '2:2'),
+                ('py m `a`/f().[T]', 'symbol', 'T', '/p', 'a.py', '5:5'),
+                ('py m `a`/f().', 'symbol', 'f', '/p', 'a.py', '5:5'),
+                ('ra cargo x 1 walk/impl#[Batch]', 'symbol', 'impl Batch', '/p', 'a.py', '8:8');",
+        )
+        .unwrap();
+        let names: Vec<String> = entities_in_file(&conn, Some("/p"), "a.py", 30)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["C", "m", "f", "impl Batch"]);
+        let n = subgraph_for(&conn, "C", 30).unwrap();
+        let siblings: Vec<&str> = n.siblings.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(siblings, vec!["m", "f", "impl Batch"]);
+    }
+
+    #[test]
+    fn file_lists_skip_locals_named_only_by_their_number() {
+        // scip-typescript gives locals no display name, so a local function
+        // is named by its number (`8`); `subgraph 8` finds nothing useful.
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        seed_locals(&conn);
+        conn.execute_batch(
+            "INSERT INTO entities (id, kind, name, project, file_path, line_range)
+             VALUES ('local 8@t:src/walk.rs', 'symbol', '8', '/p', 'src/walk.rs', '4:4');
+             INSERT INTO relations (id, src_entity, dst_entity, kind)
+             VALUES ('r3', 'local 8@t:src/walk.rs', 'ra walk/run().', 'CALLS');",
+        )
+        .unwrap();
+        let names: Vec<String> = entities_in_file(&conn, Some("/p"), "src/walk.rs", 30)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["run", "visit"]);
+    }
+
     #[test]
     fn global_symbols_shadow_locals_of_the_same_name() {
         // rust-analyzer names `local N` variables; a `let full_path_base`
@@ -739,7 +848,14 @@ mod tests {
                      'Config.full_path_base', '/p', 'src/config.rs', '17:17'),
                     ('local 129', 'symbol', 'full_path_base', NULL, '/p', 'src/walk.rs', '686:686'),
                     ('local 137', 'symbol', 'full_path_base', NULL, '/p', 'src/walk.rs', '724:724'),
-                    ('local 5', 'symbol', 'only_local', NULL, '/p', 'src/walk.rs', '10:10')",
+                    ('local 5', 'symbol', 'only_local', NULL, '/p', 'src/walk.rs', '10:10'),
+                    ('local 6', 'symbol', 'only_a_variable', NULL, '/p', 'src/walk.rs', '11:11')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO relations (id, src_entity, dst_entity, kind)
+             VALUES ('r1', 'local 5', 'ra config/Config#full_path_base.', 'REFERENCES')",
             [],
         )
         .unwrap();
@@ -747,10 +863,13 @@ mod tests {
         assert_eq!(n.matches.len(), 1, "{:?}", n.matches);
         assert_eq!(n.matches[0].id, "ra config/Config#full_path_base.");
         // A name that only locals have (a TypeScript local function) still
-        // resolves.
+        // resolves when a relation goes from it.
         let n = subgraph_for(&conn, "only_local", 30).unwrap();
         assert_eq!(n.matches.len(), 1);
         assert_eq!(n.matches[0].id, "local 5");
+        // A local that no relation goes from (a variable) does not.
+        let n = subgraph_for(&conn, "only_a_variable", 30).unwrap();
+        assert!(n.matches.is_empty(), "{:?}", n.matches);
     }
 
     #[test]
@@ -796,6 +915,12 @@ mod tests {
              VALUES ('ra config/Config#full_path_base.', 'symbol', 'full_path_base',
                      'Config.full_path_base', '/a', 'src/config.rs', '17:17'),
                     ('local 7', 'symbol', 'full_path_base', NULL, '/b', 'src/app.ts', '3:9')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO relations (id, src_entity, dst_entity, kind)
+             VALUES ('r1', 'local 7', 'ra config/Config#full_path_base.', 'REFERENCES')",
             [],
         )
         .unwrap();
