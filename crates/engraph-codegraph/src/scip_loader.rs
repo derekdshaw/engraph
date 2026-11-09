@@ -293,6 +293,9 @@ fn load_document(
     // the symbol below. Until then file_path = doc.relative_path,
     // line_range = NULL.
     let mut def_loc: HashMap<String, (i32, i32)> = HashMap::new(); // sym -> (start_line, end_line)
+    // sym -> lines of the definition's `enclosing_range` (the whole function
+    // or class, decorators included), when the indexer writes one.
+    let mut def_scope: HashMap<String, (i32, i32)> = HashMap::new();
     let doc_scheme = document_scheme(doc);
     let mut def_generated: HashMap<String, bool> = HashMap::new();
 
@@ -304,6 +307,9 @@ fn load_document(
         }
         let (start_line, end_line) = decode_range(&occ.range);
         def_loc.insert(occ.symbol.clone(), (start_line, end_line));
+        if !occ.enclosing_range.is_empty() {
+            def_scope.insert(occ.symbol.clone(), decode_range(&occ.enclosing_range));
+        }
         if role_set(roles, SymbolRole::Generated) {
             def_generated.insert(occ.symbol.clone(), true);
         }
@@ -401,13 +407,17 @@ fn load_document(
     // class, etc.). Without this filter the heuristic latches onto local
     // variables and produces nonsensical "Called by `conn` in budget.rs"
     // lines.
-    // Anchors are tuples of (start_line, specificity, symbol). When several
+    // Anchors are tuples of (start_line, specificity, symbol, end_line). An
+    // anchor with an `enclosing_range` starts at the start of that range and
+    // ends at its end; one without has no end. When several
     // definitions start on the same line — common at the top of a file where
     // the `crate/` module def shares line 0 with the first function def —
     // ties are broken by specificity so a Function anchor wins over the
     // enclosing Module. Without this tiebreak the `nearest_enclosing` search
-    // can attribute a call to `crate/` instead of `app_caller`.
-    let mut def_anchors: Vec<(i32, u8, String)> = def_loc
+    // can attribute a call to `crate/` instead of `app_caller`. The symbol
+    // breaks the remaining ties, so the choice does not depend on HashMap
+    // order.
+    let mut def_anchors: Vec<(i32, u8, String, Option<i32>)> = def_loc
         .iter()
         .filter_map(|(sym, (start, _))| {
             let kind = sym_kind.get(sym).copied();
@@ -415,11 +425,13 @@ fn load_document(
             if spec == 0 {
                 None
             } else {
-                Some((*start, spec, sym.clone()))
+                let scope = def_scope.get(sym);
+                let start = scope.map_or(*start, |&(s, _)| s);
+                Some((start, spec, sym.clone(), scope.map(|&(_, e)| e)))
             }
         })
         .collect();
-    def_anchors.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    def_anchors.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
 
     for occ in &doc.occurrences {
         if occ.symbol.is_empty() {
@@ -501,15 +513,24 @@ fn defined_in_several_documents(index: &Index) -> HashSet<String> {
     several
 }
 
-fn nearest_enclosing(def_anchors: &[(i32, u8, String)], occ_line: i32) -> Option<String> {
+fn nearest_enclosing(
+    def_anchors: &[(i32, u8, String, Option<i32>)],
+    occ_line: i32,
+) -> Option<String> {
     // Find the anchor with maximum start_line ≤ occ_line, breaking line ties
     // by higher specificity. `def_anchors` is sorted (line ASC, spec ASC), so
     // a linear scan from the end picks the right one in O(n) — fine for
-    // per-document anchor sets.
+    // per-document anchor sets. An anchor whose range ended before the
+    // occurrence does not contain it: module-level code after a Python
+    // function, or a nested function's caller after the nested function,
+    // goes to the next enclosing anchor, or to none.
     let mut best: Option<(i32, u8, &str)> = None;
-    for (line, spec, sym) in def_anchors {
+    for (line, spec, sym, end) in def_anchors {
         if *line > occ_line {
             break;
+        }
+        if end.is_some_and(|e| e < occ_line) {
+            continue;
         }
         match best {
             None => best = Some((*line, *spec, sym.as_str())),
@@ -633,7 +654,11 @@ fn anchor_specificity(k: Option<SymKind>, symbol: &str) -> u8 {
         | Some(SymKind::Interface)
         | Some(SymKind::Trait)
         | Some(SymKind::Enum) => 50,
-        Some(SymKind::Module) | Some(SymKind::Namespace) | Some(SymKind::Package) => 10,
+        // scip-typescript gives a module (`…/`a.ts`/`) the kind File.
+        Some(SymKind::Module)
+        | Some(SymKind::Namespace)
+        | Some(SymKind::Package)
+        | Some(SymKind::File) => 10,
         None | Some(SymKind::UnspecifiedKind) => match last_suffix(symbol) {
             Some(Suffix::Method) => 100,
             Some(Suffix::Type) => 50,

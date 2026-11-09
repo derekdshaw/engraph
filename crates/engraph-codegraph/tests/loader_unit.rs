@@ -767,3 +767,117 @@ fn an_anchor_defined_in_several_documents_records_no_line() {
         .collect();
     assert_eq!(lines, vec![None, None]);
 }
+
+// A definition's `enclosing_range` is the whole function or class. The
+// document models (0-based lines):
+//
+//   0  import helper            (module)
+//   2  @deco                    decorator of `outer`, in its range
+//   3  def outer():             range 2..8
+//   4      def inner():         range 4..5
+//   5          helper()         -> inner
+//   6      helper()             -> outer, after the range of inner
+//   8      return
+//  10  helper()                 module level: no anchor (Python)
+const SCOPE_MOD: &str = "scip-python python demo 0 `pkg.mod`/__init__:";
+const SCOPE_OUTER: &str = "scip-python python demo 0 `pkg.mod`/outer().";
+const SCOPE_INNER: &str = "scip-python python demo 0 `pkg.mod`/outer().inner().";
+const SCOPE_DECO: &str = "scip-python python demo 0 `pkg.mod`/deco().";
+const SCOPE_HELPER: &str = "scip-python python demo 0 `pkg.mod`/helper().";
+
+fn scoped_def(symbol: &str, line: i32, scope: Vec<i32>) -> Occurrence {
+    let mut o = occ(
+        symbol,
+        vec![line, 4, line, 9],
+        SymbolRole::Definition as i32,
+    );
+    o.enclosing_range = scope;
+    o
+}
+
+fn callers_by_line(conn: &engraph_core::db::PooledConn, dst: &str) -> Vec<(String, String)> {
+    // (caller, callee) of every CALLS edge to `dst`, by caller.
+    conn.prepare(
+        "SELECT r.src_entity, r.dst_entity FROM relations r
+         WHERE r.dst_entity = ?1 AND r.kind = 'CALLS' ORDER BY r.src_entity",
+    )
+    .unwrap()
+    .query_map([dst], |r| Ok((r.get(0)?, r.get(1)?)))
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+}
+
+#[test]
+fn an_occurrence_after_an_anchor_range_does_not_go_to_that_anchor() {
+    let mut doc = Document::new();
+    doc.relative_path = "pkg/mod.py".to_string();
+    // scip-python: symbols without a kind.
+    doc.symbols = [SCOPE_MOD, SCOPE_OUTER, SCOPE_INNER]
+        .into_iter()
+        .map(|symbol| {
+            let mut s = SymbolInformation::new();
+            s.symbol = symbol.to_string();
+            s
+        })
+        .collect();
+    doc.occurrences = vec![
+        occ(SCOPE_MOD, vec![0, 0, 0], SymbolRole::Definition as i32),
+        occ(SCOPE_DECO, vec![2, 1, 2, 5], 0),
+        scoped_def(SCOPE_OUTER, 3, vec![2, 0, 8, 10]),
+        scoped_def(SCOPE_INNER, 4, vec![4, 4, 5, 16]),
+        occ(SCOPE_HELPER, vec![5, 8, 5, 14], 0),
+        occ(SCOPE_HELPER, vec![6, 4, 6, 10], 0),
+        occ(SCOPE_HELPER, vec![10, 0, 10, 6], 0),
+    ];
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/demo", &index_of(vec![doc])).unwrap();
+
+    // The call in `inner`, and the one in `outer` after `inner` ended. The
+    // module-level call has no anchor (`__init__:` is not one).
+    assert_eq!(
+        callers_by_line(&conn, SCOPE_HELPER),
+        vec![
+            (SCOPE_OUTER.to_string(), SCOPE_HELPER.to_string()),
+            (SCOPE_INNER.to_string(), SCOPE_HELPER.to_string()),
+        ]
+    );
+    // The decorator is in the range of the function it decorates.
+    assert_eq!(
+        callers_by_line(&conn, SCOPE_DECO),
+        vec![(SCOPE_OUTER.to_string(), SCOPE_DECO.to_string())]
+    );
+}
+
+#[test]
+fn module_level_typescript_code_goes_to_its_file() {
+    // scip-typescript gives a module the kind File, with a range over the
+    // whole file. A call after a function's range (a `describe` callback)
+    // goes to the file, not to the function above it.
+    let module = "scip-typescript npm demo 1.0.0 src/`a.test.ts`/";
+    let make = "scip-typescript npm demo 1.0.0 src/`a.test.ts`/makeContext().";
+    let target = "scip-typescript npm demo 1.0.0 src/`a.ts`/handle().";
+    let mut doc = Document::new();
+    doc.relative_path = "src/a.test.ts".to_string();
+    doc.symbols = vec![
+        sym(module, "a.test.ts", SymKind::File),
+        sym(make, "makeContext", SymKind::Function),
+    ];
+    let mut module_def = scoped_def(module, 0, vec![0, 0, 40, 0]);
+    module_def.range = vec![0, 0, 0];
+    doc.occurrences = vec![
+        module_def,
+        scoped_def(make, 2, vec![2, 0, 10, 1]),
+        occ(target, vec![30, 4, 30, 10], 0),
+    ];
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/demo", &index_of(vec![doc])).unwrap();
+    assert_eq!(
+        callers_by_line(&conn, target),
+        vec![(module.to_string(), target.to_string())]
+    );
+}

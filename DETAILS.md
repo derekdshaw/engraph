@@ -1578,6 +1578,27 @@ anchor, and Python graphs had only `IMPLEMENTS` edges. (scip-typescript
 0.4.0 sets no kind either; 0.6.0 sets one on every symbol, locals
 included.)
 
+**Anchor ranges.** Indexers write `enclosing_range` on definitions:
+the lines of the whole definition, decorators included (rust-analyzer
+on every definition, scip-java on most, scip-python on functions and
+classes, scip-typescript on functions, classes, and the module). An
+anchor with a range starts at the start of the range, and an occurrence
+after its end does not go to it, but to the next anchor that still
+contains it. Without this, the nearest definition above an occurrence
+took it: a decorator went to the function above, module-level Python
+code to the last function of the file, the caller of a nested function
+(`KD` in `build_digest_header`) to the nested function, and a
+TypeScript `describe` callback to the last helper defined above it. An
+anchor without a range keeps the old rule. scip-typescript gives a
+module the kind `File`, which is anchorable like a module, so
+module-level TypeScript code goes to its file. A Python module
+(`__init__:`, a meta descriptor) is not an anchor, so module-level
+Python code has no relation. Edges checked against the Python AST:
+`click-python` 6,380 of 7,913 correct → 8,157 of 8,157,
+`requests-python` 1,539 of 1,657 → 1,535 of 1,535. Anchors that tie on
+start line and specificity are ordered by symbol, so a load gives the
+same edges in each process (they came from `HashMap` order before).
+
 **Idempotent atomic swap.** A `TxGuard` (same pattern as
 `engraph-ingest`) wraps the whole load:
 
@@ -1767,7 +1788,7 @@ the file's `crate/` module def sits at line 0 alongside the first
 function def). v2.1's "nearest preceding by line" picked arbitrarily on
 ties and would attribute calls to `crate/` instead of the actual
 enclosing function. v2.2 ranks anchor candidates by kind specificity
-(Function/Method = 100, Class/Struct/Enum = 50, Module/Namespace =
+(Function/Method = 100, Class/Struct/Enum = 50, Module/Namespace/File =
 10; with no kind, the descriptor suffix: method 100, type 50, namespace
 10) and breaks line ties in favor of the more specific kind. This is
 what makes the workspace test pin `app_caller → lib_foo` instead of
