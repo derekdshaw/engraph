@@ -89,7 +89,8 @@ pub struct LangIndexResult {
 }
 
 /// The command that indexes Go under Bazel when the native per-module pass
-/// cannot (`run_go`). Named by `SkippedNoGoModules` too, so both stay in step.
+/// cannot (`run_go`). Also the `env` of the `SkippedNotConfigured` the native
+/// pass reports when it finds no `go.mod`, so both stay in step.
 const GO_CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_GO_CMD";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -105,23 +106,19 @@ pub enum LangStatus {
         targets: usize,
     },
     SkippedNoTargets,
-    /// Go rule targets exist, but no `go.mod` does, so the native per-module
-    /// pass has no module root to index from (a pure gazelle repo). Distinct
-    /// from `SkippedNoTargets`, which would claim the workspace has no Go code
-    /// at all. Carries the target count to size the gap, and the display names
-    /// `ENGRAPH_BAZEL_SCIP_GO_CMD` as the way to close it.
-    SkippedNoGoModules {
-        targets: usize,
-    },
     SkippedNoIndexer {
         binary: &'static str,
     },
-    /// The language delegates its SCIP build to a user-supplied command that
-    /// isn't configured. Java builds are repo-specific (Bazel aspect vs Maven
-    /// vs Gradle vs custom toolchains), so engraph stays build-system-agnostic
-    /// and runs whatever command this env var names — rather than hard-wiring
-    /// any one monorepo's setup.
+    /// Targets of this language exist, but engraph cannot index them without a
+    /// command the user supplies, and `env` does not name one. One variant for
+    /// every language that reaches this state, by either route: a language
+    /// whose SCIP build is always delegated because it is repo-specific (Java:
+    /// Bazel aspect vs Maven vs Gradle vs custom toolchains), or one whose
+    /// native pass found no root to work from (Go with no `go.mod`, a pure
+    /// gazelle repo). `targets` sizes the gap — `SkippedNoTargets` would claim
+    /// the workspace has no code of this language at all.
     SkippedNotConfigured {
+        targets: usize,
         env: &'static str,
     },
     Failed(String),
@@ -146,17 +143,11 @@ impl fmt::Display for LangStatus {
                 Ok(())
             }
             LangStatus::SkippedNoTargets => write!(f, "skipped (no targets in this workspace)"),
-            LangStatus::SkippedNoGoModules { targets } => {
-                write!(
-                    f,
-                    "skipped ({targets} go targets, no go.mod; set {GO_CMD_ENV} to index them)"
-                )
-            }
             LangStatus::SkippedNoIndexer { binary } => {
                 write!(f, "skipped ({} not on PATH)", binary)
             }
-            LangStatus::SkippedNotConfigured { env } => {
-                write!(f, "skipped ({} not set)", env)
+            LangStatus::SkippedNotConfigured { targets, env } => {
+                write!(f, "skipped ({targets} targets, set {env} to index them)")
             }
             LangStatus::Failed(msg) => write!(f, "failed: {}", msg),
         }
@@ -236,7 +227,7 @@ pub fn index_bazel_symbols(
         // workspace root.
         let outcome = match spec.language {
             "go" => run_go(spec, repo, &bazel, &scip_dir, &mut parts),
-            "java" => run_java(spec, repo, &scip_dir, &mut parts),
+            "java" => run_java(spec, repo, &bazel, &scip_dir, &mut parts),
             _ => run_language(spec, repo, &bazel, &scip_dir, &mut parts),
         };
         let result = match outcome {
@@ -347,12 +338,17 @@ fn run_language(
 /// deps vs GOPATH, custom toolchains all differ), so engraph runs the command named
 /// by `cmd_env` as `<cmd> <repo> <out.scip>` and merges whatever SCIP that command
 /// writes; the command owns all build-system knowledge. The command must emit
-/// repo-root-relative document paths (no rebasing happens here). Unset → reported as
-/// not-configured (no silent degradation). Ready-made Bazel drivers live under
-/// `docs/examples/`.
+/// repo-root-relative document paths (no rebasing happens here). Ready-made Bazel
+/// drivers live under `docs/examples/`.
+///
+/// Targets are counted before `cmd_env` is read, so the two skips say different
+/// things: no targets of this language at all, versus N targets this command
+/// would have indexed. Reading the env var first would tell a Go-only workspace
+/// to configure a Java indexer.
 fn run_delegated(
     spec: &LangSpec,
     repo: &Path,
+    bazel: &Path,
     scip_dir: &Path,
     parts: &mut Vec<Vec<u8>>,
     cmd_env: &'static str,
@@ -366,9 +362,19 @@ fn run_delegated(
         status,
     };
 
+    let targets = bazel_count_targets(bazel, repo, spec.rule_kinds)?;
+    if targets == 0 {
+        return Ok(skip(LangStatus::SkippedNoTargets));
+    }
+
     let cmd = match std::env::var(cmd_env) {
         Ok(c) if !c.trim().is_empty() => c,
-        _ => return Ok(skip(LangStatus::SkippedNotConfigured { env: cmd_env })),
+        _ => {
+            return Ok(skip(LangStatus::SkippedNotConfigured {
+                targets,
+                env: cmd_env,
+            }));
+        }
     };
 
     let out_path = scip_dir.join(out_name);
@@ -420,12 +426,14 @@ fn run_delegated(
 fn run_java(
     spec: &LangSpec,
     repo: &Path,
+    bazel: &Path,
     scip_dir: &Path,
     parts: &mut Vec<Vec<u8>>,
 ) -> Result<LangIndexResult> {
     run_delegated(
         spec,
         repo,
+        bazel,
         scip_dir,
         parts,
         "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
@@ -452,7 +460,7 @@ fn run_go(
         .map(|c| !c.trim().is_empty())
         .unwrap_or(false);
     if configured {
-        run_delegated(spec, repo, scip_dir, parts, CMD_ENV, "index-go.scip")
+        run_delegated(spec, repo, bazel, scip_dir, parts, CMD_ENV, "index-go.scip")
     } else {
         run_go_modules(spec, repo, bazel, scip_dir, parts)
     }
@@ -538,9 +546,13 @@ fn run_go_modules(
     let modules = discover_go_modules(repo);
     if modules.is_empty() {
         // go_library targets exist but no go.mod anywhere (a pure gazelle repo):
-        // scip-go has no module root to index from. Report the target count so
-        // the gap isn't silent, and name the env var that closes it.
-        return Ok(skip(LangStatus::SkippedNoGoModules { targets }));
+        // scip-go has no module root to index from, so only a user-supplied
+        // command can reach them — the same state Java is in when its command
+        // is unset, and reported the same way.
+        return Ok(skip(LangStatus::SkippedNotConfigured {
+            targets,
+            env: GO_CMD_ENV,
+        }));
     }
 
     let mut indexed = 0usize;
@@ -914,40 +926,101 @@ mod tests {
     }
 
     #[test]
-    fn lang_status_no_go_modules_shows_targets_and_the_env_var() {
-        // A gazelle repo has go targets but no go.mod, so the native pass has
-        // no module root. `SkippedNoTargets` would claim there are no targets
-        // at all; name the count and the way to index them instead.
-        let s = LangStatus::SkippedNoGoModules { targets: 3 };
+    fn lang_status_not_configured_names_the_target_count_and_the_env_var() {
+        // One text for every language: the count sizes the gap, the env var
+        // says how to close it. `SkippedNoTargets` would claim the workspace
+        // has no code of this language at all.
+        let s = LangStatus::SkippedNotConfigured {
+            targets: 3,
+            env: GO_CMD_ENV,
+        };
         assert_eq!(
             format!("{s}"),
-            "skipped (3 go targets, no go.mod; set ENGRAPH_BAZEL_SCIP_GO_CMD to index them)"
+            "skipped (3 targets, set ENGRAPH_BAZEL_SCIP_GO_CMD to index them)"
         );
-    }
-
-    #[test]
-    fn lang_status_not_configured_display() {
         let s = LangStatus::SkippedNotConfigured {
+            targets: 2,
             env: "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
         };
         assert_eq!(
             format!("{s}"),
-            "skipped (ENGRAPH_BAZEL_SCIP_JAVA_CMD not set)"
+            "skipped (2 targets, set ENGRAPH_BAZEL_SCIP_JAVA_CMD to index them)"
         );
     }
 
+    /// A stand-in `bazel` that answers any query with `n` `label_kind` lines,
+    /// so a test can hand `bazel_count_targets` a nonzero count without a real
+    /// workspace. Needs the exec bit, hence unix-only — as is `run_delegated`
+    /// itself, which shells out through `sh`.
+    #[cfg(unix)]
+    fn fake_bazel(dir: &Path, n: usize) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("fake-bazel.sh");
+        let mut body = String::from("#!/bin/sh\n");
+        for i in 0..n {
+            body.push_str(&format!("echo 'java_library //t{i}:t{i}'\n"));
+        }
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_delegated_language_reports_no_targets_before_it_reads_the_env_var() {
+        // The Java gap this mirrors the Go one from bug 5: with no java
+        // targets, telling the user to configure a java indexer is noise.
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = LANGS.iter().find(|s| s.language == "java").unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 0);
+
+        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
+        assert_eq!(r.status, LangStatus::SkippedNoTargets);
+        assert!(parts.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_delegated_language_names_the_targets_it_misses_when_unconfigured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = LANGS.iter().find(|s| s.language == "java").unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 2);
+
+        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
+        assert_eq!(
+            r.status,
+            LangStatus::SkippedNotConfigured {
+                targets: 2,
+                env: "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
+            }
+        );
+        assert!(parts.is_empty());
+    }
+
+    #[cfg(unix)]
     #[test]
     fn run_java_delegates_to_configured_command() {
         let tmp = tempfile::tempdir().unwrap();
         let spec = LANGS.iter().find(|s| s.language == "java").unwrap();
         let scip_dir = tmp.path().join("out");
         std::fs::create_dir_all(&scip_dir).unwrap();
+        // Targets are counted before the env var is read, so the delegated
+        // path needs a bazel that reports some.
+        let bazel = fake_bazel(tmp.path(), 2);
 
         // Unconfigured → skipped, nothing merged. SAFETY: no other test in this
         // crate reads or writes ENGRAPH_BAZEL_SCIP_JAVA_CMD.
         unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
         let mut parts: Vec<Vec<u8>> = Vec::new();
-        let r = run_java(spec, tmp.path(), &scip_dir, &mut parts).unwrap();
+        let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
         assert!(matches!(r.status, LangStatus::SkippedNotConfigured { .. }));
         assert!(parts.is_empty());
 
@@ -968,22 +1041,23 @@ mod tests {
             )
         };
         let mut parts: Vec<Vec<u8>> = Vec::new();
-        let r = run_java(spec, tmp.path(), &scip_dir, &mut parts).unwrap();
+        let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
         unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
         assert_eq!(r.status, LangStatus::Indexed);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], scip);
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_go_delegates_to_configured_command() {
         let tmp = tempfile::tempdir().unwrap();
         let spec = LANGS.iter().find(|s| s.language == "go").unwrap();
         let scip_dir = tmp.path().join("out");
         std::fs::create_dir_all(&scip_dir).unwrap();
-        // run_go only spawns `bazel` on the native (env-unset) branch; the
-        // delegated branch below never touches it, so a bogus path is fine.
-        let bazel = Path::new("/nonexistent/bazel");
+        // Both branches of run_go now count targets first, so the delegated
+        // branch needs a bazel that reports some.
+        let bazel = fake_bazel(tmp.path(), 3);
 
         // A fake command that writes a known SCIP to its 2nd arg → delegated and
         // merged. SAFETY: single-threaded; no other test reads or writes
@@ -1004,7 +1078,7 @@ mod tests {
             )
         };
         let mut parts: Vec<Vec<u8>> = Vec::new();
-        let r = run_go(spec, tmp.path(), bazel, &scip_dir, &mut parts).unwrap();
+        let r = run_go(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
         unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_GO_CMD") };
         assert_eq!(r.status, LangStatus::Indexed);
         assert_eq!(parts.len(), 1);
