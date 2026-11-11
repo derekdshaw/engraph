@@ -11,7 +11,6 @@ of the plans.
   `Config` and `full_path_base`.
 - **Complete (part 2, 2026-11-08):** Python graphs have `CALLS` and
   `REFERENCES` relations.
-- A sub-project index writes only the files of that sub-project.
 - **Complete (part 4, 2026-11-08):** SCIP local symbols do not replace
   each other between files.
 - The Bazel Go message shows the Go targets that engraph did not index.
@@ -33,7 +32,6 @@ The test projects in the `engraph-test-repos` directory showed these bugs
 |---|---|
 | 1. Names keep SCIP descriptor characters (**corrected**, part 1) | `subgraph Config` finds no Rust type |
 | 2. Python graphs have no `CALLS` and no `REFERENCES` (**corrected**, part 2) | `subgraph` shows no callers for Python |
-| 3. A Gradle sub-project index writes incorrect paths | Files of other modules get paths that do not exist |
 | 4. SCIP local symbols replace each other (**corrected**, part 4) | Local symbols show the name of one file and the location of a different file |
 | 5. The Bazel Go message is not correct | The message says that there are no Go targets, but there are |
 | 6. Indexer errors on stdout are not shown | The error message of a failed index run is empty |
@@ -140,22 +138,6 @@ if trimmed.ends_with(')') {
 
 scip-python also writes `enclosing_range` on 2,024 of 38,304 occurrences. This
 plan does not use it.
-
-### Bug 3: a Gradle sub-project index writes incorrect paths
-
-`engraph index json-path-assert` (in `jsonpath-java`) starts scip-java in
-`json-path-assert/`. Gradle also compiles the module `json-path`, because
-`json-path-assert` has `implementation project(':json-path')`. scip-java
-writes the documents of the two modules with paths relative to the Gradle
-root, and sets `project_root` to `json-path-assert/`. engraph adds the subtree
-to each path that does not start with it (`bazel_symbols.rs:663-666`). The
-result is 1,981 entities with paths such as
-`json-path-assert/json-path/src/main/java/…`.
-
-The correction is merged (pull request #12). It adds
-`rebase_subtree_documents`, which removes the documents that are not files in
-the subtree directory, but are files at the repo root. The validation of part 3
-is not done with the merged code.
 
 ### Bug 4: SCIP local symbols replace each other
 
@@ -569,35 +551,6 @@ Validation of part 2:
 11. In each copy, do the query of step 2. Result: the counts are the same as
     the counts of step 2.
 
-### Part 3: sub-project paths (bug 3)
-
-The correction is merged (pull request #12, with the test
-`rebase_subtree_documents_drops_sibling_files`). Only the validation is
-necessary. Use the binary of `main`.
-
-Validation of part 3:
-
-1. Make sure that `gradle --version` shows Gradle 8.5. If it does not, install
-   Gradle with the commands in the `jsonpath-java` section of
-   `$TEST_REPOS/README.md`.
-2. Do the preparation for `jsonpath-java`.
-3. Do `engraph index json-path-assert`. Result: the last line starts with
-   `indexed` and ends with `driver=scip-java)`.
-4. Do `q "select count(*) from entities where file_path like 'json-path-assert/json-path/%'"`.
-   Result: `0`.
-5. Do `engraph index json-path`.
-6. Do this query:
-   `q "select substr(file_path, 1, instr(file_path, '/') - 1), count(*) from entities where file_path is not null group by 1"`.
-   Result: `json-path 2963` and `json-path-assert 292`.
-7. Do this query:
-   `q "select count(*) from relations r join entities s on s.id = r.src_entity join entities d on d.id = r.dst_entity where s.file_path like 'json-path-assert/%' and d.file_path like 'json-path/%'"`.
-   Result: `161`.
-8. Do the preparation for `ripgrep-rust`. Do `engraph index crates/ignore`.
-   Result: the output shows `2654 entities`.
-9. Do `q "select count(*) from entities where file_path is not null and file_path not like 'crates/ignore/%'"`.
-   Result: `0`.
-10. Remove bug 3 and part 3 from this plan.
-
 ### Part 4: local symbols (bug 4)
 
 **Complete.** Steps 1 to 5 are done, with these changes to the steps:
@@ -975,8 +928,6 @@ When all parts are complete, remove this plan and item 1 of the roadmap
   redirect (part 1).
 - A document without kinds gives `CALLS` from a method to a function, and no
   relation for a parameter (part 2).
-- A subtree load removes the documents of other modules
-  (`rebase_subtree_documents_drops_sibling_files`, part 3).
 - Two documents with the same local symbol give two entities, each with its
   own relations (part 4).
 - The post-read list and the sibling list do not show local variables, but
@@ -1024,12 +975,12 @@ When all parts are complete, remove this plan and item 1 of the roadmap
 
 ## Dependencies
 
-None. Part 3 depends on the branch `fix-subtree-sibling-docs`.
+None.
 
 ## Effort
 
 Parts 2, 5, 6, 8, and 9 each change one or two functions and add one or two
-tests. Part 3 is merged. Only its validation is necessary. Part 1 is the largest: it adds
+tests. Part 1 is the largest: it adds
 a schema version and changes `subgraph` and the grep redirect. Parts 4 and 7
 are medium: part 4 changes the loader and two lists, and part 7 changes the
 hook and `engraph run`. Part 10 is optional and changes one function.

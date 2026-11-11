@@ -23,9 +23,9 @@ Small performance improvements are not items in this file. They are in
 
 ## 1. Code graph bugs
 
-A sub-project index writes only the files of that sub-project. Error messages and the Bazel Go message are correct. The hook rewrites the usual test commands of Gradle, uv, pnpm, and npx. A new untracked file starts `--if-changed`.
+Error messages and the Bazel Go message are correct. The hook rewrites the usual test commands of Gradle, uv, pnpm, and npx. A new untracked file starts `--if-changed`.
 
-Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Part 1 (names), part 2 (Python relations), and part 4 (local symbols) are complete.
+Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Part 1 (names), part 2 (Python relations), part 3 (sub-project paths), part 4 (local symbols), and part 9 (placeholder names) are complete. Part 10 (the textual fallback name) is optional.
 
 ## 2. Deeper workspace discovery
 
