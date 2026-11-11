@@ -19,8 +19,8 @@ of the plans.
   indexer writes it to stdout.
 - The hook rewrites the usual test commands of Gradle, uv, pnpm, and npx.
 - A new untracked file starts `--if-changed`.
-- A new index corrects the name of a placeholder row that an older index
-  wrote.
+- **Complete (part 9, 2026-11-11):** a new index corrects the name of a
+  placeholder row that an older index wrote.
 - **Optional:** the textual fallback name does not split inside an escaped
   descriptor.
 
@@ -39,7 +39,7 @@ The test projects in the `engraph-test-repos` directory showed these bugs
 | 6. Indexer errors on stdout are not shown | The error message of a failed index run is empty |
 | 7. The hook does not rewrite some test commands | `./gradlew test`, `uv run pytest`, and other commands are not compressed |
 | 8. New untracked files do not start `--if-changed` | The graph does not include a new file until a different change occurs |
-| 9. A reference does not correct the name of a placeholder row | `subgraph` shows `Result#` and other old names for symbols of other crates |
+| 9. A reference does not correct the name of a placeholder row (**corrected**, part 9) | `subgraph` shows `Result#` and other old names for symbols of other crates |
 | 10. The textual fallback name splits inside a generic type (**optional**) | An id that the SCIP grammar rejects can give a name such as ``E>`]unwrap`` |
 
 ### Bug 1: names keep SCIP descriptor characters
@@ -869,6 +869,16 @@ Validation of part 8:
    the time in the pull request (correction step 3).
 
 ### Part 9: placeholder names (bug 9)
+
+**Complete (2026-11-11, branch `plan01-part9-placeholder-upsert`).** The
+validation used an A/B test on one copy of the live database, because a new
+index of this repo wrote a new project key and thus made new rows. The test put
+three rows back to their old names (`Result#`, `Vec#`,
+``impl#[`Pool<M>`]get``), each with the relations that protect it from the
+prune. With the binary of `main`, `engraph index .` left all three names and
+gave no qualified name. With the binary of this branch, the same index gave
+`Result`, `Vec`, and `get` (`Pool.get`), and the count of incorrect names was
+`0`.
 
 1. Write a test in `crates/engraph-codegraph/tests/loader_unit.rs`, with
    `definition_names_a_placeholder_written_by_a_reference` (line 319). Write an
