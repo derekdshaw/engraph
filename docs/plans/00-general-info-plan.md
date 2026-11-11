@@ -26,6 +26,8 @@ Each plan has these sections. Some plans do not have all of them.
 - **Reason to wait**: why the work is not started at this time.
 - **Dependencies**: the plans that must be complete before this plan.
 - **Effort**: the expected time.
+- **Plan management**: instructions that replace rule 5 of "Rules for the
+  work" for this plan. Most plans do not have this section.
 
 Each plan gives its condition at a specified date. Before you start a plan, make
 sure that the condition is still correct.
@@ -46,8 +48,16 @@ sure that the condition is still correct.
       `README.md`, `docs/ROADMAP.md`, and the plan.
 4. Some steps start with "Find out". For these steps, record the result in the
    pull request. Then do the steps that follow.
-5. When the work of a plan is complete, remove the item from
-   `docs/ROADMAP.md`, and describe the new function in `DETAILS.md`.
+5. When all the work of a plan is complete, do these tasks:
+   1. Remove the item from `docs/ROADMAP.md`. The numbers of the other items
+      do not change.
+   2. Describe the new function in `DETAILS.md`.
+   3. Move the plan to `docs/plans/completed/`.
+
+   If the plan has a **Plan management** section, do the tasks in that section
+   instead. That section can give a different procedure for a plan that does
+   not complete as a whole, for example a list that gets new items, or a plan
+   whose parts are removed one at a time.
 
 ## Sequence of work
 

@@ -4,8 +4,16 @@ Read [the general information for all plans](00-general-info-plan.md)
 before you use this plan. It gives the rules for the work.
 
 This plan is a list of small performance improvements. Each item is
-independent. Add new items to the end of the list when you find them. When the
-work of an item is complete, remove the item from this plan.
+independent. Add new items to the end of the list when you find them.
+
+## Plan management
+
+This plan does not complete as a whole, because new items are added when they
+are found. These tasks replace rule 5 of the general information:
+
+1. When the work of an item is complete, remove the item from this plan. The
+   numbers of the other items do not change.
+2. This plan does not move to `docs/plans/completed/`.
 
 ---
 

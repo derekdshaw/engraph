@@ -19,9 +19,8 @@ of the plans.
 The test projects in the `engraph-test-repos` directory showed these bugs
 (refer to the `README.md` of that directory).
 
-A bug that is corrected is removed from this plan, with its part. The numbers
-of the other bugs do not change. Thus this list starts at bug 5. The pull
-request of each correction has its validation data.
+This list starts at bug 5. A corrected bug is removed from this plan (refer to
+"Plan management" at the end).
 
 | Bug | Effect |
 |---|---|
@@ -334,11 +333,6 @@ Validation of part 10:
 1. In this repo, do `engraph index .`. Do the count query of "Reason to wait"
    of bug 10. Result: `0`. This part changes no name of a known id.
 
-### End of each part
-
-When all parts are complete, remove this plan and item 1 of the roadmap
-(rule 5 of the general information).
-
 ## Tests
 
 - The Go status without `go.mod` shows the target count (part 5).
@@ -364,3 +358,17 @@ None.
 Parts 5, 6, and 8 each change one or two functions and add one or two tests.
 Part 7 is medium: it changes the hook and `engraph run`. Part 10 is optional
 and changes one function.
+
+## Plan management
+
+This plan has independent parts, and each part is removed when it is complete.
+These tasks replace rule 5 of the general information:
+
+1. When the validation of a part passes, remove its bug and its part from this
+   plan: the bug section, the part section, the table row, and the bullets in
+   "Result", "Tests", and "Risks". Record the validation data in the pull
+   request. The numbers of the other bugs do not change.
+2. When all parts that are not optional are complete, remove item 1 from
+   `docs/ROADMAP.md`, describe the new functions in `DETAILS.md`, and move this
+   plan to `docs/plans/completed/`. An optional part that is not done moves
+   with the plan.
