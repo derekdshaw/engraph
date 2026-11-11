@@ -19,6 +19,10 @@ of the plans.
   indexer writes it to stdout.
 - The hook rewrites the usual test commands of Gradle, uv, pnpm, and npx.
 - A new untracked file starts `--if-changed`.
+- A new index corrects the name of a placeholder row that an older index
+  wrote.
+- **Optional:** the textual fallback name does not split inside an escaped
+  descriptor.
 
 ## Condition at this time (2026-11-03)
 
@@ -35,6 +39,8 @@ The test projects in the `engraph-test-repos` directory showed these bugs
 | 6. Indexer errors on stdout are not shown | The error message of a failed index run is empty |
 | 7. The hook does not rewrite some test commands | `./gradlew test`, `uv run pytest`, and other commands are not compressed |
 | 8. New untracked files do not start `--if-changed` | The graph does not include a new file until a different change occurs |
+| 9. A reference does not correct the name of a placeholder row | `subgraph` shows `Result#` and other old names for symbols of other crates |
+| 10. The textual fallback name splits inside a generic type (**optional**) | An id that the SCIP grammar rejects can give a name such as ``E>`]unwrap`` |
 
 ### Bug 1: names keep SCIP descriptor characters
 
@@ -256,6 +262,100 @@ does not start a new index (tested on a small Cargo project). The recorded commi
 
 `index_state` has the column `indexed_at`, the time of the index
 (`crates/engraph-core/src/schema.rs:276`).
+
+### Bug 9: a reference does not correct the name of a placeholder row
+
+**Found on 2026-11-11, after part 1.** Part 1 corrected `symbol_names`. But the
+names in the database are still incorrect for a symbol that this repo refers to
+and does not define.
+
+An index of this repo on 2026-11-11 gave 514 entity rows that keep a descriptor
+character in the name. Examples: `Result#`, `Result#Ok#`, `Vec#`,
+``E>`]unwrap``, and ``impl#[`Pool<M>`]get``. All 514 rows have no `file_path`,
+all are in the `rust-analyzer` scheme, and a relation refers to each one.
+
+`symbol_names` is not the cause. A test of `parse_symbol` (crate `scip` 0.7.1)
+with the 14 id shapes of these rows gave the correct name for each shape. For
+example, `rust-analyzer cargo core <url> result/Result#` gives `Result`, and
+``rust-analyzer cargo core <url> result/impl#[`Result<T, E>`]unwrap().`` gives
+`unwrap`. The backtick, the URL in the version field, and the generic
+parameters do not stop the grammar.
+
+Three conditions together keep the old names:
+
+1. `ensure_placeholder_entity`
+   (`crates/engraph-codegraph/src/scip_loader.rs:571`) writes with
+   `INSERT OR IGNORE`:
+
+   ```sql
+   INSERT OR IGNORE INTO entities (id, kind, name, qualified_name, project, scheme)
+   ```
+
+   Thus a later load does not change the name of a row that exists.
+
+2. The entity upsert has `name = excluded.name` from step 4 of part 1
+   (`scip_loader.rs:325`). But this statement operates only on the symbols of a
+   document (`doc.symbols`). rust-analyzer writes no `SymbolInformation` for a
+   symbol of a different crate. Thus `Result#` and `Vec#push` never get to this
+   statement.
+
+3. The three prune statements delete only a row that no relation refers to
+   (`scip_loader.rs:213`, `scip_loader.rs:275`, and
+   `crates/engraph-codegraph/src/gc.rs:38`). A relation refers to each of the
+   514 rows. Thus no prune removes them, and no index writes them again with
+   the new name.
+
+Effect: the `Calls` and `References` lines of `subgraph` show the old names.
+`engraph subgraph row_to_entity` shows ``E>`][Try]branch`` and `Result#`.
+
+### Bug 10: the textual fallback name splits inside a generic type (optional)
+
+**Found on 2026-11-11. This correction is optional.** Refer to "Reason to
+wait".
+
+`fallback_display_name_textual`
+(`crates/engraph-codegraph/src/scip_loader.rs:870`) finds the descriptors with
+`rsplit_once(' ')`:
+
+```rust
+moniker
+    .rsplit_once(' ')
+    .map(|(_, last)| {
+```
+
+This code uses the last space in the id. A SCIP id separates the scheme, the
+package manager, the package name, and the package version with spaces. Thus
+the last space is the correct position only when the descriptors contain no
+space. But rust-analyzer writes the generic parameters of a type in an escaped
+descriptor, with a comma and a space between them
+(``impl#[`Result<T, E>`]unwrap().``). The space in the descriptor is one
+character, because the grammar doubles a space only in the first four fields
+(`accept_space_escaped_identifier`, `scip/src/symbol.rs`). Thus the split
+occurs inside the type, and the name keeps the last part of the type:
+
+| Id | Name from this function |
+|---|---|
+| ``…core result/impl#[`Result<T, E>`]unwrap().`` | ``E>`]unwrap`` |
+| ``…core result/impl#[`Result<T, E>`][Try]branch().`` | ``E>`][Try]branch`` |
+| ``…alloc vec/impl#[`Vec<T, A>`]push().`` | ``A>`]push`` |
+
+The function also keeps `#` and `]`, as its doc comment says
+(`Config#full_path_base`, ``impl#[`Pool<M>`]get``).
+
+### Reason to wait
+
+This function operates only when `parse_symbol` gives an error, or when the
+last descriptor has an empty name (`scip_loader.rs:785` and
+`scip_loader.rs:793`). A test of `parse_symbol` with the 14 id shapes of the
+514 incorrect rows gave a result for each shape. Thus this function is not the
+cause of the incorrect names in the database: bug 9 is the cause, and the
+correction of bug 9 removes all 514 names.
+
+No known id gets to this function. Do this correction only to decrease the
+risk if an indexer writes an id that the grammar rejects. Do the correction of
+bug 9 first, and make sure that the count of incorrect names is `0`. If the
+count is more than `0` after the correction of bug 9, this bug is not optional:
+find the ids that `parse_symbol` rejects, and record them in the pull request.
 
 ## Steps
 
@@ -768,6 +868,89 @@ Validation of part 8:
 8. Do `time engraph index --if-changed .`. Result: `index up to date`. Record
    the time in the pull request (correction step 3).
 
+### Part 9: placeholder names (bug 9)
+
+1. Write a test in `crates/engraph-codegraph/tests/loader_unit.rs`, with
+   `definition_names_a_placeholder_written_by_a_reference` (line 319). Write an
+   entity row with the id
+   `rust-analyzer cargo core https://github.com/rust-lang/rust/library/core result/Result#`,
+   the name `Result#`, and no `file_path`. Then load a document that refers to
+   this id. The name must become `Result`, and `qualified_name` must become
+   `Result`.
+2. Write a second test. Write an entity row that has a `file_path` and the name
+   `foo`. Then load a document that refers to it. The name must stay `foo`.
+   This test keeps the rule of step 4 of part 1: a reference does not change the
+   name of a symbol that a document defines.
+3. Make sure that the result of the test of step 1 is incorrect before you
+   change the code.
+4. In `ensure_placeholder_entity`, change `INSERT OR IGNORE` to an upsert with
+   these clauses:
+
+   ```sql
+   ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      qualified_name = excluded.qualified_name
+    WHERE entities.file_path IS NULL
+      AND (entities.name IS NOT excluded.name
+           OR entities.qualified_name IS NOT excluded.qualified_name)
+   ```
+
+   `entities.file_path IS NULL` prevents a change to a symbol that this project
+   defines. It also keeps the `project` and the `scheme` of a defined row.
+   The `IS NOT` conditions prevent a write for each occurrence:
+   `ensure_placeholder_entity` operates one time for each reference
+   (`scip_loader.rs:452`), and each `.unwrap()` in the code refers to the row
+   of one symbol. `IS NOT` is the comparison that gives the correct result when
+   `qualified_name` is `NULL`.
+5. Do not add a schema migration. A migration cannot make the names, because
+   the migrations are in `engraph-core` and `symbol_names` is in
+   `engraph-codegraph`. The next index corrects the rows.
+
+Validation of part 9:
+
+1. Install the binary of the branch.
+2. In this repo, do `engraph index .`.
+3. Count the names that keep a descriptor character:
+
+   ```sql
+   select count(*) from entities where name like '%#%' or name like '%]%' or name like '%`%'
+   ```
+
+   Result: `0`. This repo has no JavaScript private member, so each name with
+   `#` is incorrect. Record the value before and after the change in the pull
+   request.
+4. Do `engraph subgraph row_to_entity`. Result: the `References` line shows
+   `Result`, `Ok`, and `Row`. The `Calls` line shows `branch` and `get`.
+
+### Part 10: the textual fallback name (bug 10, optional)
+
+Do this part only after part 9, and only for the reason in "Reason to wait" of
+bug 10.
+
+1. Write a unit test for `fallback_display_name_textual` with these ids and
+   results. Give each id a scheme that the grammar rejects, to make the
+   function operate:
+   - ``x cargo core 1.0 result/impl#[`Result<T, E>`]unwrap().`` → `unwrap`
+   - ``x cargo alloc 1.0 vec/impl#[`Vec<T, A>`]push().`` → `push`
+   - `x cargo fd 0.1.0 config/Config#full_path_base().` → `full_path_base`
+     (this result does not change)
+2. Make sure that the results of the first two tests are incorrect before you
+   change the code.
+3. In `fallback_display_name_textual`, do not use `rsplit_once(' ')`. Find the
+   end of the version field: count four fields from the start of the id. Two
+   spaces together inside one of these four fields are one literal space
+   (`accept_space_escaped_identifier`). Use the text after the fourth field.
+4. Keep the rest of the function. It removes the trailing `().` punctuation and
+   the namespace path, and it keeps `#` and `!`, because it cannot find a
+   suffix without the grammar.
+5. Update the doc comment of the function. Give the reason for the count of
+   four fields.
+
+Validation of part 10:
+
+1. In this repo, do `engraph index .`. Do the count query of part 9. Result:
+   `0`. This part changes no name of a known id.
+
 ### End of each part
 
 When all parts are complete, remove this plan and item 1 of the roadmap
@@ -794,6 +977,10 @@ When all parts are complete, remove this plan and item 1 of the roadmap
 - Each command in the bug 7 table is rewritten and uses the correct filter
   (part 7).
 - A new untracked file starts `--if-changed` one time (part 8).
+- A reference corrects the name of a placeholder row, and does not change the
+  name of a symbol that a document defines (part 9).
+- `fallback_display_name_textual` gives the last descriptor name of an id with
+  a space in a descriptor (part 10, optional).
 
 ## Risks
 
@@ -831,8 +1018,8 @@ None. Part 3 depends on the branch `fix-subtree-sibling-docs`.
 
 ## Effort
 
-Parts 2, 5, 6, and 8 each change one or two functions and add one or two
+Parts 2, 5, 6, 8, and 9 each change one or two functions and add one or two
 tests. Part 3 is merged. Only its validation is necessary. Part 1 is the largest: it adds
 a schema version and changes `subgraph` and the grep redirect. Parts 4 and 7
 are medium: part 4 changes the loader and two lists, and part 7 changes the
-hook and `engraph run`.
+hook and `engraph run`. Part 10 is optional and changes one function.

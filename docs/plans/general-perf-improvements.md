@@ -92,3 +92,71 @@ saves little time more than the steps above.
 ### Effort
 
 Less than half a day.
+
+---
+
+## 2. Prepare the placeholder insert one time
+
+### Result
+
+`ensure_placeholder_entity` uses a prepared statement from the cache. The
+loader does not prepare the same statement again for each reference.
+
+### Condition at this time (2026-11-11)
+
+The loader has two statements that it writes one time for each symbol. It
+prepares one of them with the cache, and the other without it.
+
+The entity upsert, one time for each symbol of a document
+(`crates/engraph-codegraph/src/scip_loader.rs:325`):
+
+```rust
+let mut entity_insert = conn.prepare_cached(
+```
+
+`ensure_placeholder_entity`, one time for each reference
+(`crates/engraph-codegraph/src/scip_loader.rs:578`):
+
+```rust
+    conn.execute(
+```
+
+`conn.execute` prepares the statement, operates it, and then discards it.
+Thus SQLite parses this SQL again for each call.
+
+`ensure_placeholder_entity` is the hotter of the two statements. The loader
+calls it one time for each reference occurrence
+(`scip_loader.rs:452`) and one time for each relationship (`scip_loader.rs:374`).
+An index of the engraph repo on 2026-11-11 wrote 6,864 entities and 18,594
+relations in 11,227 ms. The reference occurrences are more than the symbols,
+because each symbol has many references.
+
+`insert_relation` (`scip_loader.rs:560`) has the same condition. It writes one
+row for each relation with `conn.execute`.
+
+### Steps
+
+1. Measure `engraph index .` on this repo with the release build: 5 runs,
+   median. Record the result in the pull request.
+2. Give `ensure_placeholder_entity` a prepared statement, or change it to use
+   `conn.prepare_cached`. The function gets `&PooledConn`, and
+   `prepare_cached` keeps the statement in the connection's cache. Thus the
+   signature does not have to change.
+3. Do the same for `insert_relation`.
+4. Do the measurement of step 1 again. Record the two results in the pull
+   request.
+
+### Tests
+
+The tests of the loader (`crates/engraph-codegraph/tests/loader_unit.rs`) pass
+without a change. This item changes no behavior.
+
+### Risks
+
+The statement cache of rusqlite has a size limit (16 statements by default).
+The loader prepares few statements, so this limit is not a problem. If the
+number of prepared statements increases, use `set_prepared_statement_cache_capacity`.
+
+### Effort
+
+Less than one hour.
