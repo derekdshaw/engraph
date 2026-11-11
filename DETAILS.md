@@ -2004,7 +2004,8 @@ flag is still available to opt in on a single-repo run.
   aspect is Bazel-7-only and does **not** auto-detect Bazel. engraph runs
   the command named by `ENGRAPH_BAZEL_SCIP_JAVA_CMD` as `<cmd> <repo>
   <out.scip>` and merges the SCIP it writes; unset →
-  `SkippedNotConfigured { env }`. The command owns all build-system
+  `SkippedNotConfigured { targets, env }`, or `SkippedNoTargets` when the
+  workspace has no Java at all. The command owns all build-system
   knowledge. A ready-made Bazel driver — scip-java's SemanticDB aspect
   patched for Bazel 8 + custom annotation-processor toolchains, plus the
   per-target `.scip` merge — ships as
@@ -2022,13 +2023,29 @@ blob is loaded once. Metadata from the first non-empty input wins.
 **Soft-skip semantics.** A failing language doesn't abort the rest of
 the symbol-level pass. `LangStatus`: `Indexed`, `IndexedModules {
 indexed, failed, targets }` (Go's per-module aggregate),
-`SkippedNoTargets`, `SkippedNoGoModules { targets }` (go rule targets but
-no `go.mod` — a pure gazelle repo, where the native pass has no module
-root; the display names the count and `ENGRAPH_BAZEL_SCIP_GO_CMD`, since
-`SkippedNoTargets` would claim the workspace has no Go code at all),
-`SkippedNoIndexer { binary }`, `SkippedNotConfigured
-{ env }` (Java with no command configured), `Failed(stderr_tail)` — each
-language reports independently. The `BazelSymbolStats` return value
+`SkippedNoTargets`, `SkippedNoIndexer { binary }`,
+`SkippedNotConfigured { targets, env }`, `Failed(stderr_tail)` — each
+language reports independently.
+
+**One skip report for a missing command.** Every delegated path counts
+targets *before* it reads its env var, so the two skips say different
+things: `SkippedNoTargets` ("no code of this language here", the same text
+TS and Python use) versus `SkippedNotConfigured { targets, env }` ("N
+targets this command would index"). Reading the env var first told a
+Go-only workspace to configure a Java indexer, and told a Java workspace
+only that the variable was unset, with no count. One variant covers both
+routes into that state — a language always delegated because its build is
+repo-specific (Java), and one whose native pass found no root (Go with no
+`go.mod`, a pure gazelle repo) — so a new delegated language needs no new
+status:
+
+```
+symbol[go]:   skipped (3 targets, set ENGRAPH_BAZEL_SCIP_GO_CMD to index them)
+symbol[java]: skipped (2 targets, set ENGRAPH_BAZEL_SCIP_JAVA_CMD to index them)
+```
+
+`SkippedNoIndexer` deliberately carries no count: its remedy is installing
+a binary, not configuring a command. The `BazelSymbolStats` return value
 carries per-language results plus aggregate `entities_inserted` /
 `relations_inserted` / `scip_bytes_total`.
 
@@ -2043,7 +2060,11 @@ chains after the target-level pass; `driver_name` reports
 
 **Tests.** `run_java`'s delegation is unit-tested in-crate (a fake
 command writes a known SCIP, `run_java` merges it; the unconfigured case
-reports `SkippedNotConfigured`), as are `discover_go_modules`,
+reports `SkippedNotConfigured` with the target count, and a workspace with
+no targets reports `SkippedNoTargets` without reading the env var). These
+use a fake `bazel` that answers queries with `label_kind` lines and are
+`cfg(unix)`, since it needs the exec bit and `run_delegated` shells out
+through `sh`. Also unit-tested: `discover_go_modules`,
 `rebase_documents`, `rebase_subtree_documents`, `merge_scip_bytes`,
 `count_label_kind_lines`, and the `LangStatus` displays. `tests/bazel_symbols_live.rs` is a live
 integration check (gated behind `bazel` on PATH +

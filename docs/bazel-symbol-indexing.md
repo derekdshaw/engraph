@@ -42,8 +42,9 @@ monorepo doesn't have:
 - `scip-java index` auto-detects only {Maven, Gradle, sbt, mill}
   (`driver.rs:115-118`); no root `pom.xml`/`build.gradle` → exit 1.
 - `scip-go --module-root .` requires a root `go.mod`; absent → the guard in
-  `run_go_modules` reports `SkippedNoGoModules { targets }`, which names the
-  go target count and `ENGRAPH_BAZEL_SCIP_GO_CMD`.
+  `run_go_modules` reports `SkippedNotConfigured { targets, env }`, which names
+  the target count and `ENGRAPH_BAZEL_SCIP_GO_CMD` — the same status Java
+  reports when its own command is unset.
 - `scip-typescript index` needs a populated `node_modules` / tsconfig project;
   only a root `package.json` exists → exit 1.
 - `scip-python` needs importable modules; no `py_library` targets surfaced.
