@@ -88,6 +88,10 @@ pub struct LangIndexResult {
     pub status: LangStatus,
 }
 
+/// The command that indexes Go under Bazel when the native per-module pass
+/// cannot (`run_go`). Named by `SkippedNoGoModules` too, so both stay in step.
+const GO_CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_GO_CMD";
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum LangStatus {
     Indexed,
@@ -101,6 +105,14 @@ pub enum LangStatus {
         targets: usize,
     },
     SkippedNoTargets,
+    /// Go rule targets exist, but no `go.mod` does, so the native per-module
+    /// pass has no module root to index from (a pure gazelle repo). Distinct
+    /// from `SkippedNoTargets`, which would claim the workspace has no Go code
+    /// at all. Carries the target count to size the gap, and the display names
+    /// `ENGRAPH_BAZEL_SCIP_GO_CMD` as the way to close it.
+    SkippedNoGoModules {
+        targets: usize,
+    },
     SkippedNoIndexer {
         binary: &'static str,
     },
@@ -134,6 +146,12 @@ impl fmt::Display for LangStatus {
                 Ok(())
             }
             LangStatus::SkippedNoTargets => write!(f, "skipped (no targets in this workspace)"),
+            LangStatus::SkippedNoGoModules { targets } => {
+                write!(
+                    f,
+                    "skipped ({targets} go targets, no go.mod; set {GO_CMD_ENV} to index them)"
+                )
+            }
             LangStatus::SkippedNoIndexer { binary } => {
                 write!(f, "skipped ({} not on PATH)", binary)
             }
@@ -429,7 +447,7 @@ fn run_go(
     scip_dir: &Path,
     parts: &mut Vec<Vec<u8>>,
 ) -> Result<LangIndexResult> {
-    const CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_GO_CMD";
+    const CMD_ENV: &str = GO_CMD_ENV;
     let configured = std::env::var(CMD_ENV)
         .map(|c| !c.trim().is_empty())
         .unwrap_or(false);
@@ -520,9 +538,9 @@ fn run_go_modules(
     let modules = discover_go_modules(repo);
     if modules.is_empty() {
         // go_library targets exist but no go.mod anywhere (a pure gazelle repo):
-        // scip-go has no module root to index from. Reported via the targets
-        // count so the gap isn't silent.
-        return Ok(skip(LangStatus::SkippedNoTargets));
+        // scip-go has no module root to index from. Report the target count so
+        // the gap isn't silent, and name the env var that closes it.
+        return Ok(skip(LangStatus::SkippedNoGoModules { targets }));
     }
 
     let mut indexed = 0usize;
@@ -893,6 +911,18 @@ mod tests {
     fn lang_status_display_failed_message() {
         let s = LangStatus::Failed("boom".to_string());
         assert_eq!(format!("{}", s), "failed: boom");
+    }
+
+    #[test]
+    fn lang_status_no_go_modules_shows_targets_and_the_env_var() {
+        // A gazelle repo has go targets but no go.mod, so the native pass has
+        // no module root. `SkippedNoTargets` would claim there are no targets
+        // at all; name the count and the way to index them instead.
+        let s = LangStatus::SkippedNoGoModules { targets: 3 };
+        assert_eq!(
+            format!("{s}"),
+            "skipped (3 go targets, no go.mod; set ENGRAPH_BAZEL_SCIP_GO_CMD to index them)"
+        );
     }
 
     #[test]
