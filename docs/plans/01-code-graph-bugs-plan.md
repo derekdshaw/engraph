@@ -6,7 +6,6 @@ of the plans.
 
 ## Result
 
-- The Bazel Go message shows the Go targets that engraph did not index.
 - The error message of a failed indexer shows the error, also when the
   indexer writes it to stdout.
 - The hook rewrites the usual test commands of Gradle, uv, pnpm, and npx.
@@ -19,38 +18,16 @@ of the plans.
 The test projects in the `engraph-test-repos` directory showed these bugs
 (refer to the `README.md` of that directory).
 
-This list starts at bug 5. A corrected bug is removed from this plan (refer to
-"Plan management" at the end).
+A corrected bug is removed from this plan, and the numbers of the other bugs do
+not change. Thus this list does not start at bug 1 (refer to "Plan management"
+at the end).
 
 | Bug | Effect |
 |---|---|
-| 5. The Bazel Go message is not correct | The message says that there are no Go targets, but there are |
 | 6. Indexer errors on stdout are not shown | The error message of a failed index run is empty |
 | 7. The hook does not rewrite some test commands | `./gradlew test`, `uv run pytest`, and other commands are not compressed |
 | 8. New untracked files do not start `--if-changed` | The graph does not include a new file until a different change occurs |
 | 10. The textual fallback name splits inside a generic type (**optional**) | An id that the SCIP grammar rejects can give a name such as ``E>`]unwrap`` |
-
-### Bug 5: the Bazel Go message is not correct
-
-`go-tutorial-go-bazel` has 3 Go targets and no `go.mod`.
-`engraph index --bazel-symbols .` shows
-`symbol[go]: skipped (no targets in this workspace)`. The native Go pass gives
-the same status when there are targets but no `go.mod`
-(`crates/engraph-codegraph/src/bazel_symbols.rs:520-526`):
-
-```rust
-let modules = discover_go_modules(repo);
-if modules.is_empty() {
-    // go_library targets exist but no go.mod anywhere (a pure gazelle repo):
-    // scip-go has no module root to index from. Reported via the targets
-    // count so the gap isn't silent.
-    return Ok(skip(LangStatus::SkippedNoTargets));
-}
-```
-
-The comment says that the status shows the target count, but
-`SkippedNoTargets` has no count. Its text is
-`skipped (no targets in this workspace)` (`bazel_symbols.rs:136`).
 
 ### Bug 6: indexer errors on stdout are not shown
 
@@ -191,27 +168,6 @@ In these steps:
 Some validation steps record a value with the `main` binary before the change.
 For these steps, do steps 1 and 2 on the `main` branch, and then steps 3 to 8.
 
-### Part 5: Bazel Go message (bug 5)
-
-1. Write a test for the display of a new status `SkippedNoGoModules { targets }`.
-   The text must include the target count and the name of the variable
-   `ENGRAPH_BAZEL_SCIP_GO_CMD`. An example:
-   `skipped (3 go targets, no go.mod; set ENGRAPH_BAZEL_SCIP_GO_CMD to index them)`.
-2. Add the status. In `run_go_modules`, use it when `targets > 0` and there is
-   no `go.mod`.
-
-Validation of part 5:
-
-1. Make sure that `bazel version` operates. Use bazelisk with the name
-   `bazel`.
-2. Do the preparation for `go-tutorial-go-bazel`.
-3. Do `engraph index --bazel-symbols .`. Result: the output has the line
-   `symbol[go]: skipped (3 go targets, no go.mod; set ENGRAPH_BAZEL_SCIP_GO_CMD to index them)`.
-4. Do the preparation for `java-tutorial-java-bazel`. Do
-   `engraph index --bazel-symbols .`. Result: the output has the line
-   `symbol[go]: skipped (no targets in this workspace)`. This workspace has no
-   Go targets, so the message did not change.
-
 ### Part 6: indexer errors (bug 6)
 
 1. Write a test with a fake indexer that writes an error to stdout, writes
@@ -335,7 +291,6 @@ Validation of part 10:
 
 ## Tests
 
-- The Go status without `go.mod` shows the target count (part 5).
 - A failed indexer that writes only to stdout gives an error message with the
   stdout text (part 6).
 - Each command in the bug 7 table is rewritten and uses the correct filter
@@ -355,7 +310,7 @@ None.
 
 ## Effort
 
-Parts 5, 6, and 8 each change one or two functions and add one or two tests.
+Parts 6 and 8 each change one or two functions and add one or two tests.
 Part 7 is medium: it changes the hook and `engraph run`. Part 10 is optional
 and changes one function.
 

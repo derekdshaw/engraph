@@ -2022,7 +2022,11 @@ blob is loaded once. Metadata from the first non-empty input wins.
 **Soft-skip semantics.** A failing language doesn't abort the rest of
 the symbol-level pass. `LangStatus`: `Indexed`, `IndexedModules {
 indexed, failed, targets }` (Go's per-module aggregate),
-`SkippedNoTargets`, `SkippedNoIndexer { binary }`, `SkippedNotConfigured
+`SkippedNoTargets`, `SkippedNoGoModules { targets }` (go rule targets but
+no `go.mod` — a pure gazelle repo, where the native pass has no module
+root; the display names the count and `ENGRAPH_BAZEL_SCIP_GO_CMD`, since
+`SkippedNoTargets` would claim the workspace has no Go code at all),
+`SkippedNoIndexer { binary }`, `SkippedNotConfigured
 { env }` (Java with no command configured), `Failed(stderr_tail)` — each
 language reports independently. The `BazelSymbolStats` return value
 carries per-language results plus aggregate `entities_inserted` /
