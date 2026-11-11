@@ -350,6 +350,118 @@ fn definition_names_a_placeholder_written_by_a_reference() {
 }
 
 #[test]
+fn a_reference_corrects_the_name_of_an_older_placeholder() {
+    // Bug 9: a row an older loader named `Result#` keeps that name forever.
+    // The definition upsert only sees `doc.symbols`, and rust-analyzer emits
+    // no SymbolInformation for another crate's symbols, so the only statement
+    // that can ever fix the name is the one a reference goes through.
+    let external = "scip-test cargo core 1.0.0 result/Result#";
+    let caller = "scip-test cargo demo 0.0.0 app/run().";
+
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+
+    // The rows an index before part 1 wrote: a descriptor character in the
+    // name, no qualified name, and no file_path (nothing here defines it).
+    conn.execute(
+        "INSERT INTO entities (id, kind, name, project, scheme)
+         VALUES (?1, 'symbol', 'Result#', '/proj/demo', 'scip-test')",
+        [external],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO entities (id, kind, name, project, file_path, scheme)
+         VALUES (?1, 'symbol', 'run', '/proj/demo', 'src/app.rs', 'scip-test')",
+        [caller],
+    )
+    .unwrap();
+    // The edge that previous index wrote. It is what makes the row survive the
+    // pre-load prune, which only deletes a row no relation references. Without
+    // it the loader would delete and re-create the row, hiding the bug.
+    conn.execute(
+        "INSERT INTO relations (id, src_entity, dst_entity, kind, provenance)
+         VALUES ('r1', ?1, ?2, 'REFERENCES', 'extracted')",
+        [caller, external],
+    )
+    .unwrap();
+
+    let mut doc = Document::new();
+    doc.relative_path = "src/app.rs".to_string();
+    doc.symbols = vec![sym(caller, "", SymKind::Function)];
+    doc.occurrences = vec![
+        occ(caller, vec![0, 0, 0, 3], SymbolRole::Definition as i32),
+        occ(external, vec![1, 4, 1, 10], 0),
+    ];
+    let mut idx = Index::new();
+    idx.metadata = MessageField::some(Default::default());
+    idx.documents.push(doc);
+    let bytes = idx.write_to_bytes().unwrap();
+    load(&conn, "/proj/demo", &bytes).unwrap();
+
+    assert_eq!(
+        name_of(&conn, external),
+        "Result",
+        "a reference must correct the name of a placeholder row"
+    );
+    let qualified: Option<String> = conn
+        .query_row(
+            "SELECT qualified_name FROM entities WHERE id = ?1",
+            [external],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(qualified.as_deref(), Some("Result"));
+}
+
+#[test]
+fn a_reference_does_not_rename_a_defined_symbol() {
+    // The other half of part 1 step 4: `entities.project` names the defining
+    // repo, and its name comes from its own definition. A reference from
+    // another project must not take either one.
+    let defined = "scip-test cargo lib 1.0.0 util/Util#helper().";
+    let caller = "scip-test cargo demo 0.0.0 app/run().";
+
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+
+    conn.execute(
+        "INSERT INTO entities (id, kind, name, qualified_name, project, file_path, scheme)
+         VALUES (?1, 'symbol', 'helper (display)', 'Util.helper', '/proj/lib', 'src/util.rs', 'scip-test')",
+        [defined],
+    )
+    .unwrap();
+
+    let mut doc = Document::new();
+    doc.relative_path = "src/app.rs".to_string();
+    doc.symbols = vec![sym(caller, "", SymKind::Function)];
+    doc.occurrences = vec![
+        occ(caller, vec![0, 0, 0, 3], SymbolRole::Definition as i32),
+        occ(defined, vec![1, 4, 1, 10], 0),
+    ];
+    let mut idx = Index::new();
+    idx.metadata = MessageField::some(Default::default());
+    idx.documents.push(doc);
+    let bytes = idx.write_to_bytes().unwrap();
+    load(&conn, "/proj/demo", &bytes).unwrap();
+
+    assert_eq!(
+        name_of(&conn, defined),
+        "helper (display)",
+        "a reference must not rename a symbol another document defines"
+    );
+    let project: String = conn
+        .query_row(
+            "SELECT project FROM entities WHERE id = ?1",
+            [defined],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(project, "/proj/lib", "the defining project must not change");
+}
+
+#[test]
 fn loader_writes_the_qualified_name_of_each_symbol() {
     // qualified_name: the descriptors after the namespace, joined with `.`,
     // so `Config::full_path_base` / `Config#full_path_base` lookups can match.

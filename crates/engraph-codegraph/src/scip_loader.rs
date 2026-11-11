@@ -568,6 +568,19 @@ fn insert_relation(
 /// Insert a stub entity row for a referenced symbol that we haven't seen a
 /// SymbolInformation for in this Index. Keeps FK satisfied; later runs that
 /// do see the SymbolInformation will overwrite via ON CONFLICT.
+///
+/// Refreshes the name of an existing *placeholder* row (bug 9). For a symbol
+/// no document here defines — every other crate's symbols, for which
+/// rust-analyzer emits no SymbolInformation — this is the only statement that
+/// ever touches the row, so a name an older engraph derived (`Result#`, before
+/// part 1) would otherwise be permanent: the definition upsert never sees the
+/// symbol, and the prune statements skip it because a relation references it.
+///
+/// `file_path IS NULL` keeps the part 1 step 4 invariant intact: a reference
+/// never renames a symbol some document defines, and never takes its
+/// `project`/`scheme`. The name comparison keeps the common case a no-op —
+/// this runs once per reference *occurrence*, so every `.unwrap()` in the
+/// codebase reaches the row of the same symbol.
 fn ensure_placeholder_entity(
     conn: &PooledConn,
     sym: &str,
@@ -576,8 +589,14 @@ fn ensure_placeholder_entity(
 ) -> Result<()> {
     let names = symbol_names(sym);
     conn.execute(
-        "INSERT OR IGNORE INTO entities (id, kind, name, qualified_name, project, scheme)
-         VALUES (?1, 'symbol', ?2, ?3, ?4, ?5)",
+        "INSERT INTO entities (id, kind, name, qualified_name, project, scheme)
+         VALUES (?1, 'symbol', ?2, ?3, ?4, ?5)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            qualified_name = excluded.qualified_name
+          WHERE entities.file_path IS NULL
+            AND (entities.name IS NOT excluded.name
+                 OR entities.qualified_name IS NOT excluded.qualified_name)",
         rusqlite::params![
             sym,
             names.name,
