@@ -33,7 +33,7 @@ indexer changes the ids or the relations of known symbols.
 - No test compares the symbol ids of a repo between two engraph versions or two
   indexer versions.
 - The loader gives SCIP local symbols the id
-  `local <n>@<project tag>:<relative_path>` (plan 01, part 4). The tag comes
+  `local <n>@<project tag>:<relative_path>`. The tag comes
   from the project key, which is a path on the computer. Thus, a snapshot of
   ids must remove the tag of local symbols.
 
