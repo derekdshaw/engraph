@@ -1029,6 +1029,16 @@ mod tests {
         assert!(run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).is_err());
     }
 
+    /// Serializes the tests that read or write `ENGRAPH_BAZEL_SCIP_JAVA_CMD`
+    /// or `ENGRAPH_BAZEL_SCIP_GO_CMD`. The env is process-global, so without
+    /// it a parallel test can unset a command another test just set.
+    static CMD_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn cmd_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        // A failed test poisons the mutex; the next test still gets the lock.
+        CMD_ENV.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_delegated_language_reports_no_targets_before_it_reads_the_env_var() {
@@ -1040,6 +1050,8 @@ mod tests {
         std::fs::create_dir_all(&scip_dir).unwrap();
         let bazel = fake_bazel(tmp.path(), 0);
 
+        let _env = cmd_env_lock();
+        // SAFETY: `_env` serializes every test that touches this variable.
         unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
@@ -1056,6 +1068,8 @@ mod tests {
         std::fs::create_dir_all(&scip_dir).unwrap();
         let bazel = fake_bazel(tmp.path(), 2);
 
+        let _env = cmd_env_lock();
+        // SAFETY: `_env` serializes every test that touches this variable.
         unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
@@ -1080,8 +1094,9 @@ mod tests {
         // path needs a bazel that reports some.
         let bazel = fake_bazel(tmp.path(), 2);
 
-        // Unconfigured → skipped, nothing merged. SAFETY: no other test in this
-        // crate reads or writes ENGRAPH_BAZEL_SCIP_JAVA_CMD.
+        // Unconfigured → skipped, nothing merged. SAFETY: `_env` serializes
+        // every test that touches this variable.
+        let _env = cmd_env_lock();
         unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
@@ -1124,8 +1139,9 @@ mod tests {
         let bazel = fake_bazel(tmp.path(), 3);
 
         // A fake command that writes a known SCIP to its 2nd arg → delegated and
-        // merged. SAFETY: single-threaded; no other test reads or writes
-        // ENGRAPH_BAZEL_SCIP_GO_CMD.
+        // merged. SAFETY: `_env` serializes every test that touches this
+        // variable.
+        let _env = cmd_env_lock();
         let scip = make_index(&["pkg/widget.go"], &[]);
         let scip_path = tmp.path().join("fake.scip");
         std::fs::write(&scip_path, &scip).unwrap();
