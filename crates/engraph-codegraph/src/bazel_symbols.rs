@@ -45,7 +45,7 @@
 //! any Bazel `--output_base` / cache behavior is owned by the configured command,
 //! not engraph. Go and TS read sources directly (no Bazel build subprocess).
 
-use crate::bazel::{bazel_binary, output_base_for, tail_lines};
+use crate::bazel::{bazel_binary, failure_tail, output_base_for, tail_lines};
 use crate::scip_loader::{self, LoadOptions};
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
@@ -308,16 +308,15 @@ fn run_language(
         .output()
         .with_context(|| format!("spawning {}", spec.binary))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         return Ok(LangIndexResult {
             language: spec.language,
             scip_bytes: 0,
             elapsed_ms: start.elapsed().as_millis() as i64,
             status: LangStatus::Failed(format!(
-                "{} exited with {}\nstderr (tail):\n{}",
+                "{} exited with {}\n{}",
                 spec.binary,
                 output.status,
-                tail_lines(&stderr, 20)
+                failure_tail(&output.stderr, &output.stdout, 20)
             )),
         });
     }
@@ -396,9 +395,9 @@ fn run_delegated(
         .with_context(|| format!("spawning {cmd_env} command"))?;
     if !output.status.success() {
         return Ok(skip(LangStatus::Failed(format!(
-            "{cmd_env} command exited with {}\nstderr (tail):\n{}",
+            "{cmd_env} command exited with {}\n{}",
             output.status,
-            tail_lines(&String::from_utf8_lossy(&output.stderr), 25)
+            failure_tail(&output.stderr, &output.stdout, 25)
         ))));
     }
 

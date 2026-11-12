@@ -61,11 +61,10 @@ pub fn index_bazel_workspace(conn: &PooledConn, repo: &Path, project: &str) -> R
         .output()
         .with_context(|| format!("spawning {}", bazel.display()))?;
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
         anyhow::bail!(
-            "bazel query exited with {}\nstderr (tail):\n{}",
+            "bazel query exited with {}\n{}",
             out.status,
-            tail_lines(&stderr, 20)
+            failure_tail(&out.stderr, &out.stdout, 20)
         );
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
