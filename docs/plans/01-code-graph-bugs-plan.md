@@ -28,6 +28,7 @@ at the end).
 | 7. The hook does not rewrite some test commands | `./gradlew test`, `uv run pytest`, and other commands are not compressed |
 | 8. New untracked files do not start `--if-changed` | The graph does not include a new file until a different change occurs |
 | 10. The textual fallback name splits inside a generic type (**optional**) | An id that the SCIP grammar rejects can give a name such as ``E>`]unwrap`` |
+| 11. The symbol pass shows only the first line of a failure | `failed: scip-python exited with signal: 6 (SIGABRT)`, without the reason in the stderr tail |
 
 ### Bug 6: indexer errors on stdout are not shown
 
@@ -129,6 +130,39 @@ select count(*) from entities where name like '%#%' or name like '%]%' or name l
 
 If the count is more than `0`, this bug is not optional: find the ids that
 `parse_symbol` rejects, and record them in the pull request.
+
+### Bug 11: the symbol pass shows only the first line of a failure
+
+**Found on 2026-11-11**, on `ray-project/ray` with `--bazel-symbols`.
+scip-python stopped with a Node heap error. engraph showed:
+
+```
+symbol[python]: failed: scip-python exited with signal: 6 (SIGABRT) (0 SCIP bytes)
+```
+
+The status has the reason. `run_language` puts the last 20 lines of stderr in
+it (`crates/engraph-codegraph/src/bazel_symbols.rs:317-320`):
+
+```rust
+"{} exited with {}\nstderr (tail):\n{}",
+spec.binary,
+output.status,
+tail_lines(&stderr, 20)
+```
+
+The printer shows only the first line
+(`crates/engraph-cli/src/output.rs:65`):
+
+```rust
+let status = l.status.lines().next().unwrap_or("").trim();
+```
+
+Its doc comment says that this is by design: "Multi-line failure messages
+(which carry a stderr tail) are collapsed to their first line." But the first
+line gives only the exit code or signal. The line that tells the user what to
+do is in the tail:
+`FATAL ERROR: CALL_AND_RETRY_LAST Allocation failed - JavaScript heap out of memory`.
+`run_delegated` has the same shape (`bazel_symbols.rs:399`).
 
 ## Steps
 
@@ -289,6 +323,28 @@ Validation of part 10:
 1. In this repo, do `engraph index .`. Do the count query of "Reason to wait"
    of bug 10. Result: `0`. This part changes no name of a known id.
 
+### Part 11: the failure reason (bug 11)
+
+1. Write a test for `print_symbol_langs` with a status of three lines:
+   `scip-python exited with signal: 6 (SIGABRT)`, `stderr (tail):`, and
+   `FATAL ERROR: … heap out of memory`. The output must have the first line on
+   the `symbol[…]` line, and the lines of the tail after it, each with more
+   indentation. A status of one line must print as before.
+2. Change `print_symbol_langs`. Keep the first line on the `symbol[…]` line.
+   Print the other lines after it, indented, and remove empty lines. Update
+   the doc comment.
+3. If a tail of 20 lines is too long for the summary, decrease the count in
+   `tail_lines` to 10 in both places, and record the reason in the pull
+   request.
+
+Validation of part 11:
+
+1. Clone `https://github.com/ray-project/ray` (`--depth 1 --filter=blob:none`).
+   Use a new database. Do `engraph index --bazel-symbols .`. Result: the
+   `symbol[python]:` line is followed by indented lines that include
+   `JavaScript heap out of memory`. (If plan 06 phase D is complete, the pass
+   does not fail; use a repo that fails, or set `ENGRAPH_NODE_HEAP_MB=512`.)
+
 ## Tests
 
 - A failed indexer that writes only to stdout gives an error message with the
@@ -298,6 +354,8 @@ Validation of part 10:
 - A new untracked file starts `--if-changed` one time (part 8).
 - `fallback_display_name_textual` gives the last descriptor name of an id with
   a space in a descriptor (part 10, optional).
+- `print_symbol_langs` shows the lines of a failure after the `symbol[…]`
+  line (part 11).
 
 ## Risks
 
@@ -312,7 +370,7 @@ None.
 
 Parts 6 and 8 each change one or two functions and add one or two tests.
 Part 7 is medium: it changes the hook and `engraph run`. Part 10 is optional
-and changes one function.
+and changes one function. Part 11 changes one function in `output.rs`.
 
 ## Plan management
 

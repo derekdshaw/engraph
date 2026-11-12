@@ -57,9 +57,9 @@ A symbol id is the same on each computer and after each commit. Two different sy
 
 Plan: [`docs/plans/05-stable-symbol-ids-plan.md`](plans/05-stable-symbol-ids-plan.md)
 
-## 6. Bazel symbols for TypeScript and Python
+## 6. Bazel symbols for TypeScript, JavaScript, Python, and Rust
 
-The symbol-level Bazel pass (`--bazel-symbols`) indexes TypeScript and Python code.
+The symbol-level Bazel pass (`--bazel-symbols`) indexes TypeScript, JavaScript, Python, and Rust code. Today it does not consider Rust at all, counts no `js_library` target, and fails on TypeScript and Python instead of reporting what a configured command would index.
 
 Plan: [`docs/plans/06-bazel-typescript-python-symbols-plan.md`](plans/06-bazel-typescript-python-symbols-plan.md)
 

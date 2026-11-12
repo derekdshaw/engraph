@@ -1,7 +1,7 @@
 # Design: Bazel-resolved symbol indexing
 
-Status: **Phases A (Go) and C (Java) shipped; B (TypeScript) and D (Python)
-open.** Kept as the original design record: the problem, the per-language
+Status: **Phases A (Go) and C (Java) shipped; B (TypeScript and JavaScript),
+D (Python), and E (Rust) open.** Kept as the original design record: the problem, the per-language
 approach, integration points, risks, and the phased plan. Line references and
 the "Problem & evidence" section describe the codebase as of the 2026-06-02
 diagnosis, not today. Current behavior lives in `DETAILS.md` §14.9; remaining
