@@ -8,6 +8,12 @@ of the plans.
 
 - The hook rewrites the usual test commands of Gradle, uv, pnpm, and npx.
 - A new untracked file starts `--if-changed`.
+- The symbol pass shows all the lines of a failure.
+- When a configured command does not run because the count of targets is 0,
+  the symbol pass says so.
+- The warning for a failed scip-go module shows the error, also when scip-go
+  writes it to stdout.
+- A load removes the local symbols of a document that has no global symbol.
 - **Optional:** the textual fallback name does not split inside an escaped
   descriptor.
 
@@ -26,6 +32,9 @@ at the end).
 | 8. New untracked files do not start `--if-changed` | The graph does not include a new file until a different change occurs |
 | 10. The textual fallback name splits inside a generic type (**optional**) | An id that the SCIP grammar rejects can give a name such as ``E>`]unwrap`` |
 | 11. The symbol pass shows only the first line of a failure | `failed: scip-python exited with signal: 6 (SIGABRT)`, without the reason in the stderr tail |
+| 12. A configured command does not run for rule classes that engraph does not count | `skipped (no targets in this workspace)`, also when `ENGRAPH_BAZEL_SCIP_JAVA_CMD` is set |
+| 13. A failed scip-go module shows only its stderr, and only in the log | The warning is empty when scip-go writes the error to stdout |
+| 14. Local symbols of a document with no global symbol are not removed | The rows stay after the file changes or is deleted |
 
 ### Bug 7: the hook does not rewrite some test commands
 
@@ -140,6 +149,76 @@ line gives only the exit code or signal. The line that tells the user what to
 do is in the tail:
 `FATAL ERROR: CALL_AND_RETRY_LAST Allocation failed - JavaScript heap out of memory`.
 `run_delegated` has the same shape (`bazel_symbols.rs:399`).
+
+### Bug 12: a configured command does not run for rule classes that engraph does not count
+
+**Found on 2026-11-11**, in the review of pull request #20. It was not seen on
+a real repo.
+
+`run_delegated` counts the targets of `spec.rule_kinds` before it reads the
+env var of the command (`crates/engraph-codegraph/src/bazel_symbols.rs:364-367`):
+
+```rust
+let targets = bazel_count_targets(bazel, repo, spec.rule_kinds)?;
+if targets == 0 {
+    return Ok(skip(LangStatus::SkippedNoTargets));
+}
+```
+
+The rule kinds of Java are `java_library`, `java_binary`, and `java_test`. If
+a workspace builds its Java with other rule classes, for example a custom
+Starlark rule, the count is 0. Then the pass shows
+`skipped (no targets in this workspace)`, and it does not run the command of
+`ENGRAPH_BAZEL_SCIP_JAVA_CMD`, also when the user set it. The native Go pass
+and the Go command have the same count.
+
+The count before the command is necessary. The README tells the user to export
+the variable, and without the count, a `--workspace` run starts the Java command
+in each repo that has no Java. Thus the correction keeps the count, and changes
+the message.
+
+### Bug 13: a failed scip-go module shows only its stderr, and only in the log
+
+`run_go_modules` continues when one module fails
+(`bazel_symbols.rs:587-594`):
+
+```rust
+if !output.status.success() {
+    failed += 1;
+    tracing::warn!(
+        module = %module_root.display(),
+        "scip-go failed (isolated): {}",
+        tail_lines(&String::from_utf8_lossy(&output.stderr), 20)
+    );
+    continue;
+}
+```
+
+The status shows only the count, for example
+`indexed 2 go.mod modules of 9 go targets, 1 failed`. The reason is in a
+`WARN` line, and that line has only stderr. Part 6 changed the other failure
+sites to `failure_tail` (stderr, or stdout when stderr is empty), but not this
+one.
+
+### Bug 14: local symbols of a document with no global symbol are not removed
+
+**Found on 2026-11-09**, in the review of plan 01 part 4 (pull request #17).
+
+A local symbol has no scheme in its id. The loader gives it the scheme of its
+document, from the first global symbol of the document
+(`crates/engraph-codegraph/src/scip_loader.rs:614-620`). A document with no
+global symbol in its symbols and its occurrences has no scheme, so its locals
+get `scheme` NULL.
+
+A load removes a local only when its scheme is a scheme of the load
+(`scip_loader.rs:63`):
+
+```rust
+OR (id LIKE 'local %' AND scheme IN (SELECT s FROM current_scip_schemes)))
+```
+
+NULL is never `IN` a list. Thus a load never removes these locals, also not
+after the file is deleted. The 8 test projects had no such row (2026-11-09).
 
 ## Steps
 
@@ -302,6 +381,60 @@ Validation of part 11:
    `JavaScript heap out of memory`. (If plan 06 phase D is complete, the pass
    does not fail; use a repo that fails, or set `ENGRAPH_NODE_HEAP_MB=512`.)
 
+### Part 12: the skip message of a command that does not run (bug 12)
+
+1. Find out if a real Bazel repo builds Java or Go with rule classes that are
+   not in `rule_kinds`. Record the repo and its rule classes in the pull
+   request.
+2. Write a test with a fake `bazel` that reports 0 targets, and with
+   `ENGRAPH_BAZEL_SCIP_JAVA_CMD` set. Hold `cmd_env_lock` in the test. The
+   status must name the rule kinds and the variable, for example
+   `skipped (no java_library, java_binary, java_test targets; ENGRAPH_BAZEL_SCIP_JAVA_CMD not run)`.
+3. In `run_delegated`, when the count is 0 and the variable is set, give that
+   status. When the variable is not set, keep `SkippedNoTargets`.
+4. If step 1 found a repo, add its rule classes to `rule_kinds`.
+
+Validation of part 12:
+
+1. Do the preparation for `go-tutorial-go-bazel`. Do
+   `ENGRAPH_BAZEL_SCIP_JAVA_CMD=true engraph index --bazel-symbols .`.
+   Result: `symbol[java]: skipped (no java_library, java_binary, java_test targets; ENGRAPH_BAZEL_SCIP_JAVA_CMD not run)`.
+2. Do the command again without the variable. Result:
+   `symbol[java]: skipped (no targets in this workspace)`.
+
+### Part 13: the scip-go module error (bug 13)
+
+1. Find out where scip-go writes the error for a module that does not compile:
+   stdout or stderr. Record the result in the pull request.
+2. A test needs a fake `scip-go` in `PATH`, and `PATH` is process-global. If
+   a test is not practical, record the reason in the pull request.
+3. In `run_go_modules`, use `failure_tail(&output.stderr, &output.stdout, 20)`
+   in the warning.
+
+Validation of part 13:
+
+1. Do the preparation for `go-tutorial-go-bazel`. In the copy, make a module
+   that does not compile: `bad/go.mod` with `module example.com/bad`, and
+   `bad/bad.go` with `package bad` and `func (`.
+2. Do `engraph index --bazel-symbols .`. Result: the `symbol[go]:` line ends
+   with `1 failed`, and a `WARN` line for the module `bad` shows the error of
+   scip-go after `stderr (tail):` or `stdout (tail):`.
+
+### Part 14: locals of a document with no global symbol (bug 14)
+
+1. Write a loader test: load an index with a document that has only local
+   symbols. Load the index again without that document. The locals of the
+   document must not be in `entities`.
+2. When a document has no global symbol, give its locals the scheme of the
+   load, if the load has only one scheme. If the load has more than one
+   scheme, record in the pull request how the correction selects one.
+
+Validation of part 14:
+
+1. No test project has such a document. Do `./et.sh smoke all` with the
+   binary of `main` and with the binary of the branch. Result: the count of
+   `local` entities of each project is the same.
+
 ## Tests
 
 - Each command in the bug 7 table is rewritten and uses the correct filter
@@ -311,6 +444,10 @@ Validation of part 11:
   a space in a descriptor (part 10, optional).
 - `print_symbol_langs` shows the lines of a failure after the `symbol[…]`
   line (part 11).
+- A configured command with 0 targets gives a status that names the rule
+  kinds and the variable (part 12).
+- A second load without a document removes the locals of that document, also
+  when the document has no global symbol (part 14).
 
 ## Risks
 
@@ -326,6 +463,8 @@ None.
 Part 8 changes one or two functions and adds one or two tests.
 Part 7 is medium: it changes the hook and `engraph run`. Part 10 is optional
 and changes one function. Part 11 changes one function in `output.rs`.
+Parts 12, 13, and 14 each change one function and add one test, after the
+"Find out" steps.
 
 ## Plan management
 
