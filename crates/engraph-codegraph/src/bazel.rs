@@ -295,6 +295,20 @@ pub(crate) fn tail_lines(s: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
+/// The labelled end of a failed command's output, for its error message. Some
+/// tools write their errors to stdout (scip-typescript), so an empty stderr
+/// gives the end of stdout.
+pub(crate) fn failure_tail(stderr: &[u8], stdout: &[u8], n: usize) -> String {
+    let err = String::from_utf8_lossy(stderr);
+    if err.trim().is_empty() {
+        let out = String::from_utf8_lossy(stdout);
+        if !out.trim().is_empty() {
+            return format!("stdout (tail):\n{}", tail_lines(&out, n));
+        }
+    }
+    format!("stderr (tail):\n{}", tail_lines(&err, n))
+}
+
 struct TxGuard<'a> {
     conn: &'a PooledConn,
     done: bool,
@@ -341,6 +355,19 @@ mod which {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_tail_prefers_stderr_and_falls_back_to_stdout() {
+        assert_eq!(
+            failure_tail(b"ERROR: x\n", b"partial output\n", 5),
+            "stderr (tail):\nERROR: x"
+        );
+        assert_eq!(
+            failure_tail(b"  \n", b"error TS6053\n", 5),
+            "stdout (tail):\nerror TS6053"
+        );
+        assert_eq!(failure_tail(b"", b"", 5), "stderr (tail):\n");
+    }
 
     #[test]
     fn detect_bazel_recognizes_markers() {

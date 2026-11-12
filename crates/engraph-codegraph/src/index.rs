@@ -555,8 +555,13 @@ fn scip_output_dir(repo: &Path) -> PathBuf {
 }
 
 fn run_driver_to_scip(repo: &Path, drv: &dyn driver::Driver) -> Result<Vec<u8>> {
-    let out_dir = scip_output_dir(repo);
-    std::fs::create_dir_all(&out_dir)
+    run_driver_into(&scip_output_dir(repo), repo, drv)
+}
+
+/// `run_driver_to_scip` with the output directory given, so a test does not
+/// write under the user's data directory.
+fn run_driver_into(out_dir: &Path, repo: &Path, drv: &dyn driver::Driver) -> Result<Vec<u8>> {
+    std::fs::create_dir_all(out_dir)
         .with_context(|| format!("creating SCIP output dir {}", out_dir.display()))?;
     let scip_path = out_dir.join("index.scip");
     let mut cmd = drv.command(repo, &scip_path);
@@ -570,10 +575,10 @@ fn run_driver_to_scip(repo: &Path, drv: &dyn driver::Driver) -> Result<Vec<u8>> 
         .with_context(|| format!("spawning {}", drv.name()))?;
     if !output.status.success() {
         anyhow::bail!(
-            "{} exited with {}\nstderr (tail):\n{}",
+            "{} exited with {}\n{}",
             drv.name(),
             output.status,
-            bazel::tail_lines(&String::from_utf8_lossy(&output.stderr), 25)
+            bazel::failure_tail(&output.stderr, &output.stdout, 25)
         );
     }
     if !output.stderr.is_empty() {
@@ -1190,5 +1195,37 @@ mod tests {
         assert_eq!(modes["svc-a"], pinned);
         assert_eq!(modes["svc-b"], prebuilt);
         assert!(index_modes(&conn, "/other").unwrap().is_empty());
+    }
+
+    /// An indexer that fails the way scip-typescript does: the error on
+    /// stdout, nothing on stderr.
+    struct StdoutOnlyIndexer;
+    impl driver::Driver for StdoutOnlyIndexer {
+        fn name(&self) -> &'static str {
+            "fake-indexer"
+        }
+        fn detect(&self, _: &Path) -> bool {
+            true
+        }
+        fn command(&self, _: &Path, _: &Path) -> std::process::Command {
+            let mut c = std::process::Command::new("sh");
+            c.args([
+                "-c",
+                "echo \"error TS6053: File 'x/tsconfig' not found.\"; exit 1",
+            ]);
+            c
+        }
+    }
+
+    #[test]
+    fn a_failed_indexer_that_writes_only_to_stdout_shows_the_stdout_tail() {
+        let out = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let err = run_driver_into(out.path(), repo.path(), &StdoutOnlyIndexer).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("stdout (tail):\nerror TS6053: File 'x/tsconfig' not found."),
+            "{msg}"
+        );
     }
 }
