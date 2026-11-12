@@ -2024,8 +2024,16 @@ blob is loaded once. Metadata from the first non-empty input wins.
 the symbol-level pass. `LangStatus`: `Indexed`, `IndexedModules {
 indexed, failed, targets }` (Go's per-module aggregate),
 `SkippedNoTargets`, `SkippedNoIndexer { binary }`,
-`SkippedNotConfigured { targets, env }`, `Failed(stderr_tail)` — each
-language reports independently.
+`SkippedNotConfigured { targets, env }`, `Failed(tail)` — each
+language reports independently. The tail is the end of stderr, or of
+stdout with the label `stdout (tail):` when stderr is empty
+(scip-typescript writes its errors to stdout); the standalone driver
+error uses the same `bazel::failure_tail`. A failed target-count query is
+`Failed` too, not `SkippedNoTargets`: its first line names the rule kinds
+and the exit status (`bazel query for java_library, java_binary,
+java_test exited with exit status: 2`). An unknown rule kind is not a
+failure — Bazel 9.3.2 exits 0 with `INFO: Empty results` — and a broken
+`BUILD` file fails the target-level query first.
 
 **One skip report for a missing command.** Every delegated path counts
 targets *before* it reads its env var, so the two skips say different

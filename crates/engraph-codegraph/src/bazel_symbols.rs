@@ -747,9 +747,11 @@ fn bazel_has_targets(bazel: &Path, repo: &Path, kinds: &[&str]) -> Result<bool> 
 }
 
 /// Count the workspace's targets of the given rule kinds via one
-/// `bazel query --output=label_kind`. A failed probe is treated as zero rather
-/// than fatal (the usual cause is a rule kind absent from this workspace's
-/// ruleset, which mustn't sink the whole symbol pass). Sharing the target-level
+/// `bazel query --output=label_kind`. A failed query is an error, not zero:
+/// zero reports "no targets" and skips a configured command. A rule kind the
+/// workspace does not have is not a failure (Bazel 9.3.2 exits 0 with
+/// `INFO: Empty results`), and the caller turns the error into a `Failed`
+/// status for this language only. Sharing the target-level
 /// pass's `output_base` is intentional: the analysis cache is warm and this
 /// returns near-instantly. The Go pass uses the count to report the gazelle gap.
 fn bazel_count_targets(bazel: &Path, repo: &Path, kinds: &[&str]) -> Result<usize> {
@@ -771,12 +773,12 @@ fn bazel_count_targets(bazel: &Path, repo: &Path, kinds: &[&str]) -> Result<usiz
         .output()
         .with_context(|| format!("spawning {} query", bazel.display()))?;
     if !out.status.success() {
-        tracing::warn!(
-            "bazel query for {:?} exited non-zero; treating as no targets. stderr: {}",
-            kinds,
-            tail_lines(&String::from_utf8_lossy(&out.stderr), 5)
+        anyhow::bail!(
+            "bazel query for {} exited with {}\n{}",
+            kinds.join(", "),
+            out.status,
+            failure_tail(&out.stderr, &out.stdout, 20)
         );
-        return Ok(0);
     }
     Ok(count_label_kind_lines(&String::from_utf8_lossy(
         &out.stdout,
@@ -962,6 +964,69 @@ mod tests {
         std::fs::write(&p, body).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         p
+    }
+
+    /// Write an executable script from a child process. If this process held
+    /// the write fd, a fork by another test thread could inherit it, and the
+    /// exec of the script would fail with ETXTBSY ("Text file busy").
+    #[cfg(unix)]
+    fn write_script(p: &Path, body: &str) {
+        let status = Command::new("sh")
+            .args([
+                "-c",
+                "printf '%s' \"$1\" > \"$2\" && chmod 755 \"$2\"",
+                "sh",
+            ])
+            .arg(body)
+            .arg(p)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    /// A stand-in `bazel` whose query fails with exit status 2.
+    #[cfg(unix)]
+    fn failing_bazel(dir: &Path, stderr: &str, stdout: &str) -> PathBuf {
+        let p = dir.join("failing-bazel.sh");
+        let body = format!("#!/bin/sh\necho '{stdout}'\necho '{stderr}' >&2\nexit 2\n");
+        write_script(&p, &body);
+        p
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_target_count_is_an_error_not_zero() {
+        // Zero would report `skipped (no targets in this workspace)` and skip
+        // a configured command. The first line carries the reason, because
+        // `print_symbol_langs` shows only the first line of a status.
+        let kinds = &["java_library", "java_binary", "java_test"];
+        let first =
+            "bazel query for java_library, java_binary, java_test exited with exit status: 2";
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bazel = failing_bazel(tmp.path(), "ERROR: count failed", "");
+        let msg = format!(
+            "{:#}",
+            bazel_count_targets(&bazel, tmp.path(), kinds).unwrap_err()
+        );
+        assert_eq!(msg.lines().next(), Some(first), "{msg}");
+        assert!(msg.contains("stderr (tail):\nERROR: count failed"), "{msg}");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bazel = failing_bazel(tmp.path(), "", "ERROR: on stdout");
+        let msg = format!(
+            "{:#}",
+            bazel_count_targets(&bazel, tmp.path(), kinds).unwrap_err()
+        );
+        assert_eq!(msg.lines().next(), Some(first), "{msg}");
+        assert!(msg.contains("stdout (tail):\nERROR: on stdout"), "{msg}");
+
+        // The delegated path stops at the count, before it reads its env var.
+        let spec = LANGS.iter().find(|s| s.language == "java").unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        assert!(run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).is_err());
     }
 
     #[cfg(unix)]
