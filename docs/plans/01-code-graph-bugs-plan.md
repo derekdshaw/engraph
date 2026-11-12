@@ -6,10 +6,6 @@ of the plans.
 
 ## Result
 
-- The error message of a failed indexer shows the error, also when the
-  indexer writes it to stdout.
-- A failed `bazel query` for the target count of a language shows an error,
-  not `skipped (no targets in this workspace)`.
 - The hook rewrites the usual test commands of Gradle, uv, pnpm, and npx.
 - A new untracked file starts `--if-changed`.
 - **Optional:** the textual fallback name does not split inside an escaped
@@ -26,59 +22,10 @@ at the end).
 
 | Bug | Effect |
 |---|---|
-| 6. Indexer errors on stdout are not shown | The error message of a failed index run is empty. A failed target count shows `skipped (no targets in this workspace)` |
 | 7. The hook does not rewrite some test commands | `./gradlew test`, `uv run pytest`, and other commands are not compressed |
 | 8. New untracked files do not start `--if-changed` | The graph does not include a new file until a different change occurs |
 | 10. The textual fallback name splits inside a generic type (**optional**) | An id that the SCIP grammar rejects can give a name such as ``E>`]unwrap`` |
 | 11. The symbol pass shows only the first line of a failure | `failed: scip-python exited with signal: 6 (SIGABRT)`, without the reason in the stderr tail |
-
-### Bug 6: indexer errors on stdout are not shown
-
-When an indexer stops with an error, engraph shows only the end of its stderr
-(`crates/engraph-codegraph/src/index.rs:572-576`):
-
-```rust
-anyhow::bail!(
-    "{} exited with {}\nstderr (tail):\n{}",
-    drv.name(),
-    output.status,
-    bazel::tail_lines(&String::from_utf8_lossy(&output.stderr), 25)
-);
-```
-
-scip-typescript writes its errors to stdout (tested on `ky-typescript`:
-`error TS6053: File '@sindresorhus/tsconfig' not found` is on stdout, and stderr
-is empty). Thus, engraph shows `stderr (tail):` with no text after it. The same
-format is in `bazel_symbols.rs:317`, `bazel_symbols.rs:399`, and
-`bazel.rs:66`.
-
-A failed `bazel query` that counts the targets of a language gives no error
-message. `bazel_count_targets` (`bazel_symbols.rs:774-780`) writes the failure
-only to the log, and returns zero:
-
-```rust
-if !out.status.success() {
-    tracing::warn!(
-        "bazel query for {:?} exited non-zero; treating as no targets. stderr: {}",
-        kinds,
-        tail_lines(&String::from_utf8_lossy(&out.stderr), 5)
-    );
-    return Ok(0);
-}
-```
-
-Thus the symbol pass shows `skipped (no targets in this workspace)` for that
-language. It also does not run the command of `ENGRAPH_BAZEL_SCIP_JAVA_CMD` or
-`ENGRAPH_BAZEL_SCIP_GO_CMD`, because the count is before the command.
-
-The comment on this code gives "a rule kind that doesn't exist in this
-workspace's ruleset" as the usual cause. This is not correct for Bazel 9.3.2.
-On the three Bazel test projects (2026-11-11), each count query of each
-language gave exit status 0, also for a rule kind that does not exist
-(`INFO: Empty results`). A broken `BUILD` file stops the target-level pass
-(`bazel.rs:66`) before the count query. Thus this failure occurs only when
-the count query fails after the target-level query, for example when the
-Bazel server stops.
 
 ### Bug 7: the hook does not rewrite some test commands
 
@@ -232,45 +179,6 @@ In these steps:
 Some validation steps record a value with the `main` binary before the change.
 For these steps, do steps 1 and 2 on the `main` branch, and then steps 3 to 8.
 
-### Part 6: indexer errors (bug 6)
-
-1. Write a test with a fake indexer that writes an error to stdout, writes
-   nothing to stderr, and stops with exit status 1. The error message of the
-   run must include the stdout text.
-2. In `run_driver_to_scip`, show the end of stderr. If stderr is empty, show
-   the end of stdout, with the label `stdout (tail):`.
-3. Make the same change in `bazel_symbols.rs:317`, `bazel_symbols.rs:399`, and
-   `bazel.rs:66`.
-4. Write a test with a fake `bazel` that writes an error to stderr and stops
-   with exit status 2. `bazel_count_targets` must return an error. The first
-   line of the error must name the rule kinds and the exit status, because
-   `print_symbol_langs` shows only the first line (bug 11). Do the test again
-   with an empty stderr and the error on stdout.
-5. In `bazel_count_targets`, return the error, not zero. Use the tail of
-   step 2. `index_bazel_symbols` shows the error as `failed: <message>` for
-   that language.
-
-Validation of part 6:
-
-1. Do the preparation for `ky-typescript`. Do not do preparation step 7. The
-   setup (`npm install`) prevents the error.
-2. Do `engraph index .`. Result: the command stops with an error.
-3. Examine the output. Result: it has the line `stdout (tail):`, and after it
-   the line `error TS6053: File '@sindresorhus/tsconfig' not found.`
-4. Do `npm install --ignore-scripts`. Then do `engraph index .` again.
-   Result: the last line starts with `indexed`.
-5. Make a `bazel` wrapper that stops with exit status 2 and the stderr line
-   `ERROR: count failed` when its arguments include `--output=label_kind`.
-   For other arguments, it runs the real `bazel`. Put the wrapper first in
-   `PATH`.
-6. Do the preparation for `java-tutorial-java-bazel`. Do
-   `engraph index --bazel-symbols .`. Result: the output has the line
-   `symbol[java]: failed: bazel query for java_library, java_binary, java_test exited with exit status: 2`.
-   With the `main` binary, the line is
-   `symbol[java]: skipped (no targets in this workspace)`.
-7. Remove the wrapper from `PATH`. Do the command again. Result:
-   `symbol[java]: skipped (2 targets, set ENGRAPH_BAZEL_SCIP_JAVA_CMD to index them)`.
-
 ### Part 7: test commands (bug 7)
 
 1. Write rewrite tests for each command in the bug 7 table. Each command must
@@ -396,10 +304,6 @@ Validation of part 11:
 
 ## Tests
 
-- A failed indexer that writes only to stdout gives an error message with the
-  stdout text (part 6).
-- A failed target count gives an error, with the rule kinds and the exit
-  status on the first line (part 6).
 - Each command in the bug 7 table is rewritten and uses the correct filter
   (part 7).
 - A new untracked file starts `--if-changed` one time (part 8).
@@ -419,7 +323,7 @@ None.
 
 ## Effort
 
-Parts 6 and 8 each change one or two functions and add one or two tests.
+Part 8 changes one or two functions and adds one or two tests.
 Part 7 is medium: it changes the hook and `engraph run`. Part 10 is optional
 and changes one function. Part 11 changes one function in `output.rs`.
 

@@ -23,9 +23,9 @@ Small performance improvements are not items in this file. They are in
 
 ## 1. Code graph bugs
 
-Error messages are correct. The hook rewrites the usual test commands of Gradle, uv, pnpm, and npx. A new untracked file starts `--if-changed`.
+The symbol pass shows all the lines of a failure. The hook rewrites the usual test commands of Gradle, uv, pnpm, and npx. A new untracked file starts `--if-changed`.
 
-Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Parts 1 to 5 and part 9 are complete, and the plan does not have them. The numbers of the other parts do not change. Part 10 (the textual fallback name) is optional.
+Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Parts 1 to 6 and part 9 are complete, and the plan does not have them. The numbers of the other parts do not change. Part 10 (the textual fallback name) is optional.
 
 ## 2. Deeper workspace discovery
 
