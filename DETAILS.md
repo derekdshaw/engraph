@@ -2070,9 +2070,11 @@ chains after the target-level pass; `driver_name` reports
 command writes a known SCIP, `run_java` merges it; the unconfigured case
 reports `SkippedNotConfigured` with the target count, and a workspace with
 no targets reports `SkippedNoTargets` without reading the env var). These
-use a fake `bazel` that answers queries with `label_kind` lines and are
-`cfg(unix)`, since it needs the exec bit and `run_delegated` shells out
-through `sh`. Also unit-tested: `discover_go_modules`,
+use a fake `bazel` that answers queries with `label_kind` lines: a shell
+script on unix, a batch file on Windows (`Command` runs a `.cmd` through
+`cmd.exe`). On unix a child process writes the script, so a parallel test's
+fork cannot hold its write fd and fail the exec with ETXTBSY. The tests that
+set a command env var hold one mutex. Also unit-tested: `discover_go_modules`,
 `rebase_documents`, `rebase_subtree_documents`, `merge_scip_bytes`,
 `count_label_kind_lines`, and the `LangStatus` displays. `tests/bazel_symbols_live.rs` is a live
 integration check (gated behind `bazel` on PATH +

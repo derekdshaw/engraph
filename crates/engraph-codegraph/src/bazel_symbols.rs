@@ -949,27 +949,44 @@ mod tests {
         );
     }
 
-    /// A stand-in `bazel` that answers any query with `n` `label_kind` lines,
-    /// so a test can hand `bazel_count_targets` a nonzero count without a real
-    /// workspace. Needs the exec bit, hence unix-only — as is `run_delegated`
-    /// itself, which shells out through `sh`.
-    #[cfg(unix)]
-    fn fake_bazel(dir: &Path, n: usize) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let p = dir.join("fake-bazel.sh");
-        let mut body = String::from("#!/bin/sh\n");
-        for i in 0..n {
-            body.push_str(&format!("echo 'java_library //t{i}:t{i}'\n"));
-        }
-        std::fs::write(&p, body).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    /// A stand-in `bazel` that prints `stdout`, then `stderr` (when it is not
+    /// empty) on stderr, and exits with `code`. A shell script on unix; on
+    /// Windows a batch file, which `Command` runs through `cmd.exe`.
+    fn script_bazel(dir: &Path, name: &str, stdout: &[String], stderr: &str, code: i32) -> PathBuf {
+        #[cfg(not(windows))]
+        let (p, body) = {
+            let mut b = String::from("#!/bin/sh\n");
+            for l in stdout {
+                b.push_str(&format!("echo '{l}'\n"));
+            }
+            if !stderr.is_empty() {
+                b.push_str(&format!("echo '{stderr}' >&2\n"));
+            }
+            b.push_str(&format!("exit {code}\n"));
+            (dir.join(format!("{name}.sh")), b)
+        };
+        #[cfg(windows)]
+        let (p, body) = {
+            // `echo` with no text prints "ECHO is off.", so empty output
+            // gets no line at all.
+            let mut b = String::from("@echo off\r\n");
+            for l in stdout {
+                b.push_str(&format!("echo {l}\r\n"));
+            }
+            if !stderr.is_empty() {
+                b.push_str(&format!("echo {stderr} 1>&2\r\n"));
+            }
+            b.push_str(&format!("exit /b {code}\r\n"));
+            (dir.join(format!("{name}.cmd")), b)
+        };
+        write_script(&p, &body);
         p
     }
 
     /// Write an executable script from a child process. If this process held
     /// the write fd, a fork by another test thread could inherit it, and the
     /// exec of the script would fail with ETXTBSY ("Text file busy").
-    #[cfg(unix)]
+    #[cfg(not(windows))]
     fn write_script(p: &Path, body: &str) {
         let status = Command::new("sh")
             .args([
@@ -984,24 +1001,40 @@ mod tests {
         assert!(status.success());
     }
 
-    /// A stand-in `bazel` whose query fails with exit status 2.
-    #[cfg(unix)]
-    fn failing_bazel(dir: &Path, stderr: &str, stdout: &str) -> PathBuf {
-        let p = dir.join("failing-bazel.sh");
-        let body = format!("#!/bin/sh\necho '{stdout}'\necho '{stderr}' >&2\nexit 2\n");
-        write_script(&p, &body);
-        p
+    /// Windows runs a batch file by its extension; no exec bit, no ETXTBSY.
+    #[cfg(windows)]
+    fn write_script(p: &Path, body: &str) {
+        std::fs::write(p, body).unwrap();
     }
 
-    #[cfg(unix)]
+    /// A stand-in `bazel` that answers any query with `n` `label_kind` lines,
+    /// so a test can hand `bazel_count_targets` a nonzero count without a real
+    /// workspace.
+    fn fake_bazel(dir: &Path, n: usize) -> PathBuf {
+        let lines: Vec<String> = (0..n)
+            .map(|i| format!("java_library //t{i}:t{i}"))
+            .collect();
+        script_bazel(dir, "fake-bazel", &lines, "", 0)
+    }
+
+    /// A stand-in `bazel` whose query fails with exit status 2.
+    fn failing_bazel(dir: &Path, stderr: &str, stdout: &str) -> PathBuf {
+        let lines: Vec<String> = [stdout]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        script_bazel(dir, "failing-bazel", &lines, stderr, 2)
+    }
+
     #[test]
     fn a_failed_target_count_is_an_error_not_zero() {
         // Zero would report `skipped (no targets in this workspace)` and skip
         // a configured command. The first line carries the reason, because
         // `print_symbol_langs` shows only the first line of a status.
         let kinds = &["java_library", "java_binary", "java_test"];
-        let first =
-            "bazel query for java_library, java_binary, java_test exited with exit status: 2";
+        // The exit status reads `exit status: 2` on unix, `exit code: 2` on Windows.
+        let first = "bazel query for java_library, java_binary, java_test exited with exit ";
 
         let tmp = tempfile::tempdir().unwrap();
         let bazel = failing_bazel(tmp.path(), "ERROR: count failed", "");
@@ -1009,7 +1042,8 @@ mod tests {
             "{:#}",
             bazel_count_targets(&bazel, tmp.path(), kinds).unwrap_err()
         );
-        assert_eq!(msg.lines().next(), Some(first), "{msg}");
+        let line = msg.lines().next().unwrap();
+        assert!(line.starts_with(first) && line.ends_with(": 2"), "{msg}");
         assert!(msg.contains("stderr (tail):\nERROR: count failed"), "{msg}");
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1018,7 +1052,8 @@ mod tests {
             "{:#}",
             bazel_count_targets(&bazel, tmp.path(), kinds).unwrap_err()
         );
-        assert_eq!(msg.lines().next(), Some(first), "{msg}");
+        let line = msg.lines().next().unwrap();
+        assert!(line.starts_with(first) && line.ends_with(": 2"), "{msg}");
         assert!(msg.contains("stdout (tail):\nERROR: on stdout"), "{msg}");
 
         // The delegated path stops at the count, before it reads its env var.
@@ -1039,7 +1074,6 @@ mod tests {
         CMD_ENV.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_delegated_language_reports_no_targets_before_it_reads_the_env_var() {
         // The Java gap this mirrors the Go one from bug 5: with no java
@@ -1059,7 +1093,6 @@ mod tests {
         assert!(parts.is_empty());
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_delegated_language_names_the_targets_it_misses_when_unconfigured() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1083,7 +1116,6 @@ mod tests {
         assert!(parts.is_empty());
     }
 
-    #[cfg(unix)]
     #[test]
     fn run_java_delegates_to_configured_command() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1127,7 +1159,6 @@ mod tests {
         assert_eq!(parts[0], scip);
     }
 
-    #[cfg(unix)]
     #[test]
     fn run_go_delegates_to_configured_command() {
         let tmp = tempfile::tempdir().unwrap();
