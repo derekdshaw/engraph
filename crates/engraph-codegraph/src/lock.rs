@@ -208,8 +208,25 @@ mod tests {
             if cfg!(unix) {
                 assert_eq!(held_info, contents);
             }
-            let _again = acquired("/p");
+            let _again = acquired_after_release("/p");
         });
+    }
+
+    /// `acquired`, for a lock this process just released. A child that a
+    /// parallel test spawns gets a copy of the lock fd between its fork and its
+    /// exec, and the flock stays held until the exec closes that copy. So the
+    /// release can take a moment to show; a lock that stays held still fails.
+    fn acquired_after_release(project: &str) -> IndexLock {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match acquire(project).unwrap() {
+                Acquire::Acquired(l) => return l,
+                Acquire::Held { .. } if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     #[test]

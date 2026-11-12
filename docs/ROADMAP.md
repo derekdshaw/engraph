@@ -13,8 +13,8 @@ Each item has a plan in `docs/plans/`. Read
 It gives the language, the rules for the work, and the sequence of the work.
 
 The number of an item is the number of its plan. When the work of an item is
-complete, the item and its plan are removed. The numbers of the other items do
-not change.
+complete, the item is removed, and its plan moves to `docs/plans/completed/`.
+The numbers of the other items do not change.
 
 Small performance improvements are not items in this file. They are in
 [`docs/plans/general-perf-improvements.md`](plans/general-perf-improvements.md).
@@ -23,9 +23,9 @@ Small performance improvements are not items in this file. They are in
 
 ## 1. Code graph bugs
 
-A sub-project index writes only the files of that sub-project. Error messages and the Bazel Go message are correct. The hook rewrites the usual test commands of Gradle, uv, pnpm, and npx. A new untracked file starts `--if-changed`.
+The symbol pass shows all the lines of a failure. The hook rewrites the usual test commands of Gradle, uv, pnpm, and npx. A new untracked file starts `--if-changed`. A configured command that does not run says why. A failed scip-go module shows its error. A load removes the locals of each document.
 
-Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Part 1 (names), part 2 (Python relations), and part 4 (local symbols) are complete.
+Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Parts 1 to 6 and part 9 are complete, and the plan does not have them. The numbers of the other parts do not change. Part 10 (the textual fallback name) is optional.
 
 ## 2. Deeper workspace discovery
 
@@ -57,9 +57,9 @@ A symbol id is the same on each computer and after each commit. Two different sy
 
 Plan: [`docs/plans/05-stable-symbol-ids-plan.md`](plans/05-stable-symbol-ids-plan.md)
 
-## 6. Bazel symbols for TypeScript and Python
+## 6. Bazel symbols for TypeScript, JavaScript, Python, and Rust
 
-The symbol-level Bazel pass (`--bazel-symbols`) indexes TypeScript and Python code.
+The symbol-level Bazel pass (`--bazel-symbols`) indexes TypeScript, JavaScript, Python, and Rust code. Today it does not consider Rust at all, counts no `js_library` target, and fails on TypeScript and Python instead of reporting what a configured command would index.
 
 Plan: [`docs/plans/06-bazel-typescript-python-symbols-plan.md`](plans/06-bazel-typescript-python-symbols-plan.md)
 

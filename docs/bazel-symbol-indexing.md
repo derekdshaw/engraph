@@ -1,7 +1,7 @@
 # Design: Bazel-resolved symbol indexing
 
-Status: **Phases A (Go) and C (Java) shipped; B (TypeScript) and D (Python)
-open.** Kept as the original design record: the problem, the per-language
+Status: **Phases A (Go) and C (Java) shipped; B (TypeScript and JavaScript),
+D (Python), and E (Rust) open.** Kept as the original design record: the problem, the per-language
 approach, integration points, risks, and the phased plan. Line references and
 the "Problem & evidence" section describe the codebase as of the 2026-06-02
 diagnosis, not today. Current behavior lives in `DETAILS.md` §14.9; remaining
@@ -41,8 +41,10 @@ monorepo doesn't have:
 
 - `scip-java index` auto-detects only {Maven, Gradle, sbt, mill}
   (`driver.rs:115-118`); no root `pom.xml`/`build.gradle` → exit 1.
-- `scip-go --module-root .` requires a root `go.mod`; absent → the guard at
-  `bazel_symbols.rs:189` reports `SkippedNoTargets`.
+- `scip-go --module-root .` requires a root `go.mod`; absent → the guard in
+  `run_go_modules` reports `SkippedNotConfigured { targets, env }`, which names
+  the target count and `ENGRAPH_BAZEL_SCIP_GO_CMD` — the same status Java
+  reports when its own command is unset.
 - `scip-typescript index` needs a populated `node_modules` / tsconfig project;
   only a root `package.json` exists → exit 1.
 - `scip-python` needs importable modules; no `py_library` targets surfaced.

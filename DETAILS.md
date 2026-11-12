@@ -1312,7 +1312,7 @@ the modules they exercise; cross-cutting behavior lives under
 | `engraph-compress` | The compress pipeline is idempotent (a second pass is a no-op), stamps the sentinel header, and reduces ratio below 1 on realistic input. The ranker is deterministic. Per-filter tests pin token-reduction ratios for every command in the dispatcher and check picker↔FilterOutput id agreement. A separate golden-fixture pass guards byte-exact output drift for high-signal filters (git log, cargo check, cargo-nextest). The read-bucket tests cover per-language comment stripping, no head/tail re-windowing, and the empty-filter fallback. |
 | `engraph-retrieve` | FTS query sanitization, scope filtering applied in WHERE not in Rust. Behind the `embeddings` feature: RRF re-ranking actually changes order vs FTS-only, recency tiebreaks toward newer items, missing embeddings produce zero contribution rather than worst-rank, and embedding upserts are idempotent. |
 | `engraph-ingest` | M2-style partial-trailing-line handling on every JSONL chunk; rotation/truncation detection that replays the new file from offset zero; sidechain events are dropped; the per-file transaction commits or rolls back atomically; the compress-existing sweep keeps FTS pointed at the original hash so recall doesn't lose pre-compression matches; an ingest → recall round-trip (`tests/ingest_retrieve_roundtrip.rs`) covers scoped queries and entity search. |
-| `engraph-codegraph` | The SCIP loader's two-pass classifier emits CALLS edges, is idempotent under re-load, and scopes its DELETE to the current project (cross-repo loads don't trample each other). Names come from the id's last SCIP descriptor (`Config`, not `Config#`), a re-load replaces a stored name (also one a reference's placeholder guessed before the definition loaded), and `qualified_name` is written for symbols and placeholders. The `local 0` of two documents, or of two projects with one file path, are two entities with their own edges; a re-index removes the locals of a deleted file but keeps those of another indexer; `scheme` is written for globals and locals. Without a kind (scip-python), a method anchors a `CALLS` edge by its descriptor suffix, and a parameter is neither an anchor nor a target (`kindless_method_anchors_a_call_by_its_descriptor_suffix`). The subgraph renderer and the post-read list leave out locals that no relation goes from; the renderer covers the four-section markdown shape, disambiguation on ambiguous names (qualified names, ordered: caller's project, non-test files, types before members), lookups by `Config::x` / `Config#x` / `Config.x`, byte-cap truncation, and the cross-repo `repo:<name>` annotation. Driver detection is unit-pinned per build system. Driver end-to-end tests under `tests/drivers_live.rs` soft-skip when the indexer or build tool is absent. Bazel coverage splits into target-level (JSON-proto parsing, location parser, idempotent re-index, target/dep round-trip) and symbol-level (SCIP byte-stream merge that preserves `documents` + `external_symbols`, lang-status display, and a triple-gated live Java integration test). |
+| `engraph-codegraph` | The SCIP loader's two-pass classifier emits CALLS edges, is idempotent under re-load, and scopes its DELETE to the current project (cross-repo loads don't trample each other). Names come from the id's last SCIP descriptor (`Config`, not `Config#`), a re-load replaces a stored name (also one a reference's placeholder guessed before the definition loaded, and one an older engraph left on a placeholder a relation protects from the prune — `a_reference_corrects_the_name_of_an_older_placeholder`, which must not rename a defined symbol or take its project), and `qualified_name` is written for symbols and placeholders. The `local 0` of two documents, or of two projects with one file path, are two entities with their own edges; a re-index removes the locals of a deleted file but keeps those of another indexer; `scheme` is written for globals and locals. Without a kind (scip-python), a method anchors a `CALLS` edge by its descriptor suffix, and a parameter is neither an anchor nor a target (`kindless_method_anchors_a_call_by_its_descriptor_suffix`). The subgraph renderer and the post-read list leave out locals that no relation goes from; the renderer covers the four-section markdown shape, disambiguation on ambiguous names (qualified names, ordered: caller's project, non-test files, types before members), lookups by `Config::x` / `Config#x` / `Config.x`, byte-cap truncation, and the cross-repo `repo:<name>` annotation. Driver detection is unit-pinned per build system. Driver end-to-end tests under `tests/drivers_live.rs` soft-skip when the indexer or build tool is absent. Bazel coverage splits into target-level (JSON-proto parsing, location parser, idempotent re-index, target/dep round-trip) and symbol-level (SCIP byte-stream merge that preserves `documents` + `external_symbols`, lang-status display, and a triple-gated live Java integration test). |
 | `engraph-cli` | The Claude Code hooks are integration-tested against the binary. Pre-bash covers every parser shape (sudo, env prefix, absolute path, `git -C`, heredoc, unquoted shell metachars). Pre-grep exercises the subgraph-redirect gate (1–8 match, regex shape, short patterns, ambiguous resolution, qualified path shapes matched by `qualified_name` first), and `index_divergence.rs` covers the indexed commit plus the branch-divergence passthrough and subgraph note. Post-read pins the `additionalContext` shape, the no-signature passthrough, and the unindexed-file no-op. Session-start tests the brief content + byte cap. `engraph run` is tested for budget charging, stdin inheritance, and concurrent pipe drain without deadlock under large output. |
 
 Live-binary tests in `engraph-codegraph/tests/drivers_live.rs`,
@@ -1620,10 +1620,27 @@ same edges in each process (they came from `HashMap` order before).
    `file_path` / `line_range` / `signature` are refreshed on conflict,
    so a real definition takes ownership from any earlier placeholder —
    including its name: a reference loaded before the definition writes
-   a placeholder named from the id alone (`ensure_placeholder_entity`,
-   `INSERT OR IGNORE`), and document order varies between runs
+   a placeholder named from the id alone (`ensure_placeholder_entity`),
+   and document order varies between runs
    (scip-java converts in parallel), so without the replacement the same
    snapshot could yield different names on different runs.
+
+   `ensure_placeholder_entity` upserts too, but only over another
+   placeholder: `ON CONFLICT(id) DO UPDATE SET name, qualified_name
+   WHERE entities.file_path IS NULL`. For a symbol no local document
+   defines — every other crate's, for which rust-analyzer emits no
+   `SymbolInformation` — this is the *only* statement that ever touches
+   the row, since step 2's upsert iterates `doc.symbols` and the prune
+   in step 3 skips any row a relation references. Before this guard
+   (`INSERT OR IGNORE`), such a row kept whatever name the engraph that
+   first saw it derived, through every later re-index: an index of this
+   repo carried 514 pre-part-1 names (`Result#`, `Vec#`,
+   ``impl#[`Pool<M>`]get``) that no re-index could clear. The
+   `file_path IS NULL` guard preserves the ownership rule above — a
+   referrer still never renames a definition or takes its
+   `project`/`scheme` — and a `name IS NOT excluded.name` clause keeps
+   the hot path a no-op, since the function runs once per reference
+   *occurrence*.
 3. When GC is enabled, delete project-owned `symbol` rows that are absent
    from the new SCIP blob and have no remaining relations. This removes
    moved/renamed stale definitions without dropping current edgeless
@@ -1987,7 +2004,8 @@ flag is still available to opt in on a single-repo run.
   aspect is Bazel-7-only and does **not** auto-detect Bazel. engraph runs
   the command named by `ENGRAPH_BAZEL_SCIP_JAVA_CMD` as `<cmd> <repo>
   <out.scip>` and merges the SCIP it writes; unset →
-  `SkippedNotConfigured { env }`. The command owns all build-system
+  `SkippedNotConfigured { targets, env }`, or `SkippedNoTargets` when the
+  workspace has no Java at all. The command owns all build-system
   knowledge. A ready-made Bazel driver — scip-java's SemanticDB aspect
   patched for Bazel 8 + custom annotation-processor toolchains, plus the
   per-target `.scip` merge — ships as
@@ -2005,9 +2023,37 @@ blob is loaded once. Metadata from the first non-empty input wins.
 **Soft-skip semantics.** A failing language doesn't abort the rest of
 the symbol-level pass. `LangStatus`: `Indexed`, `IndexedModules {
 indexed, failed, targets }` (Go's per-module aggregate),
-`SkippedNoTargets`, `SkippedNoIndexer { binary }`, `SkippedNotConfigured
-{ env }` (Java with no command configured), `Failed(stderr_tail)` — each
-language reports independently. The `BazelSymbolStats` return value
+`SkippedNoTargets`, `SkippedNoIndexer { binary }`,
+`SkippedNotConfigured { targets, env }`, `Failed(tail)` — each
+language reports independently. The tail is the end of stderr, or of
+stdout with the label `stdout (tail):` when stderr is empty
+(scip-typescript writes its errors to stdout); the standalone driver
+error uses the same `bazel::failure_tail`. A failed target-count query is
+`Failed` too, not `SkippedNoTargets`: its first line names the rule kinds
+and the exit status (`bazel query for java_library, java_binary,
+java_test exited with exit status: 2`). An unknown rule kind is not a
+failure — Bazel 9.3.2 exits 0 with `INFO: Empty results` — and a broken
+`BUILD` file fails the target-level query first.
+
+**One skip report for a missing command.** Every delegated path counts
+targets *before* it reads its env var, so the two skips say different
+things: `SkippedNoTargets` ("no code of this language here", the same text
+TS and Python use) versus `SkippedNotConfigured { targets, env }` ("N
+targets this command would index"). Reading the env var first told a
+Go-only workspace to configure a Java indexer, and told a Java workspace
+only that the variable was unset, with no count. One variant covers both
+routes into that state — a language always delegated because its build is
+repo-specific (Java), and one whose native pass found no root (Go with no
+`go.mod`, a pure gazelle repo) — so a new delegated language needs no new
+status:
+
+```
+symbol[go]:   skipped (3 targets, set ENGRAPH_BAZEL_SCIP_GO_CMD to index them)
+symbol[java]: skipped (2 targets, set ENGRAPH_BAZEL_SCIP_JAVA_CMD to index them)
+```
+
+`SkippedNoIndexer` deliberately carries no count: its remedy is installing
+a binary, not configuring a command. The `BazelSymbolStats` return value
 carries per-language results plus aggregate `entities_inserted` /
 `relations_inserted` / `scip_bytes_total`.
 
@@ -2022,7 +2068,13 @@ chains after the target-level pass; `driver_name` reports
 
 **Tests.** `run_java`'s delegation is unit-tested in-crate (a fake
 command writes a known SCIP, `run_java` merges it; the unconfigured case
-reports `SkippedNotConfigured`), as are `discover_go_modules`,
+reports `SkippedNotConfigured` with the target count, and a workspace with
+no targets reports `SkippedNoTargets` without reading the env var). These
+use a fake `bazel` that answers queries with `label_kind` lines: a shell
+script on unix, a batch file on Windows (`Command` runs a `.cmd` through
+`cmd.exe`). On unix a child process writes the script, so a parallel test's
+fork cannot hold its write fd and fail the exec with ETXTBSY. The tests that
+set a command env var hold one mutex. Also unit-tested: `discover_go_modules`,
 `rebase_documents`, `rebase_subtree_documents`, `merge_scip_bytes`,
 `count_label_kind_lines`, and the `LangStatus` displays. `tests/bazel_symbols_live.rs` is a live
 integration check (gated behind `bazel` on PATH +
