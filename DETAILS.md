@@ -624,6 +624,12 @@ Shared with the native `PreToolUse(Grep)` path:
   references that object, so `git gc` prunes it after `gc.pruneExpire`
   (2 weeks by default). After that the diff fails and every file counts
   as changed until the next `engraph index`.
+  `git diff` never reports a file that is untracked now and absent from
+  the recorded commit (`stash create` excludes untracked files too), so
+  a matched file that is untracked (`git ls-files --others
+  --exclude-standard`) counts as changed when its mtime is later than
+  the covering subtree's `index_state.indexed_at` — written at
+  sub-second precision for exactly this comparison.
 
 The gate matters: a permissive heuristic would deny on common
 identifiers like `new` / `run` / `parse` (any of which has dozens of
@@ -1044,7 +1050,10 @@ index automatically; run `engraph index` by hand there.
 `--if-changed` itself (`Cmd::Index`, `main.rs`) resolves the project key with
 `index_scope`, lists the subtrees `divergence::changed_subtrees` reports — one
 `git diff --quiet <commit> -- <subtree>` per `index_state` row, at the current
-checkout's toplevel; an unresolvable commit counts as changed — drops subtrees
+checkout's toplevel; an unresolvable commit counts as changed, and so does an
+untracked file under the subtree with an mtime later than the row's
+`indexed_at` (the diff is blind to untracked files; the check runs only when
+the diff is clean) — drops subtrees
 nested under another changed one (`outermost_subtrees`), and re-indexes each
 at `<toplevel>/<subtree>` with `index_single`, which re-records that subtree's
 commit. It repeats how the subtree was indexed (`index_state.source`, `lang`,

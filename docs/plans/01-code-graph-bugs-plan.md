@@ -6,7 +6,6 @@ of the plans.
 
 ## Result
 
-- A new untracked file starts `--if-changed`.
 - The symbol pass shows all the lines of a failure.
 - When a configured command does not run because the count of targets is 0,
   the symbol pass says so.
@@ -28,25 +27,12 @@ at the end).
 
 | Bug | Effect |
 |---|---|
-| 8. New untracked files do not start `--if-changed` | The graph does not include a new file until a different change occurs |
 | 10. The textual fallback name splits inside a generic type (**optional**) | An id that the SCIP grammar rejects can give a name such as ``E>`]unwrap`` |
 | 11. The symbol pass shows only the first line of a failure | `failed: scip-python exited with signal: 6 (SIGABRT)`, without the reason in the stderr tail |
 | 12. A configured command does not run for rule classes that engraph does not count | `skipped (no targets in this workspace)`, also when `ENGRAPH_BAZEL_SCIP_JAVA_CMD` is set |
 | 13. A failed scip-go module shows only its stderr, and only in the log | The warning is empty when scip-go writes the error to stdout |
 | 14. Local symbols of a document with no global symbol are not removed | The rows stay after the file changes or is deleted |
 | 15. The JavaScript test filters do not see through ANSI color codes | A vitest run of 157 KB passes through with `dropped 0 pass lines` |
-
-### Bug 8: new untracked files do not start `--if-changed`
-
-`--if-changed` examines each subtree with
-`git diff --quiet <indexed-commit> -- <subtree>` (`subtree_changed`, called from
-`changed_subtrees`, `crates/engraph-cli/src/divergence.rs:160`). `git diff`
-does not include untracked files. Thus, a new file that is not in `git add`
-does not start a new index (tested on a small Cargo project). The recorded commit
-(`git stash create`) also does not include untracked files.
-
-`index_state` has the column `indexed_at`, the time of the index
-(`crates/engraph-core/src/schema.rs:276`).
 
 ### Bug 10: the textual fallback name splits inside a generic type (optional)
 
@@ -272,34 +258,6 @@ In these steps:
 Some validation steps record a value with the `main` binary before the change.
 For these steps, do steps 1 and 2 on the `main` branch, and then steps 3 to 8.
 
-### Part 8: untracked files (bug 8)
-
-1. Write a test: index a repo, add a new untracked file in a subtree, and do
-   `--if-changed`. The subtree must be in the result. A second `--if-changed`
-   must show `index up to date`.
-2. In `subtree_changed`, also do
-   `git ls-files --others --exclude-standard -- <subtree>`. The subtree has a
-   change if a listed file was changed after `indexed_at`.
-3. Find out the time of this step on a large repo. If it is more than 100 ms,
-   do it only when `git diff --quiet` finds no change.
-
-Validation of part 8:
-
-1. Do the preparation for `cobra-go`. Do `engraph index .`.
-2. Make a new untracked file with a new function:
-   `printf 'package cobra\n\nfunc UntrackedHelper() {}\n' > untracked_helper.go`
-3. Do `engraph index --if-changed --dry-run .`. Result:
-   `dry-run: would re-index <path of the copy>`.
-4. Do `engraph index --if-changed .`. Result: the last line starts with
-   `indexed <path of the copy>`.
-5. Do `engraph subgraph UntrackedHelper`. Result: the first line is
-   ``## Symbol `UntrackedHelper` (defined in untracked_helper.go:3)``.
-6. Do `engraph index --if-changed .` again. Result: the output starts with
-   `index up to date`. The untracked file does not start a second index.
-7. Do the preparation for `hono-typescript`. Do `engraph index .`.
-8. Do `time engraph index --if-changed .`. Result: `index up to date`. Record
-   the time in the pull request (correction step 3).
-
 ### Part 10: the textual fallback name (bug 10, optional)
 
 Do this part only for the reason in "Reason to wait" of bug 10.
@@ -428,7 +386,6 @@ Validation of part 15:
 
 ## Tests
 
-- A new untracked file starts `--if-changed` one time (part 8).
 - `fallback_display_name_textual` gives the last descriptor name of an id with
   a space in a descriptor (part 10, optional).
 - `print_symbol_langs` shows the lines of a failure after the `symbol[…]`
@@ -451,7 +408,6 @@ None.
 
 ## Effort
 
-Part 8 changes one or two functions and adds one or two tests.
 Part 10 is optional
 and changes one function. Part 11 changes one function in `output.rs`.
 Parts 12, 13, and 14 each change one function and add one test, after the
