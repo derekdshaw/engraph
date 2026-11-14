@@ -40,6 +40,7 @@ pub struct FilterOutput {
 pub type FilterFn = fn(&FilterCtx) -> FilterOutput;
 
 pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
+    let (cmd, args) = strip_launcher(cmd, args);
     // `git`'s subcommand can be preceded by global options (`-C <path>`,
     // `-c <k=v>`, `--git-dir[=...]`, `--work-tree[=...]`). Skip them so we
     // classify on the subcommand, not the global flag — otherwise
@@ -142,6 +143,26 @@ pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
     }
 }
 
+/// Peel a launcher prefix so the launched command selects the filter:
+/// `uv run pytest` classifies as `pytest`, `npx tsc` as `tsc`, `python -m
+/// pytest` as `pytest`, `pnpm exec vitest` as `vitest`. Launcher flags
+/// (`npx --yes`, `uv run --with`) are not peeled; the flag word classifies as
+/// `generic`, the same as before launchers were recognized. Callers that pass
+/// the unstripped args on to the filter are fine: no filter reachable through
+/// a launcher reads `FilterCtx::args`.
+fn strip_launcher<'a>(cmd: &'a str, args: &'a [String]) -> (&'a str, &'a [String]) {
+    let first = args.first().map(String::as_str).unwrap_or("");
+    let launched = match (cmd, first) {
+        ("uv", "run") | ("python" | "python3", "-m") | ("pnpm", "exec") => 1,
+        ("npx", _) => 0,
+        _ => return (cmd, args),
+    };
+    match args.get(launched) {
+        Some(c) if !c.starts_with('-') => (c.as_str(), &args[launched + 1..]),
+        _ => (cmd, args),
+    }
+}
+
 /// Number of leading global-option tokens in `args` (the tokens *after* the
 /// `git` word), i.e. the index of the git subcommand. For `git -C <path> log`
 /// the caller passes `["-C", "<path>", "log", ...]` and this returns 2.
@@ -198,6 +219,24 @@ mod tests {
     fn gradlew_classifies_to_gradle() {
         assert_eq!(pick("gradlew", &argv(&["test"])).1, "gradle");
         assert_eq!(pick("./gradlew", &argv(&["test"])).1, "gradle");
+    }
+
+    #[test]
+    fn launcher_prefix_classifies_to_launched_command() {
+        assert_eq!(pick("uv", &argv(&["run", "pytest"])).1, "pytest");
+        assert_eq!(pick("python", &argv(&["-m", "pytest"])).1, "pytest");
+        assert_eq!(pick("python3", &argv(&["-m", "pytest"])).1, "pytest");
+        assert_eq!(pick("npx", &argv(&["tsc", "--noEmit"])).1, "tsc");
+        assert_eq!(pick("npx", &argv(&["vitest", "run"])).1, "js_test");
+        assert_eq!(pick("pnpm", &argv(&["exec", "vitest", "run"])).1, "js_test");
+    }
+
+    #[test]
+    fn bare_or_flagged_launcher_stays_generic() {
+        assert_eq!(pick("npx", &argv(&[])).1, "generic");
+        assert_eq!(pick("uv", &argv(&["run"])).1, "generic");
+        assert_eq!(pick("python", &argv(&["-m"])).1, "generic");
+        assert_eq!(pick("npx", &argv(&["--yes", "vitest"])).1, "generic");
     }
 
     #[test]

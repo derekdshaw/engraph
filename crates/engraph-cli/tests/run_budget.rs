@@ -151,3 +151,44 @@ fn wrapped_run_without_session_id_does_not_panic() {
         .unwrap();
     assert_eq!(n, 0, "no session id means no budget row");
 }
+
+#[cfg(unix)]
+#[test]
+fn launcher_run_uses_launched_commands_filter() {
+    use std::os::unix::fs::PermissionsExt;
+    // Fake `npx` on PATH so the test needs no Node toolchain. `engraph run
+    // npx tsc --noEmit` must record the `tsc` filter, not `generic`.
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("npx.db");
+    let fake = dir.path().join("npx");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\necho \"x.ts(1,1): error TS2304: Cannot find name 'foo'.\"\nexit 2\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .env_clear()
+        .env("PATH", path)
+        .env("ENGRAPH_DB_PATH", &db)
+        .args(["run", "npx", "tsc", "--noEmit"])
+        .output()
+        .expect("spawn engraph run");
+    assert_eq!(out.status.code(), Some(2), "child exit code must pass through");
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let filter_id: String = conn
+        .query_row(
+            "SELECT filter_id FROM events WHERE kind = 'wrapped_cmd' ORDER BY seq DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(filter_id, "tsc");
+}

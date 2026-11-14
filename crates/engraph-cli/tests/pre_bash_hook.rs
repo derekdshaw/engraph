@@ -369,6 +369,39 @@ fn gradlew_wrapper_is_rewritten_verbatim() {
 }
 
 #[test]
+fn launcher_commands_are_rewritten_verbatim() {
+    let (_dir, db) = db_dir();
+    for cmd in [
+        "uv run pytest",
+        "python -m pytest",
+        "npx tsc --noEmit",
+        "npx vitest run",
+        "pnpm exec vitest run",
+    ] {
+        let out = run_hook(&db, cmd);
+        let v = parse(&out)
+            .unwrap_or_else(|| panic!("expected rewrite for `{cmd}`, got passthrough"));
+        let updated = v["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap();
+        assert_eq!(updated, format!("engraph run {cmd}"), "command: {cmd}");
+    }
+}
+
+#[test]
+fn second_arg_subcommands_are_rewritten() {
+    // Arms that key on the second argument (`go mod tidy`) need the full argv
+    // tail, not just the first word, to classify in the hook.
+    let (_dir, db) = db_dir();
+    let out = run_hook(&db, "go mod tidy");
+    let v = parse(&out).expect("expected rewrite for `go mod tidy`");
+    let updated = v["hookSpecificOutput"]["updatedInput"]["command"]
+        .as_str()
+        .unwrap();
+    assert_eq!(updated, "engraph run go mod tidy");
+}
+
+#[test]
 fn heredoc_command_is_passthrough() {
     let (_t, db) = db_dir();
     // `cat <<'EOF' ... EOF` would be corrupted by any rewrite — passthrough.

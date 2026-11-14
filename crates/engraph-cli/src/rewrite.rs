@@ -77,9 +77,7 @@ fn classify_for_wrap(segment: &str) -> Option<(Vec<String>, Vec<String>, &'stati
     if classify.is_empty() {
         return None;
     }
-    let cmd_word = classify[0].as_str();
-    let arg_word = classify.get(1).map(String::as_str).unwrap_or("");
-    let (_filter_fn, filter_id) = filters::pick(cmd_word, &[arg_word.to_string()]);
+    let (_filter_fn, filter_id) = filters::pick(classify[0].as_str(), &classify[1..]);
     if filter_id == "generic" {
         return None;
     }
