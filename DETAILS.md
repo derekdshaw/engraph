@@ -2042,7 +2042,8 @@ blob is loaded once. Metadata from the first non-empty input wins.
 the symbol-level pass. `LangStatus`: `Indexed`, `IndexedModules {
 indexed, failed, targets }` (Go's per-module aggregate),
 `SkippedNoTargets`, `SkippedNoIndexer { binary }`,
-`SkippedNotConfigured { targets, env }`, `Failed(tail)` — each
+`SkippedNotConfigured { targets, env }`,
+`SkippedNoTargetsForCommand { rule_kinds, env }`, `Failed(tail)` — each
 language reports independently. The tail is the end of stderr, or of
 stdout with the label `stdout (tail):` when stderr is empty
 (scip-typescript writes its errors to stdout); the standalone driver
@@ -2057,13 +2058,20 @@ java_test exited with exit status: 2`). An unknown rule kind is not a
 failure — Bazel 9.3.2 exits 0 with `INFO: Empty results` — and a broken
 `BUILD` file fails the target-level query first.
 
-**One skip report for a missing command.** Every delegated path counts
-targets *before* it reads its env var, so the two skips say different
+**One skip report for a missing command.** Every delegated path gates
+its command on the target count, so the skips say different
 things: `SkippedNoTargets` ("no code of this language here", the same text
 TS and Python use) versus `SkippedNotConfigured { targets, env }` ("N
 targets this command would index"). Reading the env var first told a
 Go-only workspace to configure a Java indexer, and told a Java workspace
-only that the variable was unset, with no count. One variant covers both
+only that the variable was unset, with no count. A set variable with a
+zero count is `SkippedNoTargetsForCommand { rule_kinds, env }` —
+`skipped (no java_library, java_binary, java_test targets;
+ENGRAPH_BAZEL_SCIP_JAVA_CMD not run)`: the count still gates the command
+(a `--workspace` run must not start the Java command in every repo without
+Java), and the variable is read only to choose the message, so the user
+who exported it sees which rule classes were counted instead of a bare
+"no targets". One variant covers both
 routes into that state — a language always delegated because its build is
 repo-specific (Java), and one whose native pass found no root (Go with no
 `go.mod`, a pure gazelle repo) — so a new delegated language needs no new
@@ -2091,7 +2099,8 @@ chains after the target-level pass; `driver_name` reports
 **Tests.** `run_java`'s delegation is unit-tested in-crate (a fake
 command writes a known SCIP, `run_java` merges it; the unconfigured case
 reports `SkippedNotConfigured` with the target count, and a workspace with
-no targets reports `SkippedNoTargets` without reading the env var). These
+no targets reports `SkippedNoTargets`, or `SkippedNoTargetsForCommand`
+when the variable is set, without running the command). These
 use a fake `bazel` that answers queries with `label_kind` lines: a shell
 script on unix, a batch file on Windows (`Command` runs a `.cmd` through
 `cmd.exe`). On unix a child process writes the script, so a parallel test's
