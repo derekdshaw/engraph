@@ -76,7 +76,9 @@ pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
 
         // npm
         ("npm", "install" | "i" | "ci") => (npm::install, "npm_install"),
-        ("npm", "test" | "t") => (npm::test, "npm_test"),
+        // pnpm and yarn run package.json scripts with npm-shaped output;
+        // `yarn t` is a user script, not a test alias, so it stays generic.
+        ("npm" | "pnpm", "test" | "t") | ("yarn", "test") => (npm::test, "npm_test"),
 
         // Python
         ("pytest", _) => (python::pytest, "pytest"),
@@ -237,6 +239,13 @@ mod tests {
         assert_eq!(pick("uv", &argv(&["run"])).1, "generic");
         assert_eq!(pick("python", &argv(&["-m"])).1, "generic");
         assert_eq!(pick("npx", &argv(&["--yes", "vitest"])).1, "generic");
+    }
+
+    #[test]
+    fn pnpm_and_yarn_test_use_npm_test_filter() {
+        assert_eq!(pick("pnpm", &argv(&["test"])).1, "npm_test");
+        assert_eq!(pick("pnpm", &argv(&["t"])).1, "npm_test");
+        assert_eq!(pick("yarn", &argv(&["test"])).1, "npm_test");
     }
 
     #[test]
