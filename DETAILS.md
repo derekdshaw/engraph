@@ -2046,7 +2046,11 @@ indexed, failed, targets }` (Go's per-module aggregate),
 language reports independently. The tail is the end of stderr, or of
 stdout with the label `stdout (tail):` when stderr is empty
 (scip-typescript writes its errors to stdout); the standalone driver
-error uses the same `bazel::failure_tail`. A failed target-count query is
+error uses the same `bazel::failure_tail`. The summary printer
+(`output::format_symbol_langs`) keeps the first line of a failure on the
+`symbol[…]` line and prints the tail under it, indented, blank lines
+dropped: the exit code or signal alone never says what to do, while the
+tail carries the reason (`JavaScript heap out of memory`). A failed target-count query is
 `Failed` too, not `SkippedNoTargets`: its first line names the rule kinds
 and the exit status (`bazel query for java_library, java_binary,
 java_test exited with exit status: 2`). An unknown rule kind is not a
