@@ -357,6 +357,18 @@ fn head_with_flags_is_rewritten() {
 }
 
 #[test]
+fn gradlew_wrapper_is_rewritten_verbatim() {
+    let (_dir, db) = db_dir();
+    let out = run_hook(&db, "./gradlew test");
+    let v = parse(&out).expect("expected rewrite for ./gradlew");
+    let updated = v["hookSpecificOutput"]["updatedInput"]["command"]
+        .as_str()
+        .unwrap();
+    // `./gradlew` must stay verbatim: its basename is not on PATH.
+    assert_eq!(updated, "engraph run ./gradlew test");
+}
+
+#[test]
 fn heredoc_command_is_passthrough() {
     let (_t, db) = db_dir();
     // `cat <<'EOF' ... EOF` would be corrupted by any rewrite — passthrough.

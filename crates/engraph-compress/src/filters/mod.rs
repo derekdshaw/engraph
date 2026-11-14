@@ -123,7 +123,7 @@ pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
         // Build systems
         ("make", _) => (make::make, "make"),
         ("mvn", _) => (jvm::mvn, "mvn"),
-        ("gradle", _) | ("./gradlew", _) => (jvm::gradle, "gradle"),
+        ("gradle" | "gradlew" | "./gradlew", _) => (jvm::gradle, "gradle"),
 
         // Search
         ("rg" | "grep", _) => (search::rg, "rg"),
@@ -192,6 +192,12 @@ mod tests {
     #[test]
     fn git_without_global_opts_still_classifies() {
         assert_eq!(pick("git", &argv(&["log", "--oneline"])).1, "git_log");
+    }
+
+    #[test]
+    fn gradlew_classifies_to_gradle() {
+        assert_eq!(pick("gradlew", &argv(&["test"])).1, "gradle");
+        assert_eq!(pick("./gradlew", &argv(&["test"])).1, "gradle");
     }
 
     #[test]
