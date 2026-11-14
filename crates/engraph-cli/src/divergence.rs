@@ -88,6 +88,50 @@ pub(crate) fn record_index_commit(
     engraph_codegraph::record_indexed_commit(conn, project, subtree, commit.as_deref(), mode)
 }
 
+/// The most specific indexed subtree of `commits` covering the repo-relative
+/// file `f` (`""` covers everything).
+fn covering_subtree<'a>(commits: &'a [(String, String)], f: &str) -> Option<&'a (String, String)> {
+    commits
+        .iter()
+        .filter(|(sub, _)| {
+            sub.is_empty()
+                || f.strip_prefix(sub.as_str())
+                    .is_some_and(|r| r.starts_with('/'))
+        })
+        .max_by_key(|(sub, _)| sub.len())
+}
+
+/// Repo-relative paths under `pathspecs` that exist untracked in `top`
+/// (`git ls-files --others --exclude-standard`, so ignored files are pruned).
+/// Empty when git fails.
+fn untracked_files(top: &Path, pathspecs: &[&str]) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(top)
+        .args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
+        .args(pathspecs)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Modification time of `path` as fractional epoch seconds.
+fn mtime_epoch(path: &Path) -> Option<f64> {
+    path.metadata()
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs_f64())
+}
+
 /// The subset of `files` (repo-relative, indexed under `project`) whose copy in
 /// the checkout containing `cwd` differs from the commit they were indexed at —
 /// committed on this branch or not. Each file is compared with the commit of
@@ -114,22 +158,32 @@ fn changed_since_index(
     };
     let mut by_commit: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for &f in files {
-        let covering = commits
-            .iter()
-            .filter(|(sub, _)| {
-                sub.is_empty()
-                    || f.strip_prefix(sub.as_str())
-                        .is_some_and(|r| r.starts_with('/'))
-            })
-            .max_by_key(|(sub, _)| sub.len());
-        if let Some((_, sha)) = covering {
-            by_commit.entry(sha).or_default().push(f);
+        if let Some((_, sha)) = covering_subtree(&commits, f) {
+            by_commit.entry(sha.as_str()).or_default().push(f);
         }
     }
-    by_commit
+    let mut changed: Vec<String> = by_commit
         .into_iter()
         .flat_map(|(sha, files)| diff_names(&top, sha, &files))
-        .collect()
+        .collect();
+    // `git diff` never reports a file that is untracked now and absent from
+    // the recorded commit (indexed while untracked): compare its mtime with
+    // the index time of the covering subtree. A file tracked at index time
+    // but untracked now shows up in both lists, hence the dedup.
+    let indexed_at = engraph_codegraph::indexed_at_by_subtree(conn, project).unwrap_or_default();
+    let all: Vec<&str> = files.iter().copied().collect();
+    for f in untracked_files(&top, &all) {
+        let Some((sub, _)) = covering_subtree(&commits, &f) else {
+            continue;
+        };
+        let Some(at) = indexed_at.get(sub) else {
+            continue;
+        };
+        if mtime_epoch(&top.join(&f)).is_some_and(|m| m > *at) && !changed.contains(&f) {
+            changed.push(f);
+        }
+    }
+    changed
 }
 
 /// `git diff --name-only <sha> -- <files>` in `top`. When git can't compare
@@ -168,9 +222,17 @@ pub(crate) fn changed_subtrees(conn: &db::PooledConn, project: &str, cwd: &Path)
     let Some(top) = crate::git_current_toplevel(cwd) else {
         return Vec::new();
     };
+    let indexed_at = engraph_codegraph::indexed_at_by_subtree(conn, project).unwrap_or_default();
     commits
         .into_iter()
-        .filter(|(subtree, sha)| subtree_changed(&top, sha, subtree))
+        .filter(|(subtree, sha)| {
+            subtree_changed(
+                &top,
+                sha,
+                subtree,
+                indexed_at.get(subtree).copied().unwrap_or(f64::MAX),
+            )
+        })
         .map(|(subtree, _)| subtree)
         .collect()
 }
@@ -197,7 +259,11 @@ pub(crate) fn outermost_subtrees(subtrees: Vec<String>) -> Vec<String> {
 
 /// `git diff --quiet <sha> -- <subtree>` in `top`; the whole-project subtree
 /// `""` diffs `.` (git rejects an empty pathspec). Only exit 0 means unchanged.
-fn subtree_changed(top: &Path, sha: &str, subtree: &str) -> bool {
+/// `git diff` never sees untracked files, and the recorded `stash create`
+/// commit does not include them either, so a clean diff still counts the
+/// subtree as changed when an untracked file under it has an mtime later
+/// than `indexed_at` (fractional epoch seconds).
+fn subtree_changed(top: &Path, sha: &str, subtree: &str, indexed_at: f64) -> bool {
     let pathspec = if subtree.is_empty() { "." } else { subtree };
     let status = std::process::Command::new("git")
         .arg("-C")
@@ -206,7 +272,12 @@ fn subtree_changed(top: &Path, sha: &str, subtree: &str) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
-    !matches!(status, Ok(s) if s.success())
+    if !matches!(status, Ok(s) if s.success()) {
+        return true;
+    }
+    untracked_files(top, &[pathspec])
+        .iter()
+        .any(|f| mtime_epoch(&top.join(f)).is_some_and(|m| m > indexed_at))
 }
 
 /// Indexed files grouped by project, from `(project, file_path)` pairs.
@@ -312,20 +383,23 @@ mod tests {
     #[test]
     fn subtree_changed_tracks_edits_under_the_subtree_only() {
         let (_dir, repo, head) = repo();
-        assert!(!subtree_changed(&repo, &head, ""));
-        assert!(!subtree_changed(&repo, &head, "svc-a"));
-        assert!(!subtree_changed(&repo, &head, "svc-b"));
+        // Far-future index time: only tracked changes can flag the subtree.
+        let at = f64::MAX;
+        assert!(!subtree_changed(&repo, &head, "", at));
+        assert!(!subtree_changed(&repo, &head, "svc-a", at));
+        assert!(!subtree_changed(&repo, &head, "svc-b", at));
 
         std::fs::write(repo.join("svc-a/a.rs"), "fn a() { 1 }\n").unwrap();
-        assert!(subtree_changed(&repo, &head, ""));
-        assert!(subtree_changed(&repo, &head, "svc-a"));
-        assert!(!subtree_changed(&repo, &head, "svc-b"));
+        assert!(subtree_changed(&repo, &head, "", at));
+        assert!(subtree_changed(&repo, &head, "svc-a", at));
+        assert!(!subtree_changed(&repo, &head, "svc-b", at));
 
         // A commit git can't resolve counts as changed.
         assert!(subtree_changed(
             &repo,
             "0000000000000000000000000000000000000000",
-            "svc-b"
+            "svc-b",
+            at
         ));
     }
 
@@ -394,6 +468,86 @@ mod tests {
         );
         assert_eq!(outermost_subtrees(v(&["svc-a", "", "svc-b"])), v(&[""]));
         assert!(outermost_subtrees(Vec::new()).is_empty());
+    }
+
+    /// Back-date every `indexed_at` so a file written after the index gets an
+    /// mtime later than it, whatever the clock granularity.
+    fn backdate_index(conn: &db::PooledConn, secs: i64) {
+        conn.execute(
+            "UPDATE index_state SET indexed_at = datetime('now', ?1 || ' seconds')",
+            rusqlite::params![-secs],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn changed_subtrees_flags_a_new_untracked_file() {
+        let (dir, repo, head) = repo();
+        let pool = db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let project = crate::canonical_repo_key(&repo);
+        for sub in ["svc-a", "svc-b"] {
+            engraph_codegraph::record_indexed_commit(
+                &conn,
+                &project,
+                sub,
+                Some(&head),
+                &Default::default(),
+            )
+            .unwrap();
+        }
+        backdate_index(&conn, 10);
+        assert!(changed_subtrees(&conn, &project, &repo).is_empty());
+
+        // Ignored files do not count as changes.
+        std::fs::write(repo.join(".gitignore"), "*.tmp\n").unwrap();
+        std::fs::write(repo.join("svc-b/x.tmp"), "tmp\n").unwrap();
+        assert!(changed_subtrees(&conn, &project, &repo).is_empty());
+
+        // A new untracked file is invisible to `git diff`, but it must start
+        // a refresh of its subtree.
+        std::fs::write(repo.join("svc-b/gen.rs"), "fn gen() {}\n").unwrap();
+        assert_eq!(changed_subtrees(&conn, &project, &repo), vec!["svc-b"]);
+
+        // Re-recorded: the file is now older than the index.
+        engraph_codegraph::record_indexed_commit(
+            &conn,
+            &project,
+            "svc-b",
+            Some(&head),
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(changed_subtrees(&conn, &project, &repo).is_empty());
+    }
+
+    #[test]
+    fn changed_since_index_flags_a_modified_untracked_indexed_file() {
+        let (dir, repo, head) = repo();
+        let pool = db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let project = crate::canonical_repo_key(&repo);
+        // `svc-a/gen.rs` was untracked when it was indexed: it is in the
+        // graph, but neither HEAD nor the recorded commit contains it.
+        std::fs::write(repo.join("svc-a/gen.rs"), "fn gen() {}\n").unwrap();
+        engraph_codegraph::record_indexed_commit(
+            &conn,
+            &project,
+            "",
+            Some(&head),
+            &Default::default(),
+        )
+        .unwrap();
+        let files: BTreeSet<&str> = ["svc-a/gen.rs", "svc-a/a.rs"].into_iter().collect();
+        // Indexed after the file was written: nothing diverged.
+        assert!(changed_since_index(&conn, &project, &repo, &files).is_empty());
+        // Indexed before: the untracked file counts as diverged; the tracked
+        // unmodified one does not.
+        backdate_index(&conn, 10);
+        assert_eq!(
+            changed_since_index(&conn, &project, &repo, &files),
+            vec!["svc-a/gen.rs"]
+        );
     }
 
     #[test]

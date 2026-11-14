@@ -155,9 +155,13 @@ pub fn record_indexed_commit(
         rusqlite::params![project, subtree],
     )?;
     if let Some(sha) = commit {
+        // Sub-second `indexed_at`: the untracked-file divergence check
+        // compares file mtimes against it, and the column default is whole
+        // seconds — too coarse for a file created moments after the index.
         conn.execute(
-            "INSERT INTO index_state (project, subtree, commit_sha, source, lang, bazel_symbols)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO index_state (project, subtree, commit_sha, source, lang, bazel_symbols, \
+             indexed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%d %H:%M:%f','now'))",
             rusqlite::params![
                 project,
                 subtree,
@@ -179,6 +183,23 @@ pub fn indexed_commits(conn: &PooledConn, project: &str) -> Result<Vec<(String, 
     let rows = stmt
         .query_map([project], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// When each recorded subtree of `project` was indexed, by subtree, as
+/// fractional epoch seconds — what the untracked-file divergence check
+/// compares file mtimes against.
+pub fn indexed_at_by_subtree(
+    conn: &PooledConn,
+    project: &str,
+) -> Result<std::collections::HashMap<String, f64>> {
+    let mut stmt = conn.prepare(
+        "SELECT subtree, (julianday(indexed_at) - 2440587.5) * 86400.0
+         FROM index_state WHERE project = ?1",
+    )?;
+    let rows = stmt
+        .query_map([project], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
 }
 
