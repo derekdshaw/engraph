@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
 use protobuf::{EnumOrUnknown, Message};
 use scip::types::{Document, Index, SymbolRole, symbol_information::Kind as SymKind};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -169,6 +169,7 @@ pub fn load_with_options(
         }
     }
     let multi_document = defined_in_several_documents(&index);
+    let schemes = LoadSchemes::of(&index, &current_symbols);
 
     // One transaction for the whole load: atomic swap from the reader's POV.
     conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -250,7 +251,15 @@ pub fn load_with_options(
 
     for doc in &index.documents {
         stats.documents_seen += 1;
-        load_document(conn, project, doc, &sym_kind, &multi_document, &mut stats)?;
+        load_document(
+            conn,
+            project,
+            doc,
+            &sym_kind,
+            &multi_document,
+            &schemes,
+            &mut stats,
+        )?;
     }
     if options.prune_stale {
         stats.entities_pruned += prune_stale_symbols(conn, project, &prefix)?;
@@ -286,6 +295,7 @@ fn load_document(
     doc: &Document,
     sym_kind: &HashMap<String, SymKind>,
     multi_document: &HashSet<String>,
+    schemes: &LoadSchemes,
     stats: &mut LoadStats,
 ) -> Result<()> {
     // Insert one entity per SymbolInformation in this doc. We capture
@@ -296,7 +306,7 @@ fn load_document(
     // sym -> lines of the definition's `enclosing_range` (the whole function
     // or class, decorators included), when the indexer writes one.
     let mut def_scope: HashMap<String, (i32, i32)> = HashMap::new();
-    let doc_scheme = document_scheme(doc);
+    let doc_scheme = document_scheme(doc).or_else(|| schemes.fallback(doc));
     let mut def_generated: HashMap<String, bool> = HashMap::new();
 
     for occ in &doc.occurrences {
@@ -608,9 +618,54 @@ fn ensure_placeholder_entity(
     Ok(())
 }
 
+/// The schemes of one load, for the locals of a document that has no global
+/// symbol of its own (`document_scheme` is `None`). Such locals would get
+/// `scheme` NULL, which `IN_SCOPE` never matches, so no later load could
+/// remove them — not even after the file is deleted. The fallback is the
+/// load's only scheme when it has one; in a merged load (one indexer per
+/// language), the scheme the other documents with the same file extension
+/// carry. `None` when neither applies, which leaves the locals as before.
+struct LoadSchemes {
+    all: BTreeSet<String>,
+    by_extension: HashMap<String, String>,
+}
+
+impl LoadSchemes {
+    fn of(index: &Index, current_symbols: &HashSet<String>) -> Self {
+        let all = current_symbols
+            .iter()
+            .filter_map(|s| scheme(s))
+            .map(str::to_string)
+            .collect();
+        let mut by_extension = HashMap::new();
+        for doc in &index.documents {
+            if let (Some(s), Some(ext)) = (document_scheme(doc), extension(&doc.relative_path)) {
+                by_extension
+                    .entry(ext.to_string())
+                    .or_insert_with(|| s.to_string());
+            }
+        }
+        Self { all, by_extension }
+    }
+
+    fn fallback(&self, doc: &Document) -> Option<&str> {
+        if self.all.len() == 1 {
+            return self.all.iter().next().map(String::as_str);
+        }
+        self.by_extension
+            .get(extension(&doc.relative_path)?)
+            .map(String::as_str)
+    }
+}
+
+fn extension(path: &str) -> Option<&str> {
+    std::path::Path::new(path).extension()?.to_str()
+}
+
 /// The scheme (indexer) of a document: that of its first global symbol, in
 /// its symbols, then in its occurrences (references to other packages carry
-/// the indexer's scheme too). `None` when the document has only locals.
+/// the indexer's scheme too). `None` when the document has only locals; the
+/// loader then falls back to `LoadSchemes`.
 fn document_scheme(doc: &Document) -> Option<&str> {
     doc.symbols
         .iter()

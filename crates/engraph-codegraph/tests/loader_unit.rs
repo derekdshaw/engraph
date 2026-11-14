@@ -782,6 +782,79 @@ fn a_load_of_another_indexer_keeps_the_locals() {
     assert_eq!(local_rows(&conn), (2, 1));
 }
 
+/// A document whose symbols and occurrences are all local: no global symbol
+/// gives it a scheme.
+fn only_local_doc(path: &str, name: &str) -> Document {
+    let mut doc = Document::new();
+    doc.relative_path = path.to_string();
+    doc.symbols = vec![sym("local 0", name, SymKind::Variable)];
+    doc.occurrences = vec![occ(
+        "local 0",
+        vec![0, 0, 0, 1],
+        SymbolRole::Definition as i32,
+    )];
+    doc
+}
+
+fn scheme_of_local(conn: &engraph_core::db::PooledConn, path: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT scheme FROM entities WHERE id LIKE 'local 0@%:' || ?1",
+        [path],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_reindex_removes_the_locals_of_a_deleted_file_with_no_global_symbol() {
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    let z = || only_local_doc("src/z.rs", "z_only");
+    load(&conn, "/proj/demo", &index_of(vec![pkg_doc(), z()])).unwrap();
+    assert_eq!(local_rows(&conn), (1, 0));
+    // The load has one scheme: the document's locals take it.
+    assert_eq!(
+        scheme_of_local(&conn, "src/z.rs"),
+        Some("scip-test".to_string())
+    );
+    // src/z.rs is deleted: its local goes.
+    load(&conn, "/proj/demo", &index_of(vec![pkg_doc()])).unwrap();
+    assert_eq!(local_rows(&conn), (0, 0));
+}
+
+#[test]
+fn a_local_only_document_takes_the_scheme_of_its_extension_in_a_merged_load() {
+    // A merged load (several indexers in one index) has more than one scheme:
+    // a document with only locals takes the scheme of the other documents
+    // with its file extension.
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    let other = "other-indexer npm demo 1.0.0 src/`x.ts`/g().";
+    let mut x = Document::new();
+    x.relative_path = "src/x.ts".to_string();
+    x.symbols = vec![sym(other, "g", SymKind::Function)];
+    x.occurrences = vec![occ(other, vec![0, 0, 0, 1], SymbolRole::Definition as i32)];
+    let z = only_local_doc("src/z.ts", "z_only");
+    load(
+        &conn,
+        "/proj/demo",
+        &index_of(vec![pkg_doc(), x.clone(), z]),
+    )
+    .unwrap();
+    assert_eq!(
+        scheme_of_local(&conn, "src/z.ts"),
+        Some("other-indexer".to_string())
+    );
+    // A load of the scip-test part alone keeps the other indexer's local...
+    load(&conn, "/proj/demo", &index_of(vec![pkg_doc()])).unwrap();
+    assert_eq!(local_rows(&conn).0, 1);
+    // ...and a load of the other indexer without src/z.ts removes it.
+    load(&conn, "/proj/demo", &index_of(vec![x])).unwrap();
+    assert_eq!(local_rows(&conn).0, 0);
+}
+
 #[test]
 fn the_loader_writes_the_scheme_of_each_symbol() {
     let dir = tempdir().unwrap();
