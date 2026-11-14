@@ -6,8 +6,6 @@ of the plans.
 
 ## Result
 
-- When a configured command does not run because the count of targets is 0,
-  the symbol pass says so.
 - The warning for a failed scip-go module shows the error, also when scip-go
   writes it to stdout.
 - A load removes the local symbols of a document that has no global symbol.
@@ -27,7 +25,6 @@ at the end).
 | Bug | Effect |
 |---|---|
 | 10. The textual fallback name splits inside a generic type (**optional**) | An id that the SCIP grammar rejects can give a name such as ``E>`]unwrap`` |
-| 12. A configured command does not run for rule classes that engraph does not count | `skipped (no targets in this workspace)`, also when `ENGRAPH_BAZEL_SCIP_JAVA_CMD` is set |
 | 13. A failed scip-go module shows only its stderr, and only in the log | The warning is empty when scip-go writes the error to stdout |
 | 14. Local symbols of a document with no global symbol are not removed | The rows stay after the file changes or is deleted |
 | 15. The JavaScript test filters do not see through ANSI color codes | A vitest run of 157 KB passes through with `dropped 0 pass lines` |
@@ -87,33 +84,6 @@ select count(*) from entities where name like '%#%' or name like '%]%' or name l
 
 If the count is more than `0`, this bug is not optional: find the ids that
 `parse_symbol` rejects, and record them in the pull request.
-
-### Bug 12: a configured command does not run for rule classes that engraph does not count
-
-**Found on 2026-11-11**, in the review of pull request #20. It was not seen on
-a real repo.
-
-`run_delegated` counts the targets of `spec.rule_kinds` before it reads the
-env var of the command (`crates/engraph-codegraph/src/bazel_symbols.rs:364-367`):
-
-```rust
-let targets = bazel_count_targets(bazel, repo, spec.rule_kinds)?;
-if targets == 0 {
-    return Ok(skip(LangStatus::SkippedNoTargets));
-}
-```
-
-The rule kinds of Java are `java_library`, `java_binary`, and `java_test`. If
-a workspace builds its Java with other rule classes, for example a custom
-Starlark rule, the count is 0. Then the pass shows
-`skipped (no targets in this workspace)`, and it does not run the command of
-`ENGRAPH_BAZEL_SCIP_JAVA_CMD`, also when the user set it. The native Go pass
-and the Go command have the same count.
-
-The count before the command is necessary. The README tells the user to export
-the variable, and without the count, a `--workspace` run starts the Java command
-in each repo that has no Java. Thus the correction keeps the count, and changes
-the message.
 
 ### Bug 13: a failed scip-go module shows only its stderr, and only in the log
 
@@ -251,27 +221,6 @@ Validation of part 10:
 1. In this repo, do `engraph index .`. Do the count query of "Reason to wait"
    of bug 10. Result: `0`. This part changes no name of a known id.
 
-### Part 12: the skip message of a command that does not run (bug 12)
-
-1. Find out if a real Bazel repo builds Java or Go with rule classes that are
-   not in `rule_kinds`. Record the repo and its rule classes in the pull
-   request.
-2. Write a test with a fake `bazel` that reports 0 targets, and with
-   `ENGRAPH_BAZEL_SCIP_JAVA_CMD` set. Hold `cmd_env_lock` in the test. The
-   status must name the rule kinds and the variable, for example
-   `skipped (no java_library, java_binary, java_test targets; ENGRAPH_BAZEL_SCIP_JAVA_CMD not run)`.
-3. In `run_delegated`, when the count is 0 and the variable is set, give that
-   status. When the variable is not set, keep `SkippedNoTargets`.
-4. If step 1 found a repo, add its rule classes to `rule_kinds`.
-
-Validation of part 12:
-
-1. Do the preparation for `go-tutorial-go-bazel`. Do
-   `ENGRAPH_BAZEL_SCIP_JAVA_CMD=true engraph index --bazel-symbols .`.
-   Result: `symbol[java]: skipped (no java_library, java_binary, java_test targets; ENGRAPH_BAZEL_SCIP_JAVA_CMD not run)`.
-2. Do the command again without the variable. Result:
-   `symbol[java]: skipped (no targets in this workspace)`.
-
 ### Part 13: the scip-go module error (bug 13)
 
 1. Find out where scip-go writes the error for a module that does not compile:
@@ -331,8 +280,6 @@ Validation of part 15:
 
 - `fallback_display_name_textual` gives the last descriptor name of an id with
   a space in a descriptor (part 10, optional).
-- A configured command with 0 targets gives a status that names the rule
-  kinds and the variable (part 12).
 - A second load without a document removes the locals of that document, also
   when the document has no global symbol (part 14).
 - `js_test` and `npm_test` drop pass lines that start with an escape sequence
@@ -351,7 +298,7 @@ None.
 
 Part 10 is optional
 and changes one function.
-Parts 12, 13, and 14 each change one function and add one test, after the
+Parts 13 and 14 each change one function and add one test, after the
 "Find out" steps. Part 15 changes two functions and adds two tests.
 
 ## Plan management
