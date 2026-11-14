@@ -180,7 +180,11 @@ fn launcher_run_uses_launched_commands_filter() {
         .args(["run", "npx", "tsc", "--noEmit"])
         .output()
         .expect("spawn engraph run");
-    assert_eq!(out.status.code(), Some(2), "child exit code must pass through");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "child exit code must pass through"
+    );
 
     let conn = rusqlite::Connection::open(&db).unwrap();
     let filter_id: String = conn

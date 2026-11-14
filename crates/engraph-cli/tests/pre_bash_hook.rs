@@ -379,8 +379,8 @@ fn launcher_commands_are_rewritten_verbatim() {
         "pnpm exec vitest run",
     ] {
         let out = run_hook(&db, cmd);
-        let v = parse(&out)
-            .unwrap_or_else(|| panic!("expected rewrite for `{cmd}`, got passthrough"));
+        let v =
+            parse(&out).unwrap_or_else(|| panic!("expected rewrite for `{cmd}`, got passthrough"));
         let updated = v["hookSpecificOutput"]["updatedInput"]["command"]
             .as_str()
             .unwrap();
