@@ -312,7 +312,10 @@ code (`engraph-cli` `Cmd::Run` branch).
 ### 4.1 Dispatch
 
 `filters::pick(cmd, args)` (`engraph-compress::filters`) is a
-single big `match` returning `(FilterFn, &'static str)`. The unknown
+single big `match` returning `(FilterFn, &'static str)`. Before the
+match, `strip_launcher` peels a launcher prefix (`uv run`, `python -m`,
+`python3 -m`, `npx`, `pnpm exec`) so the launched command routes:
+`pick("uv", ["run", "pytest"])` selects the `pytest` filter. The unknown
 fallback is `(generic::filter, "generic")`.
 
 Each `FilterFn` has signature
@@ -362,7 +365,7 @@ Specific noise patterns by family:
 | tree / fd / ls | depth-truncated; long flat lists capped | first N entries; depth limit | `truncated N more entries` |
 | rg / grep | flat match lists capped | first N matches | `truncated N more matches` |
 | docker / kubectl | annotations / spec blobs | events, container/pod summaries | row caps |
-| npm / pnpm / yarn | per-package "added N" progress | totals, vulnerability count | summary |
+| npm / pnpm / yarn (install, test) | per-package "added N" progress | totals, vulnerability count | summary |
 | pytest / pip / uv / go test / go mod tidy | pass-progress lines | failed test output, summary | counts |
 | lint (ruff / mypy / eslint / tsc) | info / progress lines | diagnostics (errors, warnings) | `[engraph: <name> N errors, M warnings, exit C]` |
 | make / mvn / gradle (incl. `./gradlew`) | recipe echo, dir-change, download / progress lines | errors, build / test results | dropped-line count + exit |
@@ -470,7 +473,8 @@ has_unquoted_shell_meta(command)? → rewrite_pipeline(command):
 otherwise (plain command):
     classify_for_wrap(command):
         strip_command_prefix(argv): sudo/env → None; peel `FOO=bar` (whitespace value → None)
-        normalize_argv0(argv): /usr/bin/grep → grep
+        normalize_argv0: /usr/bin/grep → grep (classification always; the
+            wrapped argv only for absolute paths — `./gradlew` stays verbatim)
         strip_git_global_opts(argv): drop -C/-c/--git-dir=/--work-tree= when argv[0] == "git"
         pick(argv[0], argv[1..]) == "generic"? → None
     None? → Passthrough
@@ -548,8 +552,10 @@ invoke, per command or per pipeline stage):
   command correctly.
 - `normalize_argv0` maps absolute and `./`-prefixed argv[0]
   values through `Path::file_name` so `/usr/bin/grep` and
-  `./bin/git` classify the same as the bare names. Pure
-  normalization — does nothing to non-path argv[0].
+  `./gradlew` classify the same as the bare names. Does nothing to
+  non-path argv[0]. The wrapped argv applies it only to absolute
+  paths: PATH resolves `git` as well as `/usr/bin/git`, but a bare
+  `gradlew` is not on PATH, so `./gradlew` must stay verbatim.
 - `strip_git_global_opts` walks argv when argv[0] == "git"
   and drops the global options `-C path`, `-c key=value`,
   `--git-dir=…`, `--work-tree=…`. Without this, `git -C /tmp status`

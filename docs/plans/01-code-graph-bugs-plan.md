@@ -6,7 +6,6 @@ of the plans.
 
 ## Result
 
-- The hook rewrites the usual test commands of Gradle, uv, pnpm, and npx.
 - A new untracked file starts `--if-changed`.
 - The symbol pass shows all the lines of a failure.
 - When a configured command does not run because the count of targets is 0,
@@ -28,26 +27,12 @@ at the end).
 
 | Bug | Effect |
 |---|---|
-| 7. The hook does not rewrite some test commands | `./gradlew test`, `uv run pytest`, and other commands are not compressed |
 | 8. New untracked files do not start `--if-changed` | The graph does not include a new file until a different change occurs |
 | 10. The textual fallback name splits inside a generic type (**optional**) | An id that the SCIP grammar rejects can give a name such as ``E>`]unwrap`` |
 | 11. The symbol pass shows only the first line of a failure | `failed: scip-python exited with signal: 6 (SIGABRT)`, without the reason in the stderr tail |
 | 12. A configured command does not run for rule classes that engraph does not count | `skipped (no targets in this workspace)`, also when `ENGRAPH_BAZEL_SCIP_JAVA_CMD` is set |
 | 13. A failed scip-go module shows only its stderr, and only in the log | The warning is empty when scip-go writes the error to stdout |
 | 14. Local symbols of a document with no global symbol are not removed | The rows stay after the file changes or is deleted |
-
-### Bug 7: the hook does not rewrite some test commands
-
-The pre-bash hook does not rewrite these commands (tested):
-
-| Command | Cause |
-|---|---|
-| `./gradlew test` | `normalize_argv0` (`crates/engraph-cli/src/rewrite.rs:259-271`) changes `./gradlew` to `gradlew` before `filters::pick`. The filter arm matches only `"./gradlew"` (`crates/engraph-compress/src/filters/mod.rs:126`). |
-| `uv run pytest`, `python -m pytest` | The first word is `uv` or `python`. `filters::pick` has no arm for `("uv", "run")` or `("python", "-m")`. |
-| `pnpm test` | `filters::pick` has an arm for `("npm", "test")`, but not for `("pnpm", "test")`. |
-| `npx vitest run`, `npx tsc --noEmit` | The first word is `npx`. |
-
-The hook rewrites `gradle test`, `pytest`, `vitest run`, and `tsc --noEmit`.
 
 ### Bug 8: new untracked files do not start `--if-changed`
 
@@ -258,51 +243,6 @@ In these steps:
 Some validation steps record a value with the `main` binary before the change.
 For these steps, do steps 1 and 2 on the `main` branch, and then steps 3 to 8.
 
-### Part 7: test commands (bug 7)
-
-1. Write rewrite tests for each command in the bug 7 table. Each command must
-   become `engraph run <command>`. Write `engraph run` tests that make sure
-   that each command uses the correct filter.
-2. In `filters::pick`, match `gradlew` and `./gradlew`.
-3. Add a function that removes a launcher before `filters::pick` selects the
-   filter: `uv run`, `python -m` and `python3 -m`, `npx`, and `pnpm exec`.
-   Use this function in the hook and in `engraph run`. The wrapped command
-   keeps the launcher. For example, `uv run pytest` becomes
-   `engraph run uv run pytest`, and `engraph run` uses the `pytest` filter.
-4. In `filters::pick`, match `pnpm test` and `yarn test` with the filter of
-   `npm test`.
-
-Validation of part 7:
-
-This table gives the command, the project, and the filter that `engraph run`
-must use:
-
-| Command | Project | Filter |
-|---|---|---|
-| `./gradlew test` | `jsonpath-java` | `gradle` |
-| `uv run pytest` | `click-python` | `pytest` |
-| `python -m pytest` | `click-python` | `pytest` |
-| `pnpm test` | `hono-typescript` | `npm_test` |
-| `npx tsc --noEmit` | `hono-typescript` | `tsc` |
-| `npx vitest run` | `hono-typescript` | `js_test` |
-
-1. Do the preparation for `jsonpath-java`, `click-python`, and
-   `hono-typescript`. Do the setup of each project (preparation step 7). For
-   `click-python`, also do `uv pip install pytest`.
-2. For each row of the table, go to the copy of the project. Do this command,
-   with the command of the row:
-   `echo "{\"tool_input\":{\"command\":\"<command>\"},\"cwd\":\"$PWD\"}" | engraph hook pre-bash`.
-   Result: the output has `"updatedInput":{"command":"engraph run <command>"}`.
-3. For each row, do `engraph run <command>`.
-4. After each `engraph run`, do this query:
-   `q "select filter_id from events order by seq desc limit 1"`.
-   Result: the filter of the row.
-5. For each row, compare the output of step 3 with the output of the command
-   without `engraph run`. Result: the output of step 3 is smaller, and it
-   keeps the summary line of the tests.
-6. Do steps 2 to 4 for `gradle test`, `pytest`, `vitest run`, and
-   `tsc --noEmit`. Result: the same results as before the change.
-
 ### Part 8: untracked files (bug 8)
 
 1. Write a test: index a repo, add a new untracked file in a subtree, and do
@@ -437,8 +377,6 @@ Validation of part 14:
 
 ## Tests
 
-- Each command in the bug 7 table is rewritten and uses the correct filter
-  (part 7).
 - A new untracked file starts `--if-changed` one time (part 8).
 - `fallback_display_name_textual` gives the last descriptor name of an id with
   a space in a descriptor (part 10, optional).
@@ -461,7 +399,7 @@ None.
 ## Effort
 
 Part 8 changes one or two functions and adds one or two tests.
-Part 7 is medium: it changes the hook and `engraph run`. Part 10 is optional
+Part 10 is optional
 and changes one function. Part 11 changes one function in `output.rs`.
 Parts 12, 13, and 14 each change one function and add one test, after the
 "Find out" steps.

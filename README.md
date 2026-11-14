@@ -22,9 +22,10 @@ Recognized commands:
 | cargo | `test`, `build`, `check`, `clippy`, `doc`, `bench`, `audit`, `tree` |
 | npm | `install` (+ `i`, `ci`), `test` (+ `t`) |
 | Python | `pytest`, `pip install`, `pip list`, `uv install`/`sync`/`add` |
+| Launchers | `uv run`, `python -m`, `python3 -m`, `npx`, `pnpm exec` — the launched command picks the filter (`uv run pytest` → pytest) |
 | Lint | `ruff`, `mypy`, `eslint`, `tsc` |
 | Go | `go test`, `go build`, `go vet`, `go mod tidy` |
-| JS/TS extras | `yarn install`/`add`, `pnpm install`/`add`/`i`, `jest`/`vitest`/`mocha` |
+| JS/TS extras | `yarn install`/`add`/`test`, `pnpm install`/`add`/`i`/`test`/`t`, `jest`/`vitest`/`mocha` |
 | Containers | `docker ps`/`images`, `docker logs`, `docker compose ps`/`logs`, `kubectl get`/`logs`/`describe` |
 | GitHub CLI | `gh pr`/`issue`/`repo` with `list` or `view` |
 | Build systems | `make`, `mvn`, `gradle` (and `./gradlew`) |
@@ -38,7 +39,7 @@ File-read filters strip line comments by extension (Python `#`; Rust / Go / JS /
 
 The cargo test wrapper recognizes both libtest (`test foo ... ok` / `---- foo stdout ----`) and cargo-nextest (`PASS [   0.005s] pkg test`) output formats.
 
-The pre-bash parser handles common command shapes that would otherwise misroute. Env prefixes like `FOO=bar cmd args` are peeled for classification and re-emitted ahead of `engraph run` so the assignment lands in the child's environment. Absolute paths (`/usr/bin/git`) normalize to the bare command name. Git's global options (`-C`, `-c`, `--git-dir=…`, `--work-tree=…`) are stripped before subcommand classification so `git -C /tmp status` routes to the `git status` filter. Heredocs (`cat <<'EOF' … EOF`), `sudo`, and `env <vars> cmd` pass through unmodified — rewriting them would corrupt the body or drop privileges.
+The pre-bash parser handles common command shapes that would otherwise misroute. Env prefixes like `FOO=bar cmd args` are peeled for classification and re-emitted ahead of `engraph run` so the assignment lands in the child's environment. Absolute paths (`/usr/bin/git`) normalize to the bare command name; a relative `./gradlew` classifies by its basename but stays verbatim in the wrapped command, which could not exec a bare `gradlew`. Git's global options (`-C`, `-c`, `--git-dir=…`, `--work-tree=…`) are stripped before subcommand classification so `git -C /tmp status` routes to the `git status` filter. Heredocs (`cat <<'EOF' … EOF`), `sudo`, and `env <vars> cmd` pass through unmodified — rewriting them would corrupt the body or drop privileges.
 
 ### Session memory
 
