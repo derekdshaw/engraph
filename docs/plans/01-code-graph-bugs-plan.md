@@ -6,7 +6,6 @@ of the plans.
 
 ## Result
 
-- The symbol pass shows all the lines of a failure.
 - When a configured command does not run because the count of targets is 0,
   the symbol pass says so.
 - The warning for a failed scip-go module shows the error, also when scip-go
@@ -28,7 +27,6 @@ at the end).
 | Bug | Effect |
 |---|---|
 | 10. The textual fallback name splits inside a generic type (**optional**) | An id that the SCIP grammar rejects can give a name such as ``E>`]unwrap`` |
-| 11. The symbol pass shows only the first line of a failure | `failed: scip-python exited with signal: 6 (SIGABRT)`, without the reason in the stderr tail |
 | 12. A configured command does not run for rule classes that engraph does not count | `skipped (no targets in this workspace)`, also when `ENGRAPH_BAZEL_SCIP_JAVA_CMD` is set |
 | 13. A failed scip-go module shows only its stderr, and only in the log | The warning is empty when scip-go writes the error to stdout |
 | 14. Local symbols of a document with no global symbol are not removed | The rows stay after the file changes or is deleted |
@@ -89,39 +87,6 @@ select count(*) from entities where name like '%#%' or name like '%]%' or name l
 
 If the count is more than `0`, this bug is not optional: find the ids that
 `parse_symbol` rejects, and record them in the pull request.
-
-### Bug 11: the symbol pass shows only the first line of a failure
-
-**Found on 2026-11-11**, on `ray-project/ray` with `--bazel-symbols`.
-scip-python stopped with a Node heap error. engraph showed:
-
-```
-symbol[python]: failed: scip-python exited with signal: 6 (SIGABRT) (0 SCIP bytes)
-```
-
-The status has the reason. `run_language` puts the last 20 lines of stderr in
-it (`crates/engraph-codegraph/src/bazel_symbols.rs:317-320`):
-
-```rust
-"{} exited with {}\nstderr (tail):\n{}",
-spec.binary,
-output.status,
-tail_lines(&stderr, 20)
-```
-
-The printer shows only the first line
-(`crates/engraph-cli/src/output.rs:65`):
-
-```rust
-let status = l.status.lines().next().unwrap_or("").trim();
-```
-
-Its doc comment says that this is by design: "Multi-line failure messages
-(which carry a stderr tail) are collapsed to their first line." But the first
-line gives only the exit code or signal. The line that tells the user what to
-do is in the tail:
-`FATAL ERROR: CALL_AND_RETRY_LAST Allocation failed - JavaScript heap out of memory`.
-`run_delegated` has the same shape (`bazel_symbols.rs:399`).
 
 ### Bug 12: a configured command does not run for rule classes that engraph does not count
 
@@ -286,28 +251,6 @@ Validation of part 10:
 1. In this repo, do `engraph index .`. Do the count query of "Reason to wait"
    of bug 10. Result: `0`. This part changes no name of a known id.
 
-### Part 11: the failure reason (bug 11)
-
-1. Write a test for `print_symbol_langs` with a status of three lines:
-   `scip-python exited with signal: 6 (SIGABRT)`, `stderr (tail):`, and
-   `FATAL ERROR: … heap out of memory`. The output must have the first line on
-   the `symbol[…]` line, and the lines of the tail after it, each with more
-   indentation. A status of one line must print as before.
-2. Change `print_symbol_langs`. Keep the first line on the `symbol[…]` line.
-   Print the other lines after it, indented, and remove empty lines. Update
-   the doc comment.
-3. If a tail of 20 lines is too long for the summary, decrease the count in
-   `tail_lines` to 10 in both places, and record the reason in the pull
-   request.
-
-Validation of part 11:
-
-1. Clone `https://github.com/ray-project/ray` (`--depth 1 --filter=blob:none`).
-   Use a new database. Do `engraph index --bazel-symbols .`. Result: the
-   `symbol[python]:` line is followed by indented lines that include
-   `JavaScript heap out of memory`. (If plan 06 phase D is complete, the pass
-   does not fail; use a repo that fails, or set `ENGRAPH_NODE_HEAP_MB=512`.)
-
 ### Part 12: the skip message of a command that does not run (bug 12)
 
 1. Find out if a real Bazel repo builds Java or Go with rule classes that are
@@ -388,8 +331,6 @@ Validation of part 15:
 
 - `fallback_display_name_textual` gives the last descriptor name of an id with
   a space in a descriptor (part 10, optional).
-- `print_symbol_langs` shows the lines of a failure after the `symbol[…]`
-  line (part 11).
 - A configured command with 0 targets gives a status that names the rule
   kinds and the variable (part 12).
 - A second load without a document removes the locals of that document, also
@@ -409,7 +350,7 @@ None.
 ## Effort
 
 Part 10 is optional
-and changes one function. Part 11 changes one function in `output.rs`.
+and changes one function.
 Parts 12, 13, and 14 each change one function and add one test, after the
 "Find out" steps. Part 15 changes two functions and adds two tests.
 
