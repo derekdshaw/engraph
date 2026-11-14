@@ -45,7 +45,7 @@
 //! any Bazel `--output_base` / cache behavior is owned by the configured command,
 //! not engraph. Go and TS read sources directly (no Bazel build subprocess).
 
-use crate::bazel::{FAILURE_TAIL_LINES, bazel_binary, failure_tail, output_base_for, tail_lines};
+use crate::bazel::{FAILURE_TAIL_LINES, bazel_binary, failure_tail, output_base_for};
 use crate::scip_loader::{self, LoadOptions};
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
@@ -608,7 +608,7 @@ fn run_go_modules(
             tracing::warn!(
                 module = %module_root.display(),
                 "scip-go failed (isolated): {}",
-                tail_lines(&String::from_utf8_lossy(&output.stderr), FAILURE_TAIL_LINES)
+                failure_tail(&output.stderr, &output.stdout, FAILURE_TAIL_LINES)
             );
             continue;
         }
