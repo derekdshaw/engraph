@@ -1706,7 +1706,14 @@ symbols whose id starts with one of its schemes, and locals whose
 `scheme` column (schema v13: the scheme of the local's document, that
 of its first global symbol or reference) is one of them. Thus a load
 removes the locals of a deleted file, and a `--lang` run or a prebuilt
-SCIP file of one language keeps the locals of the others.
+SCIP file of one language keeps the locals of the others. A document with
+no global symbol at all (a script with only local declarations and no
+reference to another file) has no scheme of its own; its locals take the
+load's scheme when the load has one, else — in a merged load, one indexer
+per language — the scheme of the other documents with the same file
+extension (`LoadSchemes`). Without that, their `scheme` stayed NULL, which
+`IN_SCOPE` never matches, and the locals outlived the file. None of the
+test projects has such a document.
 
 **ID strategy.** `entities.id` is the raw SCIP moniker
 (`rust-analyzer cargo engraph-core 0.1.0 schema/run_migrations().`).

@@ -8,7 +8,6 @@ of the plans.
 
 - A failed driver of a multi-manifest repo is in the summary, with its
   reason.
-- A load removes the local symbols of a document that has no global symbol.
 - The JavaScript test filters drop the pass lines of a colored vitest run.
 - **Optional:** the textual fallback name does not split inside an escaped
   descriptor.
@@ -25,7 +24,6 @@ at the end).
 | Bug | Effect |
 |---|---|
 | 10. The textual fallback name splits inside a generic type (**optional**) | An id that the SCIP grammar rejects can give a name such as ``E>`]unwrap`` |
-| 14. Local symbols of a document with no global symbol are not removed | The rows stay after the file changes or is deleted |
 | 15. The JavaScript test filters do not see through ANSI color codes | A vitest run of 157 KB passes through with `dropped 0 pass lines` |
 | 16. A failed driver of a multi-manifest repo is not in the summary | `indexed … driver=scip-typescript`, as if the repo had no Python; the reason only in a `WARN` line |
 
@@ -84,26 +82,6 @@ select count(*) from entities where name like '%#%' or name like '%]%' or name l
 
 If the count is more than `0`, this bug is not optional: find the ids that
 `parse_symbol` rejects, and record them in the pull request.
-
-### Bug 14: local symbols of a document with no global symbol are not removed
-
-**Found on 2026-11-09**, in the review of plan 01 part 4 (pull request #17).
-
-A local symbol has no scheme in its id. The loader gives it the scheme of its
-document, from the first global symbol of the document
-(`crates/engraph-codegraph/src/scip_loader.rs:614-620`). A document with no
-global symbol in its symbols and its occurrences has no scheme, so its locals
-get `scheme` NULL.
-
-A load removes a local only when its scheme is a scheme of the load
-(`scip_loader.rs:63`):
-
-```rust
-OR (id LIKE 'local %' AND scheme IN (SELECT s FROM current_scip_schemes)))
-```
-
-NULL is never `IN` a list. Thus a load never removes these locals, also not
-after the file is deleted. The 8 test projects had no such row (2026-11-09).
 
 ### Bug 15: the JavaScript test filters do not see through ANSI color codes
 
@@ -224,21 +202,6 @@ Validation of part 10:
 1. In this repo, do `engraph index .`. Do the count query of "Reason to wait"
    of bug 10. Result: `0`. This part changes no name of a known id.
 
-### Part 14: locals of a document with no global symbol (bug 14)
-
-1. Write a loader test: load an index with a document that has only local
-   symbols. Load the index again without that document. The locals of the
-   document must not be in `entities`.
-2. When a document has no global symbol, give its locals the scheme of the
-   load, if the load has only one scheme. If the load has more than one
-   scheme, record in the pull request how the correction selects one.
-
-Validation of part 14:
-
-1. No test project has such a document. Do `./et.sh smoke all` with the
-   binary of `main` and with the binary of the branch. Result: the count of
-   `local` entities of each project is the same.
-
 ### Part 15: color codes in the JavaScript test filters (bug 15)
 
 1. Write a test for `js_test` and a test for `npm::test`. The input has pass
@@ -286,8 +249,6 @@ Validation of part 16:
 
 - `fallback_display_name_textual` gives the last descriptor name of an id with
   a space in a descriptor (part 10, optional).
-- A second load without a document removes the locals of that document, also
-  when the document has no global symbol (part 14).
 - `js_test` and `npm_test` drop pass lines that start with an escape sequence
   (part 15).
 - A failed driver of a multi-manifest repo is named in the summary with its
@@ -304,10 +265,9 @@ None.
 
 ## Effort
 
-Part 10 is optional
-and changes one function.
-Part 14 changes one function and adds one test, after its "Find out" step.
-Part 16 adds a field to `IndexStats`, one printer, and an integration test. Part 15 changes two functions and adds two tests.
+Part 10 is optional and changes one function. Part 15 changes two functions
+and adds two tests. Part 16 adds a field to `IndexStats`, one printer, and an
+integration test.
 
 ## Plan management
 
