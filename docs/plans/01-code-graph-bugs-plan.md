@@ -13,6 +13,7 @@ of the plans.
 - The warning for a failed scip-go module shows the error, also when scip-go
   writes it to stdout.
 - A load removes the local symbols of a document that has no global symbol.
+- The JavaScript test filters drop the pass lines of a colored vitest run.
 - **Optional:** the textual fallback name does not split inside an escaped
   descriptor.
 
@@ -33,6 +34,7 @@ at the end).
 | 12. A configured command does not run for rule classes that engraph does not count | `skipped (no targets in this workspace)`, also when `ENGRAPH_BAZEL_SCIP_JAVA_CMD` is set |
 | 13. A failed scip-go module shows only its stderr, and only in the log | The warning is empty when scip-go writes the error to stdout |
 | 14. Local symbols of a document with no global symbol are not removed | The rows stay after the file changes or is deleted |
+| 15. The JavaScript test filters do not see through ANSI color codes | A vitest run of 157 KB passes through with `dropped 0 pass lines` |
 
 ### Bug 8: new untracked files do not start `--if-changed`
 
@@ -205,6 +207,33 @@ OR (id LIKE 'local %' AND scheme IN (SELECT s FROM current_scip_schemes)))
 NULL is never `IN` a list. Thus a load never removes these locals, also not
 after the file is deleted. The 8 test projects had no such row (2026-11-09).
 
+### Bug 15: the JavaScript test filters do not see through ANSI color codes
+
+**Found on 2026-11-13**, in the validation of part 7 on `hono-typescript`.
+
+`js_test` drops a pass line when the line starts with `✓`, `PASS `, or `ok `
+(`crates/engraph-compress/src/filters/js.rs:49-52`):
+
+```rust
+if t.starts_with('\u{2713}')
+    || t.starts_with('✓')
+    || t.starts_with("PASS ")
+    || t.starts_with("ok ")
+```
+
+`npm::test` has the same test (`crates/engraph-compress/src/filters/npm.rs:48`).
+vitest writes color codes also when its output goes to a pipe: `npx vitest
+run` wrote 1,508 lines with an escape sequence. A pass line starts with
+`ESC[32m✓`, not with `✓`. Thus the test fails for each pass line, and the
+filter keeps all of them. The wrapped output was 157,472 bytes, the raw
+output 157,425 bytes, and the last line was
+`[engraph: js_test dropped 0 pass lines, exit 1]`. `pnpm test` gave the same
+result with `npm_test` (157,542 bytes).
+
+`util::strip_ansi` removes escape sequences
+(`crates/engraph-compress/src/filters/util.rs:11`). The bazel and git filters
+use it before their line scan. The two JavaScript test filters do not.
+
 ## Steps
 
 Do each part on its own branch. The parts do not depend on each other. Each
@@ -375,6 +404,28 @@ Validation of part 14:
    binary of `main` and with the binary of the branch. Result: the count of
    `local` entities of each project is the same.
 
+### Part 15: color codes in the JavaScript test filters (bug 15)
+
+1. Write a test for `js_test` and a test for `npm::test`. The input has pass
+   lines that start with `\x1b[32m✓\x1b[39m` and one failure line. Each
+   filter must drop the pass lines, keep the failure line, and report the
+   count of dropped lines.
+2. Make sure that the results of the tests are incorrect before you change
+   the code.
+3. In `js_test` and `npm::test`, apply `strip_ansi` to the combined text
+   before the line scan.
+
+Validation of part 15:
+
+1. Do the preparation for `hono-typescript`, with `pnpm install` as the setup.
+2. Do `npx vitest run > raw.out 2>&1` and
+   `engraph run npx vitest run > wrapped.out 2>&1`. Result: `wrapped.out` is
+   smaller than `raw.out`, its last line shows a dropped count that is more
+   than 0, and it keeps the `Test Files` and `Tests` summary lines. Record
+   both sizes in the pull request. The sizes on 2026-11-13, before the
+   change, were 157,425 bytes raw and 157,472 bytes wrapped.
+3. Do the same with `pnpm test`. Result: the same, with the `npm_test` filter.
+
 ## Tests
 
 - A new untracked file starts `--if-changed` one time (part 8).
@@ -386,6 +437,8 @@ Validation of part 14:
   kinds and the variable (part 12).
 - A second load without a document removes the locals of that document, also
   when the document has no global symbol (part 14).
+- `js_test` and `npm_test` drop pass lines that start with an escape sequence
+  (part 15).
 
 ## Risks
 
@@ -402,7 +455,7 @@ Part 8 changes one or two functions and adds one or two tests.
 Part 10 is optional
 and changes one function. Part 11 changes one function in `output.rs`.
 Parts 12, 13, and 14 each change one function and add one test, after the
-"Find out" steps.
+"Find out" steps. Part 15 changes two functions and adds two tests.
 
 ## Plan management
 
