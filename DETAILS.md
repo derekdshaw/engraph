@@ -2010,6 +2010,13 @@ flag is still available to opt in on a single-repo run.
   stores them verbatim as `file_path`, so two modules' `main.go` would
   collide otherwise). Per-module failures are isolated; `--module-version`
   is pinned (like `SCIP_PYTHON_VERSION`) for cross-commit-stable IDs.
+  A failed module's `WARN` line carries `failure_tail` (stderr, or stdout
+  when stderr is empty). The `failed` count counts process failures — a
+  nonzero scip-go exit, e.g. a malformed `go.mod`. A Go source file that
+  does not parse is **not** a counted failure: scip-go exits 0 and writes a
+  thin index for the module (verified 2026-11-14 on `func (`), so a module
+  with broken source lowers the symbol count silently. That is scip-go's
+  behavior; engraph has no signal to count it.
   `IndexedModules { indexed, failed, targets }` surfaces the gazelle gap:
   go.mod-rooted modules « `go_library` targets. When
   `ENGRAPH_BAZEL_SCIP_GO_CMD` is set the Go pass delegates to it instead

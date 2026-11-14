@@ -6,8 +6,8 @@ of the plans.
 
 ## Result
 
-- The warning for a failed scip-go module shows the error, also when scip-go
-  writes it to stdout.
+- A failed driver of a multi-manifest repo is in the summary, with its
+  reason.
 - A load removes the local symbols of a document that has no global symbol.
 - The JavaScript test filters drop the pass lines of a colored vitest run.
 - **Optional:** the textual fallback name does not split inside an escaped
@@ -25,9 +25,9 @@ at the end).
 | Bug | Effect |
 |---|---|
 | 10. The textual fallback name splits inside a generic type (**optional**) | An id that the SCIP grammar rejects can give a name such as ``E>`]unwrap`` |
-| 13. A failed scip-go module shows only its stderr, and only in the log | The warning is empty when scip-go writes the error to stdout |
 | 14. Local symbols of a document with no global symbol are not removed | The rows stay after the file changes or is deleted |
 | 15. The JavaScript test filters do not see through ANSI color codes | A vitest run of 157 KB passes through with `dropped 0 pass lines` |
+| 16. A failed driver of a multi-manifest repo is not in the summary | `indexed … driver=scip-typescript`, as if the repo had no Python; the reason only in a `WARN` line |
 
 ### Bug 10: the textual fallback name splits inside a generic type (optional)
 
@@ -85,29 +85,6 @@ select count(*) from entities where name like '%#%' or name like '%]%' or name l
 If the count is more than `0`, this bug is not optional: find the ids that
 `parse_symbol` rejects, and record them in the pull request.
 
-### Bug 13: a failed scip-go module shows only its stderr, and only in the log
-
-`run_go_modules` continues when one module fails
-(`bazel_symbols.rs:587-594`):
-
-```rust
-if !output.status.success() {
-    failed += 1;
-    tracing::warn!(
-        module = %module_root.display(),
-        "scip-go failed (isolated): {}",
-        tail_lines(&String::from_utf8_lossy(&output.stderr), 20)
-    );
-    continue;
-}
-```
-
-The status shows only the count, for example
-`indexed 2 go.mod modules of 9 go targets, 1 failed`. The reason is in a
-`WARN` line, and that line has only stderr. Part 6 changed the other failure
-sites to `failure_tail` (stderr, or stdout when stderr is empty), but not this
-one.
-
 ### Bug 14: local symbols of a document with no global symbol are not removed
 
 **Found on 2026-11-09**, in the review of plan 01 part 4 (pull request #17).
@@ -154,6 +131,32 @@ result with `npm_test` (157,542 bytes).
 `util::strip_ansi` removes escape sequences
 (`crates/engraph-compress/src/filters/util.rs:11`). The bazel and git filters
 use it before their line scan. The two JavaScript test filters do not.
+
+### Bug 16: a failed driver of a multi-manifest repo is not in the summary
+
+**Found on 2026-11-14**, in the review of part 13.
+
+`index_repo` runs every driver whose manifest the repo root has. When one
+driver fails, the run continues with the other drivers, and the reason goes
+to a `WARN` line only (`crates/engraph-codegraph/src/index.rs:402-406`):
+
+```rust
+tracing::warn!(
+    driver = drv.name(),
+    error = %e,
+    "driver failed; continuing with remaining drivers for this repo",
+);
+```
+
+`IndexStats` has no field for a failed driver, and `driver_name` has only
+the drivers that succeeded: one name, or `multi` (`index.rs:429-433`). Thus,
+when scip-python fails and scip-typescript succeeds, the summary is
+`indexed … driver=scip-typescript` — the same as for a repo with no Python —
+and a detached SessionStart refresh drops a language from the graph with no
+sign in the summary. The Bazel symbol pass reports each language on its own
+`symbol[…]` line; the driver pass reports only the survivors. When all
+drivers fail, the error `all N driver(s) failed` has no reasons
+(`index.rs:409-414`).
 
 ## Steps
 
@@ -221,24 +224,6 @@ Validation of part 10:
 1. In this repo, do `engraph index .`. Do the count query of "Reason to wait"
    of bug 10. Result: `0`. This part changes no name of a known id.
 
-### Part 13: the scip-go module error (bug 13)
-
-1. Find out where scip-go writes the error for a module that does not compile:
-   stdout or stderr. Record the result in the pull request.
-2. A test needs a fake `scip-go` in `PATH`, and `PATH` is process-global. If
-   a test is not practical, record the reason in the pull request.
-3. In `run_go_modules`, use `failure_tail(&output.stderr, &output.stdout, 20)`
-   in the warning.
-
-Validation of part 13:
-
-1. Do the preparation for `go-tutorial-go-bazel`. In the copy, make a module
-   that does not compile: `bad/go.mod` with `module example.com/bad`, and
-   `bad/bad.go` with `package bad` and `func (`.
-2. Do `engraph index --bazel-symbols .`. Result: the `symbol[go]:` line ends
-   with `1 failed`, and a `WARN` line for the module `bad` shows the error of
-   scip-go after `stderr (tail):` or `stdout (tail):`.
-
 ### Part 14: locals of a document with no global symbol (bug 14)
 
 1. Write a loader test: load an index with a document that has only local
@@ -276,6 +261,27 @@ Validation of part 15:
    change, were 157,425 bytes raw and 157,472 bytes wrapped.
 3. Do the same with `pnpm test`. Result: the same, with the `npm_test` filter.
 
+### Part 16: the failed drivers of a multi-manifest repo (bug 16)
+
+1. Add the failed drivers to `IndexStats`: the driver name and the failure
+   message. The message already carries the `failure_tail` of the indexer.
+2. Print one `driver[<name>]: failed: …` line per failed driver under the
+   repo summary, the tail indented — the shape of `format_symbol_langs`
+   (part 11). `--workspace` and the single-repo path use the same printer.
+3. Put the per-driver reasons in the `all N driver(s) failed` error.
+4. Write an integration test: a repo with `pyproject.toml` and
+   `package.json` + `tsconfig.json`, and fake `scip-python` and
+   `scip-typescript` binaries first in the `PATH` of the spawned `engraph`
+   process. One writes a small SCIP index; the other exits 2 with text on
+   stderr. The summary must name the failed driver and show the text.
+
+Validation of part 16:
+
+1. The integration test covers the behavior. No test project has two
+   manifests with one broken toolchain; a manual check can copy
+   `hono-typescript`, add a `pyproject.toml`, and put a failing
+   `scip-python` shim first in `PATH`.
+
 ## Tests
 
 - `fallback_display_name_textual` gives the last descriptor name of an id with
@@ -284,6 +290,8 @@ Validation of part 15:
   when the document has no global symbol (part 14).
 - `js_test` and `npm_test` drop pass lines that start with an escape sequence
   (part 15).
+- A failed driver of a multi-manifest repo is named in the summary with its
+  reason (part 16).
 
 ## Risks
 
@@ -298,8 +306,8 @@ None.
 
 Part 10 is optional
 and changes one function.
-Parts 13 and 14 each change one function and add one test, after the
-"Find out" steps. Part 15 changes two functions and adds two tests.
+Part 14 changes one function and adds one test, after its "Find out" step.
+Part 16 adds a field to `IndexStats`, one printer, and an integration test. Part 15 changes two functions and adds two tests.
 
 ## Plan management
 
