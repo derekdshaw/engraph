@@ -313,10 +313,11 @@ code (`engraph-cli` `Cmd::Run` branch).
 
 `filters::pick(cmd, args)` (`engraph-compress::filters`) is a
 single big `match` returning `(FilterFn, &'static str)`. Before the
-match, `strip_launcher` peels a launcher prefix (`uv run`, `python -m`,
-`python3 -m`, `npx`, `pnpm exec`) so the launched command routes:
-`pick("uv", ["run", "pytest"])` selects the `pytest` filter. The unknown
-fallback is `(generic::filter, "generic")`.
+match, `command_basename` reduces a path-like `cmd` (`/usr/bin/git`,
+`./gradlew`) to its basename, and `strip_launcher` peels a launcher
+prefix (`uv run`, `python -m`, `python3 -m`, `npx`, `pnpm exec`) so the
+launched command routes: `pick("uv", ["run", "pytest"])` selects the
+`pytest` filter. The unknown fallback is `(generic::filter, "generic")`.
 
 Each `FilterFn` has signature
 `fn(&FilterCtx) -> FilterOutput` where `FilterCtx` carries the four
@@ -473,8 +474,8 @@ has_unquoted_shell_meta(command)? → rewrite_pipeline(command):
 otherwise (plain command):
     classify_for_wrap(command):
         strip_command_prefix(argv): sudo/env → None; peel `FOO=bar` (whitespace value → None)
-        normalize_argv0: /usr/bin/grep → grep (classification always; the
-            wrapped argv only for absolute paths — `./gradlew` stays verbatim)
+        normalize_argv0 (classification copy only): /usr/bin/grep → grep;
+            the wrapped argv keeps the path the user typed
         strip_git_global_opts(argv): drop -C/-c/--git-dir=/--work-tree= when argv[0] == "git"
         pick(argv[0], argv[1..]) == "generic"? → None
     None? → Passthrough
@@ -553,9 +554,11 @@ invoke, per command or per pipeline stage):
 - `normalize_argv0` maps absolute and `./`-prefixed argv[0]
   values through `Path::file_name` so `/usr/bin/grep` and
   `./gradlew` classify the same as the bare names. Does nothing to
-  non-path argv[0]. The wrapped argv applies it only to absolute
-  paths: PATH resolves `git` as well as `/usr/bin/git`, but a bare
-  `gradlew` is not on PATH, so `./gradlew` must stay verbatim.
+  non-path argv[0]. It runs on the classification copy only: the
+  wrapped argv keeps the path, so the binary the user named is the
+  one that runs (and a bare `gradlew` is not on PATH anyway).
+  `filters::pick` applies the same basename rule (`command_basename`),
+  so `engraph run /usr/bin/git log` selects `git_log`.
 - `strip_git_global_opts` walks argv when argv[0] == "git"
   and drops the global options `-C path`, `-c key=value`,
   `--git-dir=…`, `--work-tree=…`. Without this, `git -C /tmp status`

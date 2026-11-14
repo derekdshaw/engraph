@@ -283,16 +283,17 @@ fn env_command_prefix_is_passthrough() {
 }
 
 #[test]
-fn absolute_path_argv0_is_normalized() {
+fn absolute_path_argv0_is_kept_verbatim() {
     let (_t, db) = db_dir();
-    // `/usr/bin/git log` should classify the same as `git log`.
+    // `/usr/bin/git log` classifies the same as `git log`, and the wrap runs
+    // the binary the user named.
     let out = run_hook(&db, "/usr/bin/git log -n 5");
     let v = parse(&out).expect("expected rewrite JSON");
     let updated = v
         .pointer("/hookSpecificOutput/updatedInput/command")
         .and_then(|s| s.as_str())
         .unwrap();
-    assert_eq!(updated, "engraph run git log -n 5");
+    assert_eq!(updated, "engraph run /usr/bin/git log -n 5");
 }
 
 #[test]

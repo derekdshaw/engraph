@@ -39,7 +39,7 @@ File-read filters strip line comments by extension (Python `#`; Rust / Go / JS /
 
 The cargo test wrapper recognizes both libtest (`test foo ... ok` / `---- foo stdout ----`) and cargo-nextest (`PASS [   0.005s] pkg test`) output formats.
 
-The pre-bash parser handles common command shapes that would otherwise misroute. Env prefixes like `FOO=bar cmd args` are peeled for classification and re-emitted ahead of `engraph run` so the assignment lands in the child's environment. Absolute paths (`/usr/bin/git`) normalize to the bare command name; a relative `./gradlew` classifies by its basename but stays verbatim in the wrapped command, which could not exec a bare `gradlew`. Git's global options (`-C`, `-c`, `--git-dir=…`, `--work-tree=…`) are stripped before subcommand classification so `git -C /tmp status` routes to the `git status` filter. Heredocs (`cat <<'EOF' … EOF`), `sudo`, and `env <vars> cmd` pass through unmodified — rewriting them would corrupt the body or drop privileges.
+The pre-bash parser handles common command shapes that would otherwise misroute. Env prefixes like `FOO=bar cmd args` are peeled for classification and re-emitted ahead of `engraph run` so the assignment lands in the child's environment. A path-like command word (`/usr/bin/git`, `./gradlew`) classifies by its basename and stays verbatim in the wrapped command, so the binary the user named is the one that runs. Git's global options (`-C`, `-c`, `--git-dir=…`, `--work-tree=…`) are stripped before subcommand classification so `git -C /tmp status` routes to the `git status` filter. Heredocs (`cat <<'EOF' … EOF`), `sudo`, and `env <vars> cmd` pass through unmodified — rewriting them would corrupt the body or drop privileges.
 
 ### Session memory
 

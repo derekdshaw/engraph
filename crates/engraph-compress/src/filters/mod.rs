@@ -40,7 +40,7 @@ pub struct FilterOutput {
 pub type FilterFn = fn(&FilterCtx) -> FilterOutput;
 
 pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
-    let (cmd, args) = strip_launcher(cmd, args);
+    let (cmd, args) = strip_launcher(command_basename(cmd), args);
     // `git`'s subcommand can be preceded by global options (`-C <path>`,
     // `-c <k=v>`, `--git-dir[=...]`, `--work-tree[=...]`). Skip them so we
     // classify on the subcommand, not the global flag — otherwise
@@ -126,7 +126,7 @@ pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
         // Build systems
         ("make", _) => (make::make, "make"),
         ("mvn", _) => (jvm::mvn, "mvn"),
-        ("gradle" | "gradlew" | "./gradlew", _) => (jvm::gradle, "gradle"),
+        ("gradle" | "gradlew", _) => (jvm::gradle, "gradle"),
 
         // Search
         ("rg" | "grep", _) => (search::rg, "rg"),
@@ -143,6 +143,21 @@ pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
 
         _ => (generic::filter, "generic"),
     }
+}
+
+/// `/usr/bin/git` and `./gradlew` classify as `git` and `gradlew`. The hook
+/// keeps a path-like command word verbatim in the wrapped command (the user
+/// named that binary, and a bare `gradlew` is not on PATH), so `engraph run`
+/// sees the path and must route on its basename. A plain word is returned
+/// as is.
+fn command_basename(cmd: &str) -> &str {
+    if !(cmd.starts_with('/') || cmd.starts_with("./")) {
+        return cmd;
+    }
+    std::path::Path::new(cmd)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(cmd)
 }
 
 /// Peel a launcher prefix so the launched command selects the filter:
@@ -246,6 +261,15 @@ mod tests {
         assert_eq!(pick("pnpm", &argv(&["test"])).1, "npm_test");
         assert_eq!(pick("pnpm", &argv(&["t"])).1, "npm_test");
         assert_eq!(pick("yarn", &argv(&["test"])).1, "npm_test");
+    }
+
+    #[test]
+    fn path_like_command_word_classifies_by_basename() {
+        assert_eq!(pick("/usr/bin/git", &argv(&["log"])).1, "git_log");
+        assert_eq!(
+            pick("./node_modules/.bin/tsc", &argv(&["--noEmit"])).1,
+            "tsc"
+        );
     }
 
     #[test]

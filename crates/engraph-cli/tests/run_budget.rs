@@ -173,9 +173,20 @@ fn launcher_run_uses_launched_commands_filter() {
         std::env::var("PATH").unwrap_or_default()
     );
 
+    let last_filter = || -> String {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT filter_id FROM events WHERE kind = 'wrapped_cmd' ORDER BY seq DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+
     let out = Command::new(bin())
         .env_clear()
-        .env("PATH", path)
+        .env("PATH", &path)
         .env("ENGRAPH_DB_PATH", &db)
         .args(["run", "npx", "tsc", "--noEmit"])
         .output()
@@ -185,14 +196,17 @@ fn launcher_run_uses_launched_commands_filter() {
         Some(2),
         "child exit code must pass through"
     );
+    assert_eq!(last_filter(), "tsc");
 
-    let conn = rusqlite::Connection::open(&db).unwrap();
-    let filter_id: String = conn
-        .query_row(
-            "SELECT filter_id FROM events WHERE kind = 'wrapped_cmd' ORDER BY seq DESC LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(filter_id, "tsc");
+    // The hook keeps a path-like command word verbatim, so `engraph run` must
+    // classify `/abs/path/npx` the same as `npx`.
+    let out = Command::new(bin())
+        .env_clear()
+        .env("PATH", &path)
+        .env("ENGRAPH_DB_PATH", &db)
+        .args(["run", fake.to_str().unwrap(), "tsc", "--noEmit"])
+        .output()
+        .expect("spawn engraph run");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(last_filter(), "tsc");
 }

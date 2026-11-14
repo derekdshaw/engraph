@@ -64,13 +64,10 @@ fn classify_for_wrap(segment: &str) -> Option<(Vec<String>, Vec<String>, &'stati
     if argv.is_empty() {
         return None;
     }
-    // Normalize `/usr/bin/git` to `git` in the wrapped argv (PATH resolves
-    // either form), but keep a relative `./gradlew` verbatim — its basename is
-    // not on PATH, so the wrapped command could not exec it. Classification
-    // always sees the basename.
-    if argv[0].starts_with('/') {
-        normalize_argv0(&mut argv);
-    }
+    // The wrapped argv keeps a path-like argv[0] (`/usr/bin/git`, `./gradlew`)
+    // verbatim: the user named that binary, and a bare `gradlew` is not on
+    // PATH. Only the classification copy is normalized; `filters::pick` does
+    // the same for `engraph run`.
     let mut classify = argv.clone();
     normalize_argv0(&mut classify);
     strip_git_global_opts(&mut classify);
