@@ -319,6 +319,17 @@ prefix (`uv run`, `python -m`, `python3 -m`, `npx`, `pnpm exec`) so the
 launched command routes: `pick("uv", ["run", "pytest"])` selects the
 `pytest` filter. The unknown fallback is `(generic::filter, "generic")`.
 
+Before `pick`'s choice runs, `engraph run` strips ANSI escapes from stdout
+and stderr once (`util::strip_ansi`), so every filter sees plain text.
+Libraries color their output into a pipe: 1,508 of 1,670 lines of
+`hono-typescript`'s `vitest run` carried escapes (timestamped debug lines
+of its request interceptors), 27 KB of a 157 KB run. Most filters key on
+line prefixes (`✓`, `PASS`, `ok\t`, `warning:`), which a leading color code
+defeats, so the strip is central rather than per filter; the `bazel`, `git`
+and `search` filters also strip for themselves, which is now redundant but
+harmless. Input tokens still count the raw bytes: the escapes are what
+Claude would have received.
+
 Each `FilterFn` has signature
 `fn(&FilterCtx) -> FilterOutput` where `FilterCtx` carries the four
 fields the filter needs (`args`, `stdout`, `stderr`, `exit_code`).

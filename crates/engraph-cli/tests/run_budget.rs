@@ -210,3 +210,51 @@ fn launcher_run_uses_launched_commands_filter() {
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(last_filter(), "tsc");
 }
+
+#[cfg(unix)]
+#[test]
+fn wrapped_output_is_ansi_stripped_before_its_filter() {
+    use std::os::unix::fs::PermissionsExt;
+    // A runner that colors its output into a pipe puts an escape sequence
+    // before the check mark the js_test filter keys on. A fake `vitest`
+    // reproduces that; `engraph run` must strip the escapes before the
+    // filter sees the lines.
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("ansi.db");
+    let fake = dir.path().join("vitest");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         printf '\\033[32m✓\\033[39m src/a.test.ts (3 tests) 12ms\\n'\n\
+         printf '\\033[32m✓\\033[39m src/b.test.ts (2 tests) 8ms\\n'\n\
+         printf '\\033[31mFAIL\\033[39m src/c.test.ts > c > breaks\\n'\n\
+         printf ' Tests  1 failed | 5 passed (6)\\n'\n\
+         exit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .env_clear()
+        .env("PATH", path)
+        .env("ENGRAPH_DB_PATH", &db)
+        .args(["run", "vitest", "run"])
+        .output()
+        .expect("spawn engraph run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !text.contains('\x1b'),
+        "escapes reached the output:\n{text}"
+    );
+    assert!(
+        text.contains("dropped 2 pass lines"),
+        "pass lines were not recognized:\n{text}"
+    );
+    assert!(text.contains("FAIL src/c.test.ts"), "{text}");
+    assert!(text.contains("Tests  1 failed | 5 passed (6)"), "{text}");
+}

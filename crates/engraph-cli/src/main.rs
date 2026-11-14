@@ -102,10 +102,17 @@ async fn main() -> Result<()> {
             let output = run_wrapped_command(&command, &args)
                 .await
                 .map_err(|e| anyhow::anyhow!("exec {command} failed: {e}"))?;
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let raw_stdout = String::from_utf8_lossy(&output.stdout);
+            let raw_stderr = String::from_utf8_lossy(&output.stderr);
             let exit_code = output.status.code().unwrap_or(-1);
 
+            // Strip ANSI escapes once, for every filter: some tools color
+            // their output even into a pipe (vitest), and most filters key on
+            // line prefixes that a leading color code defeats. Input tokens
+            // count the raw bytes — the escapes are what Claude would have
+            // received.
+            let stdout = filters::util::strip_ansi(&raw_stdout);
+            let stderr = filters::util::strip_ansi(&raw_stderr);
             let (filter_fn, filter_id) = filters::pick(&command, &args);
             let result = filter_fn(&FilterCtx {
                 args: &args,
@@ -114,7 +121,8 @@ async fn main() -> Result<()> {
                 exit_code,
             });
 
-            let input_tokens = tokens::count(&stdout) as i64 + tokens::count(&stderr) as i64;
+            let input_tokens =
+                tokens::count(&raw_stdout) as i64 + tokens::count(&raw_stderr) as i64;
             let output_tokens = tokens::count(&result.text) as i64;
             let elapsed = start.elapsed().as_millis() as i64;
             let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
