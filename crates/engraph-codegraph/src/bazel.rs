@@ -26,6 +26,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use uuid::Uuid;
 
+/// How many lines of a failed command's output its error message keeps. 20 is
+/// enough to reach the actionable line past trailing noise: Node's heap-OOM
+/// abort prints `FATAL ERROR: … JavaScript heap out of memory` and then a
+/// native stack trace of ~12 lines, so a tail of 10 would show only frames
+/// (measured on scip-python over ray-project/ray, 2026-11-13).
+pub(crate) const FAILURE_TAIL_LINES: usize = 20;
+
 /// Probe: is this directory the root of a Bazel workspace? Checks the same
 /// markers `bazel query` itself uses to find a workspace.
 pub fn detect_bazel(repo: &Path) -> bool {
@@ -64,7 +71,7 @@ pub fn index_bazel_workspace(conn: &PooledConn, repo: &Path, project: &str) -> R
         anyhow::bail!(
             "bazel query exited with {}\n{}",
             out.status,
-            failure_tail(&out.stderr, &out.stdout, 20)
+            failure_tail(&out.stderr, &out.stdout, FAILURE_TAIL_LINES)
         );
     }
     let stdout = String::from_utf8_lossy(&out.stdout);

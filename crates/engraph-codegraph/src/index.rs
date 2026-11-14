@@ -599,7 +599,7 @@ fn run_driver_into(out_dir: &Path, repo: &Path, drv: &dyn driver::Driver) -> Res
             "{} exited with {}\n{}",
             drv.name(),
             output.status,
-            bazel::failure_tail(&output.stderr, &output.stdout, 25)
+            bazel::failure_tail(&output.stderr, &output.stdout, bazel::FAILURE_TAIL_LINES)
         );
     }
     if !output.stderr.is_empty() {

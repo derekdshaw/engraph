@@ -45,7 +45,7 @@
 //! any Bazel `--output_base` / cache behavior is owned by the configured command,
 //! not engraph. Go and TS read sources directly (no Bazel build subprocess).
 
-use crate::bazel::{bazel_binary, failure_tail, output_base_for, tail_lines};
+use crate::bazel::{FAILURE_TAIL_LINES, bazel_binary, failure_tail, output_base_for, tail_lines};
 use crate::scip_loader::{self, LoadOptions};
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
@@ -316,7 +316,7 @@ fn run_language(
                 "{} exited with {}\n{}",
                 spec.binary,
                 output.status,
-                failure_tail(&output.stderr, &output.stdout, 20)
+                failure_tail(&output.stderr, &output.stdout, FAILURE_TAIL_LINES)
             )),
         });
     }
@@ -397,7 +397,7 @@ fn run_delegated(
         return Ok(skip(LangStatus::Failed(format!(
             "{cmd_env} command exited with {}\n{}",
             output.status,
-            failure_tail(&output.stderr, &output.stdout, 25)
+            failure_tail(&output.stderr, &output.stdout, FAILURE_TAIL_LINES)
         ))));
     }
 
@@ -589,7 +589,7 @@ fn run_go_modules(
             tracing::warn!(
                 module = %module_root.display(),
                 "scip-go failed (isolated): {}",
-                tail_lines(&String::from_utf8_lossy(&output.stderr), 20)
+                tail_lines(&String::from_utf8_lossy(&output.stderr), FAILURE_TAIL_LINES)
             );
             continue;
         }
@@ -777,7 +777,7 @@ fn bazel_count_targets(bazel: &Path, repo: &Path, kinds: &[&str]) -> Result<usiz
             "bazel query for {} exited with {}\n{}",
             kinds.join(", "),
             out.status,
-            failure_tail(&out.stderr, &out.stdout, 20)
+            failure_tail(&out.stderr, &out.stdout, FAILURE_TAIL_LINES)
         );
     }
     Ok(count_label_kind_lines(&String::from_utf8_lossy(
