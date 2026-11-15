@@ -23,9 +23,9 @@ Small performance improvements are not items in this file. They are in
 
 ## 1. Code graph bugs
 
-A failed driver of a multi-manifest repo is in the summary. An event-stream result collapses identical repeated lines; a content result (a file read, a diff, a search) is never collapsed. The result of a wrapped command has none of the progress text a tool overwrote in place.
+A failed driver of a multi-manifest repo is in the summary.
 
-Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Parts 1 to 15 and part 17 are complete, and the plan does not have them. The numbers of the other parts do not change.
+Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Parts 1 to 15 and 17 to 19 are complete, and the plan does not have them. The numbers of the other parts do not change.
 
 ## 2. Deeper workspace discovery
 

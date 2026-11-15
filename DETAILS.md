@@ -312,7 +312,11 @@ code (`engraph-cli` `Cmd::Run` branch).
 ### 4.1 Dispatch
 
 `filters::pick(cmd, args)` (`engraph-compress::filters`) is a
-single big `match` returning `(FilterFn, &'static str)`. Before the
+single big `match` returning a `Filter { id, kind, run }` descriptor,
+where `kind: OutputKind` (`Event` or `Content`) is declared on every arm,
+beside the command it classifies — a new filter cannot be added without
+the decision, and the fallback is content, so an unknown command can
+never be collapsed. Before the
 match, `command_basename` reduces a path-like `cmd` (`/usr/bin/git`,
 `./gradlew`) to its basename, and `strip_launcher` peels a launcher
 prefix (`uv run`, `python -m`, `python3 -m`, `npx`, `pnpm exec`) so the
@@ -320,7 +324,19 @@ launched command routes: `pick("uv", ["run", "pytest"])` selects the
 `pytest` filter. The unknown fallback is `(generic::filter, "generic")`.
 
 Before `pick`'s choice runs, `engraph run` strips ANSI escapes from stdout
-and stderr once (`util::strip_ansi`), so every filter sees plain text.
+and stderr once (`util::strip_ansi`) — CSI (colors, cursor moves) and OSC
+(terminal hyperlinks, as on cargo's `Finished` line with color forced) —
+so every filter sees plain text.
+Inside the strip, `collapse_overwrites` first removes the text a terminal
+would have overwritten — a segment that a cursor movement (`ESC[…A`–`H`),
+a whole-line erase (`ESC[1K`, `ESC[2K`), or a `\r` with more text after it
+follows; a segment ended by `\n` is a line and stays (`ESC[K` erases to
+the right of real text). It runs while the sequences are still present —
+they are the evidence of the overwrite — and the regex then removes what
+remains. A rich console (`gradle --console=rich`) and forced-color
+progress bars thus leave no joined fragments. The `\r` rule that
+`drop_progress_lines` carried for the `compress()` path now lives here
+for both paths.
 Libraries color their output into a pipe: with `DEBUG=1` in the
 environment, 1,508 of 1,670 lines of `hono-typescript`'s `vitest run`
 carried escapes (the debug lines of its request interceptors, which
@@ -332,17 +348,21 @@ and `search` filters also strip for themselves, which is now redundant but
 harmless. Input tokens still count the raw bytes: the escapes are what
 Claude would have received.
 
-After the strip, `util::collapse_repeated_lines` collapses log lines that
-repeat with only their timestamp changed: a line that starts with a
-timestamp (`10:23:21:255`, `2026-11-14T10:23:21.255Z`, `[10:23:21]`, …) is
-keyed by the text after it; the first line of a key stays, the later ones
-go, and `[engraph: + N more lines like the one above]` follows the first.
-The repeats need not be consecutive — application code that logs in every
-test interleaves with the runner's output. Kept lines are unchanged and
-lines with no timestamp are never touched, so no filter's prefix test
-changes; the text is returned borrowed when nothing repeats. The case that
-found it: hono's tests, with `DEBUG=1` in the environment, wrote 1,508
-interceptor debug lines of three distinct texts.
+After the strip, and only when the picked filter's kind is `Event`,
+`util::collapse_repeated_lines` collapses repeated log lines: a line that
+starts with a timestamp (`10:23:21:255`, `2026-11-14T10:23:21.255Z`,
+`[10:23:21]`, …) is keyed by the text after it and collapses at 2
+occurrences; a line with no timestamp is keyed whole and collapses at 3
+(the threshold keeps a coincidental repeat of real output); a blank line
+never collapses. The first line of a key stays, the later ones go, and
+`[engraph: + N more lines like the one above]` follows the first; repeats
+need not be consecutive. Kept lines are unchanged, so no filter's prefix
+test changes; the text is returned borrowed when nothing collapses. For
+`Content` filters (file reads, diffs, searches, listings) the collapse
+never runs: every line is data — `engraph run cat app.log` returns the
+file. The cases that found it: hono's tests with `DEBUG=1` wrote 1,508
+interceptor debug lines, and a coverage failure repeated the same 7 stack
+frames 145 times.
 
 Each `FilterFn` has signature
 `fn(&FilterCtx) -> FilterOutput` where `FilterCtx` carries the four
