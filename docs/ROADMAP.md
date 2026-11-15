@@ -25,7 +25,7 @@ Small performance improvements are not items in this file. They are in
 
 A failed driver of a multi-manifest repo is in the summary. The JavaScript test filters collapse the repeated log lines of a test run. The result of a wrapped command has none of the progress text a tool overwrote in place.
 
-Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Parts 1 to 9 and 11 to 15 are complete, and the plan does not have them. The numbers of the other parts do not change. Part 10 (the textual fallback name) is optional.
+Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Parts 1 to 15 are complete, and the plan does not have them. The numbers of the other parts do not change.
 
 ## 2. Deeper workspace discovery
 

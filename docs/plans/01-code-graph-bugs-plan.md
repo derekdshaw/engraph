@@ -11,8 +11,6 @@ of the plans.
 - The JavaScript test filters collapse the repeated log lines of a test run.
 - The result of a wrapped command has none of the progress text a tool
   overwrote in place (`gradle --console=rich`, forced-color cargo and pip).
-- **Optional:** the textual fallback name does not split inside an escaped
-  descriptor.
 
 ## Condition at this time (2026-11-03)
 
@@ -25,66 +23,9 @@ at the end).
 
 | Bug | Effect |
 |---|---|
-| 10. The textual fallback name splits inside a generic type (**optional**) | An id that the SCIP grammar rejects can give a name such as ``E>`]unwrap`` |
 | 16. A failed driver of a multi-manifest repo is not in the summary | `indexed … driver=scip-typescript`, as if the repo had no Python; the reason only in a `WARN` line |
 | 17. The JavaScript test filters keep the repeated log lines of a test run | 1,508 timestamped `[…-interceptor] constructing the interceptor...` lines, 100 KB of a 130 KB result |
 | 18. Cursor-movement sequences leave progress fragments on one line | `gradle --console=rich`: `<-------------> 0% CONFIGURING [88ms]> root project<-------------> 6% EXECUTING …` survives, `dropped 0 progress lines` |
-
-### Bug 10: the textual fallback name splits inside a generic type (optional)
-
-**Found on 2026-11-11. This correction is optional.** Refer to "Reason to
-wait".
-
-`fallback_display_name_textual`
-(`crates/engraph-codegraph/src/scip_loader.rs:870`) finds the descriptors with
-`rsplit_once(' ')`:
-
-```rust
-moniker
-    .rsplit_once(' ')
-    .map(|(_, last)| {
-```
-
-This code uses the last space in the id. A SCIP id separates the scheme, the
-package manager, the package name, and the package version with spaces. Thus
-the last space is the correct position only when the descriptors contain no
-space. But rust-analyzer writes the generic parameters of a type in an escaped
-descriptor, with a comma and a space between them
-(``impl#[`Result<T, E>`]unwrap().``). The space in the descriptor is one
-character, because the grammar doubles a space only in the first four fields
-(`accept_space_escaped_identifier`, `scip/src/symbol.rs`). Thus the split
-occurs inside the type, and the name keeps the last part of the type:
-
-| Id | Name from this function |
-|---|---|
-| ``…core result/impl#[`Result<T, E>`]unwrap().`` | ``E>`]unwrap`` |
-| ``…core result/impl#[`Result<T, E>`][Try]branch().`` | ``E>`][Try]branch`` |
-| ``…alloc vec/impl#[`Vec<T, A>`]push().`` | ``A>`]push`` |
-
-The function also keeps `#` and `]`, as its doc comment says
-(`Config#full_path_base`, ``impl#[`Pool<M>`]get``).
-
-### Reason to wait
-
-This function operates only when `parse_symbol` gives an error, or when the
-last descriptor has an empty name (`scip_loader.rs:785` and
-`scip_loader.rs:793`). An index of this repo on 2026-11-11 had 514 rows with a
-descriptor character in the name. A test of `parse_symbol` with the 14 id
-shapes of those rows gave a result for each shape. Thus this function was not
-their cause: the cause was `ensure_placeholder_entity`, which wrote with
-`INSERT OR IGNORE` and thus never corrected the name of a row that exists. The
-correction of that statement removed all 514 names.
-
-No known id gets to this function. Do this correction only to decrease the
-risk if an indexer writes an id that the grammar rejects. First, make sure that
-the count of incorrect names is `0`:
-
-```sql
-select count(*) from entities where name like '%#%' or name like '%]%' or name like '%`%'
-```
-
-If the count is more than `0`, this bug is not optional: find the ids that
-`parse_symbol` rejects, and record them in the pull request.
 
 ### Bug 16: a failed driver of a multi-manifest repo is not in the summary
 
@@ -208,34 +149,6 @@ In these steps:
 Some validation steps record a value with the `main` binary before the change.
 For these steps, do steps 1 and 2 on the `main` branch, and then steps 3 to 8.
 
-### Part 10: the textual fallback name (bug 10, optional)
-
-Do this part only for the reason in "Reason to wait" of bug 10.
-
-1. Write a unit test for `fallback_display_name_textual` with these ids and
-   results. Give each id a scheme that the grammar rejects, to make the
-   function operate:
-   - ``x cargo core 1.0 result/impl#[`Result<T, E>`]unwrap().`` → `unwrap`
-   - ``x cargo alloc 1.0 vec/impl#[`Vec<T, A>`]push().`` → `push`
-   - `x cargo fd 0.1.0 config/Config#full_path_base().` → `full_path_base`
-     (this result does not change)
-2. Make sure that the results of the first two tests are incorrect before you
-   change the code.
-3. In `fallback_display_name_textual`, do not use `rsplit_once(' ')`. Find the
-   end of the version field: count four fields from the start of the id. Two
-   spaces together inside one of these four fields are one literal space
-   (`accept_space_escaped_identifier`). Use the text after the fourth field.
-4. Keep the rest of the function. It removes the trailing `().` punctuation and
-   the namespace path, and it keeps `#` and `!`, because it cannot find a
-   suffix without the grammar.
-5. Update the doc comment of the function. Give the reason for the count of
-   four fields.
-
-Validation of part 10:
-
-1. In this repo, do `engraph index .`. Do the count query of "Reason to wait"
-   of bug 10. Result: `0`. This part changes no name of a known id.
-
 ### Part 16: the failed drivers of a multi-manifest repo (bug 16)
 
 1. Add the failed drivers to `IndexStats`: the driver name and the failure
@@ -335,8 +248,6 @@ Validation of part 18:
 
 ## Tests
 
-- `fallback_display_name_textual` gives the last descriptor name of an id with
-  a space in a descriptor (part 10, optional).
 - A failed driver of a multi-manifest repo is named in the summary with its
   reason (part 16).
 - `js_test` and `npm_test` collapse lines equal except for a leading
@@ -359,7 +270,7 @@ None.
 
 ## Effort
 
-Part 10 is optional and changes one function. Part 16 adds a field to
+Part 16 adds a field to
 `IndexStats`, one printer, and an integration test. Part 17 changes two
 functions and adds two tests, after its "Find out" step. Part 18 adds
 one private function in `util.rs` behind `strip_ansi`, and its tests.
