@@ -68,13 +68,16 @@ module above it.
 
 ## Steps
 
-1. In `walk_recursive`, use the `ignore` crate to obey `.gitignore` and
-   `.ignore` files.
+1. In `walk_recursive` and in `discover_workspace_repos`, use the `ignore`
+   crate to obey `.gitignore` and `.ignore` files. The plain `--workspace`
+   mode obeys the same rules when it scans the direct children.
 2. Keep the list in `is_pruned_dir` together with the `.gitignore` rules.
-3. Add the `--max-depth` flag, with a default value of 16.
-4. Add the `--include <glob>` flag. Each glob is relative to the workspace root.
-5. Add the `--exclude <glob>` flag. Each glob is relative to the workspace root.
-   The flags of steps 3 to 5 require `--recursive`.
+3. Add the `--max-depth` flag, with a default value of 16. The flag requires
+   `--recursive`.
+4. Add the `--include <glob>` flag. Each glob is relative to the workspace
+   root. The flag operates with `--recursive` and with plain `--workspace`.
+5. Add the `--exclude <glob>` flag. Each glob is relative to the workspace
+   root. The flag operates with `--recursive` and with plain `--workspace`.
 6. In the `--dry-run` output, show each directory that the discovery found.
    `walk_recursive` must return a record for each directory that it examined,
    not only the recorded directories.
@@ -111,7 +114,10 @@ module above it.
 - The discovery does not include a directory that `.gitignore` names.
 - `--exclude` removes a directory from the result. `--include` limits the
   result to the directories that it names.
-- `--max-depth 2` does not include a project at depth 3.
+- `--max-depth 2` does not include a project at depth 3. `--max-depth`
+  without `--recursive` is an error.
+- With plain `--workspace`, the discovery does not include a child that
+  `.gitignore` names, and `--include` and `--exclude` filter the children.
 - The `--dry-run` output shows a cause for an included directory and for an
   excluded directory.
 - A nested git repo has its own project key. A git submodule has the path of
