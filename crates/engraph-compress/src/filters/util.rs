@@ -168,7 +168,15 @@ fn collapse_overwrites(s: &str) -> std::borrow::Cow<'_, str> {
                         }
                     }
                     // SGR and the rest: keep for the regex pass.
-                    Some(_) => line.push_str(&s[i..=j]),
+                    Some(b) if b.is_ascii() => line.push_str(&s[i..=j]),
+                    // A non-ASCII byte is no final byte, and `j` is not a
+                    // char boundary past it: keep `ESC[<params>` and let
+                    // the char be read as text.
+                    Some(_) => {
+                        line.push_str(&s[i..j]);
+                        i = j;
+                        continue;
+                    }
                     None => {}
                 }
                 i = j + 1;
@@ -453,6 +461,13 @@ mod tests {
         assert_eq!(strip_ansi("one\x1b[1Atwo\n"), "two\n");
         // \r\n is a line end, not an overwrite.
         assert_eq!(strip_ansi("keep\r\nnext\n"), "keep\nnext\n");
+    }
+
+    #[test]
+    fn strip_ansi_does_not_panic_on_a_non_ascii_byte_after_esc_bracket() {
+        // `j` lands on the first byte of `é`; slicing through it panicked.
+        assert_eq!(strip_ansi("ok \x1b[\u{e9} done\n"), "ok \x1b[\u{e9} done\n");
+        assert_eq!(strip_ansi("\x1b[12\u{2713}x\n"), "\x1b[12\u{2713}x\n");
     }
 
     #[test]
