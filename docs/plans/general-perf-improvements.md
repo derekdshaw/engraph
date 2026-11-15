@@ -168,3 +168,122 @@ number of prepared statements increases, use `set_prepared_statement_cache_capac
 ### Effort
 
 Less than one hour.
+
+---
+
+## 3. Detect the manifests of a directory from its listing
+
+### Result
+
+Workspace discovery finds the manifests of a directory from the directory
+listing that it already reads. It does not do one `stat` for each manifest
+name.
+
+### Condition at this time (2026-11-15)
+
+`walk_recursive` (`crates/engraph-codegraph/src/index.rs:773`) calls
+`detected_langs` for each directory that it examines:
+
+```rust
+let detected = detected_langs(dir);
+```
+
+`detected_langs` (`index.rs:687`) calls `bazel::detect_bazel` and the
+`detect` of each driver. Each probe is an `is_file` call, thus one `stat`
+(`crates/engraph-codegraph/src/bazel.rs:38`):
+
+```rust
+repo.join("WORKSPACE").is_file()
+    || repo.join("WORKSPACE.bazel").is_file()
+    || repo.join("MODULE.bazel").is_file()
+```
+
+A directory with no manifest gets 13 `stat` calls that fail: 3 for Bazel, 1
+for Cargo, 2 for Python, 1 for Go, 1 for TypeScript, and 5 for Java. Also,
+`driver::registry()` (`crates/engraph-codegraph/src/driver.rs:21`) allocates
+5 boxed drivers for each directory.
+
+Then `walk_recursive` reads the same directory with `std::fs::read_dir` to
+find its children. The listing has the names of the manifests, but the walk
+does not use them.
+
+Measurements (2026-11-15, WSL2, release build, `plan_workspace` with
+`recursive`, median of 5 warm runs):
+
+| Tree | Directories | Time |
+|---|---|---|
+| Generated git tree, no manifest in most directories | 56,000 | 5,630 ms |
+| `~/.cargo/registry/src` | 11,700 | 745 ms |
+
+This is approximately 90 µs for each directory. The ignore check of plan 02
+adds 8 to 15 percent to this time.
+
+### Steps
+
+1. Measure `plan_workspace` with `recursive` on a large tree: 5 runs, median.
+   Record the result in the pull request.
+2. In `walk_recursive`, read the directory one time. Find the manifests in
+   the file names of the listing, and the children in the directory names.
+3. Use the same manifest names as `detect_bazel` and each `Driver::detect`.
+   Keep one list of the names, so that detection and discovery do not differ.
+4. For an entry that is a symbolic link, use `Path::is_file`. `is_file`
+   follows the link, as the probes do at this time.
+5. Do the measurement of step 1 again. Record the two results in the pull
+   request.
+
+### Tests
+
+- The tests of `walk_recursive` and `plan_workspace` pass without a change.
+- A manifest that is a symbolic link to a file is found.
+
+### Risks
+
+A second list of manifest names can become different from the `detect`
+functions. Step 3 prevents this.
+
+### Effort
+
+Half a day.
+
+---
+
+## 4. Examine the subtrees of a workspace in parallel
+
+### Result
+
+`engraph index --recursive` examines the subtrees of a workspace on more than
+one thread.
+
+### Condition at this time (2026-11-15)
+
+`walk_recursive` examines one directory at a time. The subtrees are
+independent: each call gets the languages of its ancestors as a value
+(`claimed`) and adds roots to `out`. Only the ignore matcher is shared,
+because `IncrementalIgnore::matched` takes `&mut self` to fill its cache.
+
+Discovery is a small part of an index run: each indexer takes seconds to
+minutes. Thus this item is useful only for very large trees, after item 3.
+
+### Steps
+
+1. Do item 3 first, and measure again.
+2. Find out if the discovery time is still a problem on a real large
+   workspace. If it is not, remove this item.
+3. Give each thread its own `IncrementalIgnore`, or examine the top-level
+   children on a pool of threads, with one matcher for each child.
+4. Collect the roots through a channel, and sort them at the end, as
+   `discover_repos_recursive` does at this time.
+
+### Tests
+
+The discovery tests give the same sorted result.
+
+### Risks
+
+Discovery is blocking file-system work, not network work. Async tasks do not
+make it faster: an async file-system call operates on a blocking thread. Use
+threads.
+
+### Effort
+
+One day.
