@@ -263,6 +263,7 @@ async fn main() -> Result<()> {
             gc,
             no_gc,
             recursive,
+            max_depth,
             dry_run,
             if_changed,
             auto,
@@ -287,6 +288,11 @@ async fn main() -> Result<()> {
             let effective_gc = gc || !no_gc;
             // `--recursive` indexes a tree of projects rooted at --workspace, or
             // the positional repo if --workspace wasn't given.
+            let discovery = if recursive {
+                engraph_codegraph::Discovery::Recursive { max_depth }
+            } else {
+                engraph_codegraph::Discovery::Children
+            };
             let recursive_root: Option<PathBuf> = if recursive {
                 Some(workspace.clone().unwrap_or_else(|| repo.clone()))
             } else {
@@ -455,7 +461,7 @@ async fn main() -> Result<()> {
                     let plans = engraph_codegraph::plan_workspace(
                         root,
                         effective_bazel_symbols,
-                        recursive,
+                        discovery,
                     )?;
                     print_workspace_plan(root, &plans);
                 } else if let Some(m) = &scip_manifest {
@@ -487,7 +493,7 @@ async fn main() -> Result<()> {
                     &conn,
                     &root,
                     effective_bazel_symbols,
-                    recursive,
+                    discovery,
                     effective_gc,
                     &|p| divergence::index_scope(p),
                 )?;

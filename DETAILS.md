@@ -1916,7 +1916,7 @@ per-repo results plus a workspace summary. Each discovered root's
 `(project, subtree)` comes from the caller (`scope_for`; the CLI passes
 `index_scope`): separate git repos get their own key, and roots inside
 one git repo index into that repo's key as subtrees (§14). `--recursive`
-extends discovery below immediate children (to `RECURSIVE_MAX_DEPTH` = 16),
+extends discovery below immediate children (to `--max-depth`, default 16),
 pruning build/dep dirs (`node_modules`, `target`, …) and stopping at Bazel
 roots. Both modes skip a directory that `.gitignore` (inside a git repo
 only), `.ignore`, `.git/info/exclude`, or the global git excludes name, the

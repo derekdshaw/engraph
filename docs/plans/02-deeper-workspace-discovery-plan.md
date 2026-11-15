@@ -92,7 +92,10 @@ module above it.
    Complete with step 1: `walk_recursive` applies `is_pruned_dir` before it
    asks the matcher.
 3. Add the `--max-depth` flag, with a default value of 16. The flag requires
-   `--recursive`.
+   `--recursive`. Complete: the root is depth 0, and discovery examines
+   the directories to `--max-depth`. `plan_workspace` and `index_workspace`
+   get a `Discovery` value (`Children`, or `Recursive { max_depth }`) in
+   place of the `recursive` flag.
 4. Add the `--include <glob>` flag. Each glob is relative to the workspace
    root. The flag operates with `--recursive` and with plain `--workspace`.
 5. Add the `--exclude <glob>` flag. Each glob is relative to the workspace

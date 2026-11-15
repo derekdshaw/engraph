@@ -733,13 +733,25 @@ fn is_pruned_dir(name: &str) -> bool {
         )
 }
 
-const RECURSIVE_MAX_DEPTH: usize = 16;
+/// Default for `index --recursive --max-depth`.
+pub const RECURSIVE_MAX_DEPTH: usize = 16;
+
+/// How a workspace run finds its projects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Discovery {
+    /// The root if it is a project, else its direct children
+    /// (`--workspace`).
+    Children,
+    /// Every project down to `max_depth` directories below the root; the root
+    /// is depth 0 (`--recursive`).
+    Recursive { max_depth: usize },
+}
 
 /// Recursive project discovery for `index --recursive`. Walks `root`, recording
 /// each project root found at any depth (sorted, deduped). See `walk_recursive`
 /// for the per-directory rules (prune build dirs, stop at Bazel, suppress
 /// same-language descendants so a workspace's members aren't each indexed).
-fn discover_repos_recursive(root: &Path) -> Result<Vec<PathBuf>> {
+fn discover_repos_recursive(root: &Path, max_depth: usize) -> Result<Vec<PathBuf>> {
     if !root.is_dir() {
         anyhow::bail!("workspace root is not a directory: {}", root.display());
     }
@@ -748,6 +760,7 @@ fn discover_repos_recursive(root: &Path) -> Result<Vec<PathBuf>> {
         root,
         Path::new(""),
         0,
+        max_depth,
         &HashSet::new(),
         &mut discovery_ignores(root),
         &mut out,
@@ -763,11 +776,12 @@ fn walk_recursive(
     dir: &Path,
     rel: &Path,
     depth: usize,
+    max_depth: usize,
     claimed: &HashSet<&'static str>,
     ig: &mut IncrementalIgnore,
     out: &mut Vec<PathBuf>,
 ) {
-    if depth > RECURSIVE_MAX_DEPTH {
+    if depth > max_depth {
         return;
     }
     let detected = detected_langs(dir);
@@ -810,7 +824,15 @@ fn walk_recursive(
         let child = dir.join(&name);
         let child_rel = rel.join(&name);
         if !ig.matched(&child_rel, true).is_ignore() {
-            walk_recursive(&child, &child_rel, depth + 1, &child_claimed, ig, out);
+            walk_recursive(
+                &child,
+                &child_rel,
+                depth + 1,
+                max_depth,
+                &child_claimed,
+                ig,
+                out,
+            );
         } else if child.join(".git").exists() {
             // An ignored dir that is its own git repo: its parent's rules
             // don't govern it, so walk it under its own.
@@ -819,6 +841,7 @@ fn walk_recursive(
                 &child,
                 Path::new(""),
                 depth + 1,
+                max_depth,
                 &child_claimed,
                 &mut child_ig,
                 out,
@@ -837,24 +860,24 @@ pub fn index_workspace(
     conn: &PooledConn,
     workspace_root: &Path,
     bazel_symbols: bool,
-    recursive: bool,
+    discovery: Discovery,
     gc: bool,
     scope_for: &dyn Fn(&Path) -> (String, String),
 ) -> Result<WorkspaceStats> {
-    let repos = if recursive {
-        discover_repos_recursive(workspace_root)?
-    } else {
-        discover_workspace_repos(workspace_root)?
+    let repos = match discovery {
+        Discovery::Children => discover_workspace_repos(workspace_root)?,
+        Discovery::Recursive { max_depth } => discover_repos_recursive(workspace_root, max_depth)?,
     };
     if repos.is_empty() {
-        anyhow::bail!(
-            "no indexable repos found under {} (expected a build manifest at the root{})",
-            workspace_root.display(),
-            if recursive {
-                " or any descendant"
-            } else {
-                " or an immediate child"
+        let below = match discovery {
+            Discovery::Children => " or an immediate child".to_string(),
+            Discovery::Recursive { max_depth } => {
+                format!(" or any descendant to depth {max_depth}")
             }
+        };
+        anyhow::bail!(
+            "no indexable repos found under {} (expected a build manifest at the root{below})",
+            workspace_root.display(),
         );
     }
     let mut stats = WorkspaceStats::default();
@@ -958,12 +981,11 @@ pub fn plan_repo(
 pub fn plan_workspace(
     workspace_root: &Path,
     bazel_symbols: bool,
-    recursive: bool,
+    discovery: Discovery,
 ) -> Result<Vec<(PathBuf, IndexPlan)>> {
-    let repos = if recursive {
-        discover_repos_recursive(workspace_root)?
-    } else {
-        discover_workspace_repos(workspace_root)?
+    let repos = match discovery {
+        Discovery::Children => discover_workspace_repos(workspace_root)?,
+        Discovery::Recursive { max_depth } => discover_repos_recursive(workspace_root, max_depth)?,
     };
     Ok(repos
         .into_iter()
@@ -1081,7 +1103,7 @@ mod tests {
         let child = root.path().join("crate-a");
         std::fs::create_dir(&child).unwrap();
         touch(&child, "Cargo.toml");
-        let plans = plan_workspace(root.path(), false, false).unwrap();
+        let plans = plan_workspace(root.path(), false, Discovery::Children).unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].0, child);
         assert!(matches!(plans[0].1, IndexPlan::AutoDrivers(_)));
@@ -1091,7 +1113,7 @@ mod tests {
     fn plan_workspace_bazel_root_collapses_to_root() {
         let root = tempfile::tempdir().unwrap();
         touch(root.path(), "MODULE.bazel");
-        let plans = plan_workspace(root.path(), true, false).unwrap();
+        let plans = plan_workspace(root.path(), true, Discovery::Children).unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].0, root.path());
         assert!(matches!(plans[0].1, IndexPlan::Bazel { .. }));
@@ -1190,11 +1212,17 @@ mod tests {
     }
 
     fn recursive_roots(root: &Path) -> Vec<PathBuf> {
-        plan_workspace(root, false, true)
-            .unwrap()
-            .into_iter()
-            .map(|(p, _)| p)
-            .collect()
+        plan_workspace(
+            root,
+            false,
+            Discovery::Recursive {
+                max_depth: RECURSIVE_MAX_DEPTH,
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect()
     }
 
     #[test]
@@ -1204,7 +1232,7 @@ mod tests {
         let go = dir_with(root.path(), "go", "go.mod");
 
         // Non-recursive: the root is itself a manifest root → just [root].
-        let nonrec = plan_workspace(root.path(), false, false).unwrap();
+        let nonrec = plan_workspace(root.path(), false, Discovery::Children).unwrap();
         assert_eq!(nonrec.len(), 1);
         assert_eq!(nonrec[0].0, r);
 

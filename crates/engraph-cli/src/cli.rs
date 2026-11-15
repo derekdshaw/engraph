@@ -167,6 +167,10 @@ pub(crate) enum Cmd {
         /// indexing rooted at --workspace (or the positional repo).
         #[arg(long, conflicts_with_all = ["scip", "scip_manifest", "lang"])]
         recursive: bool,
+        /// With --recursive: the deepest directory level below the workspace
+        /// root that discovery examines (the root is level 0).
+        #[arg(long, requires = "recursive", default_value_t = engraph_codegraph::RECURSIVE_MAX_DEPTH)]
+        max_depth: usize,
         /// Preview what would be indexed (chosen path, drivers, symbol-level
         /// languages, discovered repos) without spawning any indexer, running
         /// Bazel, or writing the codegraph. Composes with all other flags.
