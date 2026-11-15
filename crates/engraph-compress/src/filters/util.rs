@@ -1,8 +1,74 @@
 //! Shared helpers used by multiple filter modules.
 
 use regex::Regex;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::sync::OnceLock;
+
+/// A leading timestamp: an optional ISO date, `H:MM:SS` with an optional
+/// fraction (`.`, `:` or `,` separated) and zone, optionally in brackets or
+/// parentheses, and the space after it.
+fn timestamp_prefix_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^\s*[\[(]?(?:\d{4}-\d{2}-\d{2}[T ])?\d{1,2}:\d{2}:\d{2}(?:[.:,]\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})?[\])]?\s*",
+        )
+        .unwrap()
+    })
+}
+
+/// The text of a log line after its leading timestamp; `None` when the line
+/// has no timestamp, or nothing after it.
+fn log_key<'a>(re: &Regex, line: &'a str) -> Option<&'a str> {
+    let m = re.find(line)?;
+    let rest = line[m.end()..].trim_end();
+    (!rest.is_empty()).then_some(rest)
+}
+
+/// Collapse log lines that repeat with only their timestamp changed —
+/// application code logging in every test writes the same line again and
+/// again. The first line of each text stays, the later ones go, and
+/// `[engraph: + N more lines like the one above]` follows the first; the
+/// repeats need not be consecutive. Kept lines are unchanged, so a filter's
+/// prefix test sees them as before. Lines with no leading timestamp are
+/// never collapsed. Returns `Cow::Borrowed(text)` when nothing repeats.
+pub fn collapse_repeated_lines(text: &str) -> std::borrow::Cow<'_, str> {
+    let re = timestamp_prefix_re();
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for line in text.lines() {
+        if let Some(k) = log_key(re, line) {
+            *counts.entry(k).or_insert(0) += 1;
+        }
+    }
+    if !counts.values().any(|&n| n > 1) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut seen: HashSet<&str> = HashSet::new();
+    for line in text.lines() {
+        match log_key(re, line) {
+            Some(k) if counts[k] > 1 => {
+                if seen.insert(k) {
+                    out.push_str(line);
+                    out.push('\n');
+                    out.push_str(&format!(
+                        "[engraph: + {} more lines like the one above]\n",
+                        counts[k] - 1
+                    ));
+                }
+            }
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    if !text.ends_with('\n') {
+        out.pop();
+    }
+    std::borrow::Cow::Owned(out)
+}
 
 /// Strip ANSI CSI escape sequences (SGR colors, cursor moves, DEC private modes
 /// like `\x1b[?25l`). Matches `ESC[<digits/semicolons/?><letter>`. Returns
@@ -142,6 +208,57 @@ mod tests {
         assert!(out.contains("line 7"));
         assert!(!out.contains("line 5"));
         assert!(out.contains("hid 7 earlier lines"));
+    }
+
+    #[test]
+    fn repeated_timestamped_lines_collapse_to_the_first_and_a_count() {
+        let text = "10:23:21:255 [xhr-interceptor] constructing the interceptor...\n\
+                    10:23:21:278 [xhr-interceptor] constructing the interceptor...\n\
+                    10:23:22:001 [xhr-interceptor] constructing the interceptor...\n\
+                    10:23:22:002 [xhr-interceptor] request intercepted\n";
+        assert_eq!(
+            collapse_repeated_lines(text),
+            "10:23:21:255 [xhr-interceptor] constructing the interceptor...\n\
+             [engraph: + 2 more lines like the one above]\n\
+             10:23:22:002 [xhr-interceptor] request intercepted\n"
+        );
+    }
+
+    #[test]
+    fn repeated_lines_are_counted_across_the_whole_text() {
+        // The repeats need not be consecutive: a log line per test file
+        // interleaves with the other output.
+        let text = "10:00:00 a\nother\n10:00:01 a\n10:00:02 b\n10:00:03 a\n";
+        assert_eq!(
+            collapse_repeated_lines(text),
+            "10:00:00 a\n[engraph: + 2 more lines like the one above]\nother\n10:00:02 b\n"
+        );
+    }
+
+    #[test]
+    fn common_timestamp_shapes_count() {
+        for (a, b) in [
+            ("10:23:21:255 x", "10:23:21:256 x"),
+            ("10:23:21.255 x", "10:23:21.256 x"),
+            ("2026-11-14 10:23:21 x", "2026-11-14 10:23:22 x"),
+            ("2026-11-14T10:23:21.255Z x", "2026-11-14T10:23:21.300Z x"),
+            ("[10:23:21] x", "[10:23:22] x"),
+        ] {
+            let text = format!("{a}\n{b}\n");
+            assert_eq!(
+                collapse_repeated_lines(&text),
+                format!("{a}\n[engraph: + 1 more lines like the one above]\n"),
+                "{a}"
+            );
+        }
+    }
+
+    #[test]
+    fn lines_without_a_timestamp_or_with_different_text_are_unchanged() {
+        let text = "same\nsame\n10:00:00 a\n10:00:01 b\n";
+        let out = collapse_repeated_lines(text);
+        assert_eq!(out, text);
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
     }
 
     #[test]

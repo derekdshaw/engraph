@@ -33,7 +33,7 @@ Recognized commands:
 | Listings | `tree`, `fd`, `ls` |
 | File reads | `cat`, `bat`, `less` (whole-file: head + elided middle + tail window when large); `head`, `tail` (user-windowed: dedup + comment-strip only) |
 
-Every wrapped command's output is stripped of ANSI escapes before its filter sees it — some tools color their output even into a pipe (vitest), and most filters key on line prefixes. Unrecognized commands route through a generic fallback that collapses runs of identical lines and applies extractive ranking. Adding a new filter is a single function in `crates/engraph-compress/src/filters/` plus an arm in `filters::pick`.
+Every wrapped command's output is stripped of ANSI escapes before its filter sees it — some tools color their output even into a pipe (vitest), and most filters key on line prefixes. Log lines that repeat with only their timestamp changed (application code logging in every test) are collapsed to the first line plus `[engraph: + N more lines like the one above]`, before any filter. Unrecognized commands route through a generic fallback that collapses runs of identical lines and applies extractive ranking. Adding a new filter is a single function in `crates/engraph-compress/src/filters/` plus an arm in `filters::pick`.
 
 File-read filters strip line comments by extension (Python `#`; Rust / Go / JS / TS / JSX / TSX `//`) and collapse runs of blank lines. Whole-file reads over ~500 lines get a head + elided-middle + tail window. If language stripping accidentally empties a non-empty input, the raw text is returned with a marker so Claude never sees a blank file by mistake.
 

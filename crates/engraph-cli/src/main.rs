@@ -113,6 +113,11 @@ async fn main() -> Result<()> {
             // received.
             let stdout = filters::util::strip_ansi(&raw_stdout);
             let stderr = filters::util::strip_ansi(&raw_stderr);
+            // Then collapse log lines that repeat with only their timestamp
+            // changed (application code logging in every test): the first
+            // stays, the rest become a count. No filter sees the repeats.
+            let stdout = filters::util::collapse_repeated_lines(&stdout);
+            let stderr = filters::util::collapse_repeated_lines(&stderr);
             let (filter_fn, filter_id) = filters::pick(&command, &args);
             let result = filter_fn(&FilterCtx {
                 args: &args,

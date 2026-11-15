@@ -258,3 +258,48 @@ fn wrapped_output_is_ansi_stripped_before_its_filter() {
     assert!(text.contains("FAIL src/c.test.ts"), "{text}");
     assert!(text.contains("Tests  1 failed | 5 passed (6)"), "{text}");
 }
+
+#[cfg(unix)]
+#[test]
+fn repeated_timestamped_log_lines_are_collapsed_before_the_filter() {
+    use std::os::unix::fs::PermissionsExt;
+    // Application code that logs in each test writes the same line with a
+    // new timestamp; `engraph run` keeps the first and counts the rest.
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("repeat.db");
+    let fake = dir.path().join("vitest");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         echo '10:23:21:255 [xhr-interceptor] constructing the interceptor...'\n\
+         echo '10:23:21:278 [xhr-interceptor] constructing the interceptor...'\n\
+         echo '10:23:22:001 [xhr-interceptor] constructing the interceptor...'\n\
+         echo ' Tests  5 passed (5)'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .env_clear()
+        .env("PATH", path)
+        .env("ENGRAPH_DB_PATH", &db)
+        .args(["run", "vitest", "run"])
+        .output()
+        .expect("spawn engraph run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        text.matches("constructing the interceptor").count(),
+        1,
+        "{text}"
+    );
+    assert!(
+        text.contains("[engraph: + 2 more lines like the one above]"),
+        "{text}"
+    );
+    assert!(text.contains("Tests  5 passed (5)"), "{text}");
+}

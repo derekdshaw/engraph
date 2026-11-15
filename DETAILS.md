@@ -321,14 +321,28 @@ launched command routes: `pick("uv", ["run", "pytest"])` selects the
 
 Before `pick`'s choice runs, `engraph run` strips ANSI escapes from stdout
 and stderr once (`util::strip_ansi`), so every filter sees plain text.
-Libraries color their output into a pipe: 1,508 of 1,670 lines of
-`hono-typescript`'s `vitest run` carried escapes (timestamped debug lines
-of its request interceptors), 27 KB of a 157 KB run. Most filters key on
+Libraries color their output into a pipe: with `DEBUG=1` in the
+environment, 1,508 of 1,670 lines of `hono-typescript`'s `vitest run`
+carried escapes (the debug lines of its request interceptors, which
+`@open-draft/logger` writes only when `DEBUG` is set), 27 KB of a 157 KB
+run. Most filters key on
 line prefixes (`✓`, `PASS`, `ok\t`, `warning:`), which a leading color code
 defeats, so the strip is central rather than per filter; the `bazel`, `git`
 and `search` filters also strip for themselves, which is now redundant but
 harmless. Input tokens still count the raw bytes: the escapes are what
 Claude would have received.
+
+After the strip, `util::collapse_repeated_lines` collapses log lines that
+repeat with only their timestamp changed: a line that starts with a
+timestamp (`10:23:21:255`, `2026-11-14T10:23:21.255Z`, `[10:23:21]`, …) is
+keyed by the text after it; the first line of a key stays, the later ones
+go, and `[engraph: + N more lines like the one above]` follows the first.
+The repeats need not be consecutive — application code that logs in every
+test interleaves with the runner's output. Kept lines are unchanged and
+lines with no timestamp are never touched, so no filter's prefix test
+changes; the text is returned borrowed when nothing repeats. The case that
+found it: hono's tests, with `DEBUG=1` in the environment, wrote 1,508
+interceptor debug lines of three distinct texts.
 
 Each `FilterFn` has signature
 `fn(&FilterCtx) -> FilterOutput` where `FilterCtx` carries the four
