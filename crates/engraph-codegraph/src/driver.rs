@@ -11,6 +11,10 @@ use std::process::Command;
 pub trait Driver: Send + Sync {
     fn name(&self) -> &'static str;
     fn detect(&self, repo: &Path) -> bool;
+    /// Every file extension the indexer can read, in any configuration (a
+    /// superset: scip-typescript reads `.js` only with `allowJs`). An
+    /// untracked file with one of them starts an `--if-changed` refresh.
+    fn extensions(&self) -> &'static [&'static str];
     fn command(&self, repo: &Path, out: &Path) -> Command;
 }
 
@@ -35,6 +39,9 @@ impl Driver for RustAnalyzer {
     }
     fn detect(&self, repo: &Path) -> bool {
         repo.join("Cargo.toml").is_file()
+    }
+    fn extensions(&self) -> &'static [&'static str] {
+        &["rs"]
     }
     fn command(&self, repo: &Path, out: &Path) -> Command {
         // rust-analyzer's `scip` defaults `--output` to `index.scip` in the
@@ -63,6 +70,9 @@ impl Driver for ScipPython {
     }
     fn detect(&self, repo: &Path) -> bool {
         repo.join("pyproject.toml").is_file() || repo.join("setup.py").is_file()
+    }
+    fn extensions(&self) -> &'static [&'static str] {
+        &["py", "pyi"]
     }
     fn command(&self, repo: &Path, out: &Path) -> Command {
         let project_name = repo
@@ -114,6 +124,9 @@ impl Driver for ScipGo {
     fn detect(&self, repo: &Path) -> bool {
         repo.join("go.mod").is_file()
     }
+    fn extensions(&self) -> &'static [&'static str] {
+        &["go"]
+    }
     fn command(&self, repo: &Path, out: &Path) -> Command {
         // scip-go defaults --output to `index.scip` in the cwd; pin it to `out`
         // so nothing lands in the repo. Still chdir into the repo for module
@@ -135,6 +148,9 @@ impl Driver for ScipTypescript {
     }
     fn detect(&self, repo: &Path) -> bool {
         repo.join("package.json").is_file() && repo.join("tsconfig.json").is_file()
+    }
+    fn extensions(&self) -> &'static [&'static str] {
+        &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]
     }
     fn command(&self, repo: &Path, out: &Path) -> Command {
         // scip-typescript defaults --output to `index.scip` in the cwd; pin it
@@ -160,6 +176,9 @@ impl Driver for ScipJava {
             || repo.join("build.gradle.kts").is_file()
             || repo.join("build.sbt").is_file()
             || repo.join("build.sc").is_file() // mill
+    }
+    fn extensions(&self) -> &'static [&'static str] {
+        &["java", "scala", "kt"]
     }
     fn command(&self, repo: &Path, out: &Path) -> Command {
         // scip-java auto-detects Maven vs Gradle; let it. We just chdir into

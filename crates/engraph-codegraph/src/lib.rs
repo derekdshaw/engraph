@@ -19,7 +19,7 @@ pub use index::{
     IndexMode, IndexPlan, IndexScope, IndexSource, IndexStats, SymbolLangSummary,
     WorkspaceRepoResult, WorkspaceStats, discover_workspace_repos, index_modes, index_repo,
     index_repo_in, index_scip_manifest, index_workspace, indexed_at_by_subtree, indexed_commits,
-    plan_repo, plan_workspace, record_indexed_commit,
+    plan_repo, plan_workspace, record_indexed_commit, source_extensions,
 };
 pub use lock::{
     Acquire, IndexLock, acquire as acquire_index_lock, acquire_wait as acquire_index_lock_wait,

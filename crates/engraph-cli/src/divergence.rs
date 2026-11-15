@@ -223,14 +223,20 @@ pub(crate) fn changed_subtrees(conn: &db::PooledConn, project: &str, cwd: &Path)
         return Vec::new();
     };
     let indexed_at = engraph_codegraph::indexed_at_by_subtree(conn, project).unwrap_or_default();
+    let modes = engraph_codegraph::index_modes(conn, project).unwrap_or_default();
     commits
         .into_iter()
         .filter(|(subtree, sha)| {
+            let exts = engraph_codegraph::source_extensions(
+                &top.join(subtree),
+                &modes.get(subtree).cloned().unwrap_or_default(),
+            );
             subtree_changed(
                 &top,
                 sha,
                 subtree,
                 indexed_at.get(subtree).copied().unwrap_or(f64::MAX),
+                exts.as_deref(),
             )
         })
         .map(|(subtree, _)| subtree)
@@ -262,8 +268,16 @@ pub(crate) fn outermost_subtrees(subtrees: Vec<String>) -> Vec<String> {
 /// `git diff` never sees untracked files, and the recorded `stash create`
 /// commit does not include them either, so a clean diff still counts the
 /// subtree as changed when an untracked file under it has an mtime later
-/// than `indexed_at` (fractional epoch seconds).
-fn subtree_changed(top: &Path, sha: &str, subtree: &str, indexed_at: f64) -> bool {
+/// than `indexed_at` (fractional epoch seconds). With `exts`, only an
+/// untracked file with one of those extensions counts (the subtree's
+/// indexers read nothing else); `None` counts every untracked file.
+fn subtree_changed(
+    top: &Path,
+    sha: &str,
+    subtree: &str,
+    indexed_at: f64,
+    exts: Option<&[&str]>,
+) -> bool {
     let pathspec = if subtree.is_empty() { "." } else { subtree };
     let status = std::process::Command::new("git")
         .arg("-C")
@@ -275,8 +289,17 @@ fn subtree_changed(top: &Path, sha: &str, subtree: &str, indexed_at: f64) -> boo
     if !matches!(status, Ok(s) if s.success()) {
         return true;
     }
+    let indexable = |f: &str| {
+        exts.is_none_or(|e| {
+            Path::new(f)
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| e.contains(&x))
+        })
+    };
     untracked_files(top, &[pathspec])
         .iter()
+        .filter(|f| indexable(f))
         .any(|f| mtime_epoch(&top.join(f)).is_some_and(|m| m > indexed_at))
 }
 
@@ -385,21 +408,22 @@ mod tests {
         let (_dir, repo, head) = repo();
         // Far-future index time: only tracked changes can flag the subtree.
         let at = f64::MAX;
-        assert!(!subtree_changed(&repo, &head, "", at));
-        assert!(!subtree_changed(&repo, &head, "svc-a", at));
-        assert!(!subtree_changed(&repo, &head, "svc-b", at));
+        assert!(!subtree_changed(&repo, &head, "", at, None));
+        assert!(!subtree_changed(&repo, &head, "svc-a", at, None));
+        assert!(!subtree_changed(&repo, &head, "svc-b", at, None));
 
         std::fs::write(repo.join("svc-a/a.rs"), "fn a() { 1 }\n").unwrap();
-        assert!(subtree_changed(&repo, &head, "", at));
-        assert!(subtree_changed(&repo, &head, "svc-a", at));
-        assert!(!subtree_changed(&repo, &head, "svc-b", at));
+        assert!(subtree_changed(&repo, &head, "", at, None));
+        assert!(subtree_changed(&repo, &head, "svc-a", at, None));
+        assert!(!subtree_changed(&repo, &head, "svc-b", at, None));
 
         // A commit git can't resolve counts as changed.
         assert!(subtree_changed(
             &repo,
             "0000000000000000000000000000000000000000",
             "svc-b",
-            at
+            at,
+            None
         ));
     }
 
@@ -519,6 +543,37 @@ mod tests {
         )
         .unwrap();
         assert!(changed_subtrees(&conn, &project, &repo).is_empty());
+    }
+
+    #[test]
+    fn changed_subtrees_counts_only_untracked_files_its_indexer_reads() {
+        let (dir, repo, _) = repo();
+        // svc-b is a Rust crate: rust-analyzer reads `.rs` files only.
+        std::fs::write(repo.join("svc-b/Cargo.toml"), "[package]\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "crate"]);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        let pool = db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let project = crate::canonical_repo_key(&repo);
+        engraph_codegraph::record_indexed_commit(
+            &conn,
+            &project,
+            "svc-b",
+            Some(&head),
+            &Default::default(),
+        )
+        .unwrap();
+        backdate_index(&conn, 10);
+
+        // A note or a log is not source: no refresh.
+        std::fs::write(repo.join("svc-b/notes.md"), "todo\n").unwrap();
+        std::fs::write(repo.join("svc-b/run.log"), "x\n").unwrap();
+        assert!(changed_subtrees(&conn, &project, &repo).is_empty());
+
+        // A new `.rs` file is.
+        std::fs::write(repo.join("svc-b/gen.rs"), "fn gen() {}\n").unwrap();
+        assert_eq!(changed_subtrees(&conn, &project, &repo), vec!["svc-b"]);
     }
 
     #[test]

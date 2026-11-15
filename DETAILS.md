@@ -1104,7 +1104,15 @@ index automatically; run `engraph index` by hand there.
 checkout's toplevel; an unresolvable commit counts as changed, and so does an
 untracked file under the subtree with an mtime later than the row's
 `indexed_at` (the diff is blind to untracked files; the check runs only when
-the diff is clean) — drops subtrees
+the diff is clean). Only an untracked file the subtree's indexers can read
+counts: `engraph_codegraph::source_extensions` takes the drivers a refresh
+would run there — the recorded `--lang` pin, else every driver whose
+`detect` matches the subtree directory, the precedence `index_repo_in`
+uses — and joins their `Driver::extensions` lists (each the full set the
+indexer reads in any configuration, so a new `.js` in a TypeScript project
+counts even when `allowJs` is off). A note or a log does not start a
+refresh. A subtree that no list describes (a Bazel workspace, no matching
+driver) counts every untracked file — drops subtrees
 nested under another changed one (`outermost_subtrees`), and re-indexes each
 at `<toplevel>/<subtree>` with `index_single`, which re-records that subtree's
 commit. It repeats how the subtree was indexed (`index_state.source`, `lang`,
