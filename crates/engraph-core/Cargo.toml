@@ -17,11 +17,9 @@ thiserror.workspace = true
 rusqlite.workspace = true
 r2d2.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 tiktoken-rs.workspace = true
-chrono.workspace = true
 dirs.workspace = true
 fastembed = { version = "4", optional = true }
 opentelemetry = { workspace = true, optional = true }
