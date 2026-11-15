@@ -352,11 +352,17 @@ After the strip, and only when the picked filter's kind is `Event`,
 `util::collapse_repeated_lines` collapses repeated log lines: a line that
 starts with a timestamp (`10:23:21:255`, `2026-11-14T10:23:21.255Z`,
 `[10:23:21]`, …) is keyed by the text after it and collapses at 2
-occurrences; a line with no timestamp is keyed whole and collapses at 3
-(the threshold keeps a coincidental repeat of real output); a blank line
-never collapses. The first line of a key stays, the later ones go, and
-`[engraph: + N more lines like the one above]` follows the first; repeats
-need not be consecutive. Kept lines are unchanged, so no filter's prefix
+occurrences anywhere in the output: the first line of a key stays, the
+later ones go, and `[engraph: + N more lines like the one above]` follows
+the first. A line with no timestamp collapses only in a run of 3 or more
+identical lines next to each other (the threshold keeps a coincidental
+repeat of real output). One that recurs a block apart stays: it belongs
+to a different diagnostic — the `|` gutter of every rustc warning, the
+`left:`/`right:` of every failed `assert_eq!` — and folding it across the
+whole output removed those lines from all but the first diagnostic (and
+cut `cargo build`'s warning count). That gives up the coverage case below:
+its 7 frames repeat a block apart, so they stay. A blank line never
+collapses. Kept lines are unchanged, so no filter's prefix
 test changes; the text is returned borrowed when nothing collapses. For
 `Content` filters (file reads, diffs, searches, listings) the collapse
 never runs: every line is data — `engraph run cat app.log` returns the

@@ -26,58 +26,73 @@ fn log_key<'a>(re: &Regex, line: &'a str) -> Option<&'a str> {
     (!rest.is_empty()).then_some(rest)
 }
 
-/// The dedupe key of a line: `(stamped, text)` — the text after a leading
-/// timestamp, or the whole trimmed line when it has none. A stamped
-/// `GET /x` and a bare `GET /x` are different keys, so one cannot absorb
-/// the other. Blank lines have no key and never collapse.
-fn repeat_key<'a>(re: &Regex, line: &'a str) -> Option<(bool, &'a str)> {
-    if let Some(k) = log_key(re, line) {
-        return Some((true, k));
-    }
+/// The trimmed text of a line that can start a run of identical lines:
+/// non-blank and without a leading timestamp (stamped lines are keyed by
+/// `log_key` instead).
+fn run_key<'a>(re: &Regex, line: &'a str) -> Option<&'a str> {
     let t = line.trim();
-    (!t.is_empty()).then_some((false, t))
+    (!t.is_empty() && log_key(re, line).is_none()).then_some(t)
 }
 
 /// Collapse repeated log lines. A line that repeats with only its leading
-/// timestamp changed collapses at 2 occurrences; a line with no timestamp
-/// must repeat 3 or more times (a threshold keeps a coincidental repeat of
-/// real output), and a blank line never collapses. The first line stays,
-/// the later ones go, and `[engraph: + N more lines like the one above]`
-/// follows the first; the repeats need not be consecutive. Kept lines are
-/// unchanged, so a filter's prefix test sees them as before. The caller
-/// gates on `OutputKind`: this runs only for an event stream, never for
-/// content. Returns `Cow::Borrowed(text)` when nothing collapses.
+/// timestamp changed collapses at 2 occurrences anywhere in the text: the
+/// first stays, the later ones go, and `[engraph: + N more lines like the
+/// one above]` follows the first. A line with no timestamp collapses only
+/// in a run of 3 or more identical lines next to each other (the threshold
+/// keeps a coincidental repeat of real output): the first line of the run
+/// stays, every later line of the run goes, whatever its length, and the
+/// marker counts them. Scanning resumes after the run, so a later run of
+/// the same line collapses on its own with its own marker. A line that
+/// recurs a block apart stays: it belongs to a different diagnostic — the
+/// `|` gutter of a rustc warning, the `left:`/`right:` of a failed
+/// assertion — and removing it would leave that diagnostic incomplete. A
+/// blank line never collapses.
+/// Kept lines are unchanged, so a filter's prefix test sees them as before.
+/// The caller gates on `OutputKind`: this runs only for an event stream,
+/// never for content. Returns `Cow::Borrowed(text)` when nothing collapses.
 pub fn collapse_repeated_lines(text: &str) -> std::borrow::Cow<'_, str> {
     let re = timestamp_prefix_re();
-    let threshold = |stamped: bool| if stamped { 2 } else { 3 };
-    let mut counts: HashMap<(bool, &str), usize> = HashMap::new();
-    for line in text.lines() {
-        if let Some(k) = repeat_key(re, line) {
-            *counts.entry(k).or_insert(0) += 1;
+    let lines: Vec<&str> = text.lines().collect();
+    let mut stamped: HashMap<&str, usize> = HashMap::new();
+    for line in &lines {
+        if let Some(k) = log_key(re, line) {
+            *stamped.entry(k).or_insert(0) += 1;
         }
     }
-    if !counts.iter().any(|(&(s, _), &n)| n >= threshold(s)) {
+    let any_run = lines
+        .windows(3)
+        .any(|w| run_key(re, w[0]).is_some_and(|t| w[1].trim() == t && w[2].trim() == t));
+    if !any_run && !stamped.values().any(|&n| n >= 2) {
         return std::borrow::Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len());
-    let mut seen: HashSet<(bool, &str)> = HashSet::new();
-    for line in text.lines() {
-        match repeat_key(re, line) {
-            Some(k) if counts[&k] >= threshold(k.0) => {
-                if seen.insert(k) {
-                    out.push_str(line);
-                    out.push('\n');
-                    out.push_str(&format!(
-                        "[engraph: + {} more lines like the one above]\n",
-                        counts[&k] - 1
-                    ));
-                }
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let (keep, more, step) = if let Some(k) = log_key(re, line) {
+            let n = stamped[k];
+            match n {
+                1 => (true, 0, 1),
+                _ => (seen.insert(k), n - 1, 1),
             }
-            _ => {
-                out.push_str(line);
-                out.push('\n');
+        } else {
+            let run = run_key(re, line).map_or(1, |t| {
+                lines[i..].iter().take_while(|l| l.trim() == t).count()
+            });
+            match run {
+                3.. => (true, run - 1, run),
+                _ => (true, 0, 1),
+            }
+        };
+        if keep {
+            out.push_str(line);
+            out.push('\n');
+            if more > 0 {
+                let _ = writeln!(out, "[engraph: + {more} more lines like the one above]");
             }
         }
+        i += step;
     }
     if !text.ends_with('\n') {
         out.pop();
@@ -370,14 +385,24 @@ mod tests {
     }
 
     #[test]
-    fn identical_untimestamped_lines_collapse_at_three_or_more() {
-        // Stack frames of a repeated error: no timestamp, repeats a block
-        // apart.
-        let text = " \u{276f} writeCoverageFile node_modules/x.js:1\nother a\n \u{276f} writeCoverageFile node_modules/x.js:1\nother b\n \u{276f} writeCoverageFile node_modules/x.js:1\n";
+    fn a_run_of_three_or_more_identical_untimestamped_lines_collapses() {
+        let text = "start\nError: coverage write failed\nError: coverage write failed\nError: coverage write failed\nend\n";
         assert_eq!(
             collapse_repeated_lines(text),
-            " \u{276f} writeCoverageFile node_modules/x.js:1\n[engraph: + 2 more lines like the one above]\nother a\nother b\n"
+            "start\nError: coverage write failed\n[engraph: + 2 more lines like the one above]\nend\n"
         );
+    }
+
+    #[test]
+    fn untimestamped_lines_repeated_a_block_apart_stay() {
+        // Each failure of a test run carries the same assertion lines; each
+        // copy belongs to its own failure, so none may go.
+        let text = "---- a stdout ----\nassertion `left == right` failed\n  left: 1\n right: 2\n\n\
+                    ---- b stdout ----\nassertion `left == right` failed\n  left: 1\n right: 2\n\n\
+                    ---- c stdout ----\nassertion `left == right` failed\n  left: 1\n right: 2\n";
+        let out = collapse_repeated_lines(text);
+        assert_eq!(out, text);
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
     }
 
     #[test]

@@ -331,10 +331,10 @@ fn cat_of_content_is_never_collapsed() {
 
 #[cfg(unix)]
 #[test]
-fn identical_frame_lines_of_an_event_run_are_collapsed() {
+fn adjacent_identical_lines_of_an_event_run_are_collapsed() {
     use std::os::unix::fs::PermissionsExt;
-    // A test runner (an event stream) that repeats the same stack frame
-    // lines, a block apart, as a repeated error does.
+    // A test runner (an event stream) that writes the same line again and
+    // again in a row.
     let dir = tempdir().unwrap();
     let db = dir.path().join("frames.db");
     let fake = dir.path().join("pytest");
@@ -343,8 +343,6 @@ fn identical_frame_lines_of_an_event_run_are_collapsed() {
         "#!/bin/sh\n\
          for i in 1 2 3; do\n\
            echo 'Error: coverage write failed'\n\
-           echo ' at writeCoverageFile node_modules/x.js:1'\n\
-           echo ' at TestRunner.onAfterRunFiles node_modules/y.js:2'\n\
          done\n\
          echo '3 failed in 1.2s'\n",
     )
@@ -364,10 +362,58 @@ fn identical_frame_lines_of_an_event_run_are_collapsed() {
         .output()
         .expect("spawn engraph run");
     let text = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(text.matches("writeCoverageFile").count(), 1, "{text}");
+    assert_eq!(text.matches("coverage write failed").count(), 1, "{text}");
     assert!(
         text.contains("[engraph: + 2 more lines like the one above]"),
         "{text}"
     );
     assert!(text.contains("3 failed in 1.2s"), "{text}");
+}
+
+#[cfg(unix)]
+#[test]
+fn lines_repeated_a_block_apart_in_an_event_run_are_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    // Three failing tests with the same assertion: each failure keeps its
+    // own assertion lines, and no marker replaces them.
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("failures.db");
+    let fake = dir.path().join("cargo");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         for t in a b c; do\n\
+           echo \"---- $t stdout ----\"\n\
+           echo \"thread '$t' panicked at src/lib.rs:3:5:\"\n\
+           echo 'assertion `left == right` failed'\n\
+           echo '  left: 1'\n\
+           echo ' right: 2'\n\
+           echo\n\
+         done\n\
+         echo 'test result: FAILED. 0 passed; 3 failed; 0 ignored'\n\
+         exit 101\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .env_clear()
+        .env("PATH", path)
+        .env("ENGRAPH_DB_PATH", &db)
+        .args(["run", "cargo", "test"])
+        .output()
+        .expect("spawn engraph run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        text.matches("assertion `left == right` failed").count(),
+        3,
+        "{text}"
+    );
+    assert_eq!(text.matches("left: 1").count(), 3, "{text}");
+    assert!(!text.contains("more lines like the one above"), "{text}");
 }
