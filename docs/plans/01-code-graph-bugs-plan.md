@@ -8,8 +8,6 @@ of the plans.
 
 - A failed driver of a multi-manifest repo is in the summary, with its
   reason.
-- The result of a wrapped command collapses log lines that repeat with only
-  their timestamp changed, for every filter.
 - The result of a wrapped command has none of the progress text a tool
   overwrote in place (`gradle --console=rich`, forced-color cargo and pip).
 - An event-stream result (a test, build, lint, or log command) collapses
@@ -28,7 +26,6 @@ at the end).
 | Bug | Effect |
 |---|---|
 | 16. A failed driver of a multi-manifest repo is not in the summary | `indexed … driver=scip-typescript`, as if the repo had no Python; the reason only in a `WARN` line |
-| 17. Log lines that repeat with only their timestamp changed are all kept | With `DEBUG=1` in the environment, 1,508 `[…-interceptor] constructing the interceptor...` lines, 100 KB of a 130 KB vitest result |
 | 18. Cursor-movement sequences leave progress fragments on one line | `gradle --console=rich`: `<-------------> 0% CONFIGURING [88ms]> root project<-------------> 6% EXECUTING …` survives, `dropped 0 progress lines` |
 | 19. Identical repeated lines survive, and content can be collapsed | 290 copies each of 7 stack-frame lines (672 KB); and `cat` of a log fixture would lose lines to the part 17 collapse |
 
@@ -57,37 +54,6 @@ sign in the summary. The Bazel symbol pass reports each language on its own
 `symbol[…]` line; the driver pass reports only the survivors. When all
 drivers fail, the error `all N driver(s) failed` has no reasons
 (`index.rs:409-414`).
-
-### Bug 17: log lines that repeat with only their timestamp changed are all kept
-
-**Found on 2026-11-14**, in the validation of part 15 on `hono-typescript`.
-**Corrected on 2026-11-14** after the "find out" step of part 17.
-
-`npx vitest run` on `hono-typescript` wrote 1,670 lines, 1,508 of them
-debug lines of the request interceptors its tests install, equal except for
-the timestamp:
-
-```
-10:23:21:255 [client-request-interceptor] constructing the interceptor...
-10:23:21:278 [xhr-interceptor] constructing the interceptor...
-10:23:21:278 [fetch-interceptor] constructing the interceptor...
-```
-
-The "find out" step showed their cause: msw writes them through
-`@open-draft/logger`, which writes only when the `DEBUG` environment
-variable is set (`@open-draft/logger/lib/index.js:59`), and the shell of the
-validation had `DEBUG=1`. Without `DEBUG`, the same run writes 10,140 bytes
-in 162 lines, with no interceptor line. Thus the size of the first report
-was an effect of the environment of the test, not of hono or of the
-filters. `engraph run` must not remove `DEBUG` from the environment of the
-command: that changes what the user's command does.
-
-The pattern is real all the same: application code that logs in each test
-writes the same line with a new timestamp, under any test runner. No filter
-collapses it. The `ToolOutput` preprocessor collapses only consecutive
-*identical* lines, and `engraph run` does not use it. With `DEBUG=1` the
-vitest result after part 15 was 129,883 bytes, about 100 KB of it these
-lines.
 
 ### Bug 18: cursor-movement sequences leave progress fragments on one line
 
@@ -272,48 +238,6 @@ Validation of part 16:
    `hono-typescript`, add a `pyproject.toml`, and put a failing
    `scip-python` shim first in `PATH`.
 
-### Part 17: repeated log lines in `engraph run` (bug 17)
-
-The correction knows no library, test runner, or language: a line that
-starts with a timestamp and repeats with only the timestamp changed is a
-repeated log line. It runs once in `engraph run`, after `strip_ansi` and
-before the filter, so every filter gets it (the shape of part 15).
-
-1. Write tests for a new `util::collapse_repeated_lines`:
-   - three lines equal except for a leading timestamp, then one different
-     line: the result has the first line, then
-     `[engraph: + 2 more lines like the one above]`, then the different
-     line;
-   - the timestamp shapes `10:23:21:255`, `10:23:21.255`, `2026-11-14
-     10:23:21`, `2026-11-14T10:23:21.255Z`, and `[10:23:21]` all count;
-   - timestamped lines with different text, and lines with no timestamp,
-     are unchanged, also when equal;
-   - text with no repeated line is returned borrowed, unchanged.
-2. Make sure that the results of the tests are incorrect before you change
-   the code.
-3. Write `util::collapse_repeated_lines`: the key of a line is its text
-   after a leading timestamp; the first line of a key stays, the next lines
-   of the key go, and one `[engraph: + N more lines like the one above]`
-   follows the first line. Kept lines do not change, so a filter's prefix
-   test sees them as before. Lines with no leading timestamp are not keys.
-4. Use it in `engraph run` after `strip_ansi`. Change no filter.
-5. Write an `engraph run` integration test with a fake command that writes
-   three repeated timestamped lines and a summary line. The result has one
-   of the lines, the count, and the summary.
-
-Validation of part 17:
-
-1. Do the preparation for `hono-typescript`, with `pnpm install` as the
-   setup. Do `DEBUG=1 engraph run npx vitest run > wrapped.out 2>&1` (the
-   `DEBUG=1` makes the interceptor lines; without it there is nothing to
-   collapse). Result: `wrapped.out` is much smaller than 129,883 bytes
-   (2026-11-14), has each interceptor line one time with a count after it,
-   and keeps the `Test Files` and `Tests` lines. Record the size in the pull
-   request.
-2. Do `engraph run npx vitest run` without `DEBUG`. Result: the same size
-   as before the change (10,140 bytes on 2026-11-14, plus the filter's
-   summary line).
-
 ### Part 18: overwritten text in `strip_ansi` (bug 18)
 
 A progress bar is text that the tool overwrites: a `\r`, a cursor movement,
@@ -422,9 +346,6 @@ Validation of part 19:
 
 - A failed driver of a multi-manifest repo is named in the summary with its
   reason (part 16).
-- `collapse_repeated_lines` keeps the first of lines equal except for a
-  leading timestamp and counts the rest; `engraph run` applies it before
-  every filter (part 17).
 - `strip_ansi` removes the text that a cursor movement, a line erase, or a
   `\r` overwrote, and keeps the lines a terminal shows at the end (part 18).
 - Every `pick` arm declares an `OutputKind`; `Content` filters (`read_cat`,
@@ -451,8 +372,7 @@ None.
 ## Effort
 
 Part 16 adds a field to
-`IndexStats`, one printer, and an integration test. Part 17 adds one
-function in `util.rs`, one call in `engraph run`, and its tests. Part 18 adds
+`IndexStats`, one printer, and an integration test. Part 18 adds
 one private function in `util.rs` behind `strip_ansi`, and its tests. Part 19
 adds `OutputKind` and the `Filter` struct in `filters/mod.rs`, a kind on
 every `pick` arm, one gate in `engraph run`, one rule in
