@@ -70,8 +70,27 @@ module above it.
 
 1. In `walk_recursive` and in `discover_workspace_repos`, use the `ignore`
    crate to obey `.gitignore` and `.ignore` files. The plain `--workspace`
-   mode obeys the same rules when it scans the direct children.
+   mode obeys the same rules when it scans the direct children. Complete:
+   - Discovery keeps its own traversal. For each child directory, it asks an
+     `ignore::IncrementalIgnore` matcher (from `WalkBuilder::build_matchers`)
+     if the directory is ignored. The matcher uses the default rules of the
+     crate: `.gitignore` inside a git repo, `.ignore`, `.git/info/exclude`,
+     and the global git excludes.
+   - An ignored directory that contains `.git` is in the result, because it
+     is a separate repo. Discovery examines it with a new matcher, so the
+     rules of the parent do not apply in it. An ignored directory below an
+     ignored directory is not found.
+   - The `ignore` walker (`WalkBuilder::build`) is not used. Its filter does
+     not see ignored directories, so it cannot find a separate repo in them.
+     It was also slower (2026-11-15, release build, warm runs): discovery
+     with the walker took 33 to 40 percent more time than discovery without
+     ignore rules. Discovery with the matcher takes 8 to 15 percent more time.
+     When ignore rules remove subtrees, it takes less time.
+   - The plain `--workspace` mode does not skip hidden children, as before.
+     See step 12.
 2. Keep the list in `is_pruned_dir` together with the `.gitignore` rules.
+   Complete with step 1: `walk_recursive` applies `is_pruned_dir` before it
+   asks the matcher.
 3. Add the `--max-depth` flag, with a default value of 16. The flag requires
    `--recursive`.
 4. Add the `--include <glob>` flag. Each glob is relative to the workspace
@@ -108,10 +127,15 @@ module above it.
       [Same-language projects that overlap](#same-language-projects-that-overlap)).
     - Java: keep the current rule. scip-java indexes Maven and Gradle
       multi-module builds from the root.
+12. Find out if the plain `--workspace` mode must skip hidden children, as
+    `--recursive` does. At this time, `--recursive` skips them
+    (`is_pruned_dir`) and `--workspace` does not.
 
 ## Tests
 
 - The discovery does not include a directory that `.gitignore` names.
+  It includes an ignored directory that contains `.git`, and the rules of
+  the parent do not apply in that directory.
 - `--exclude` removes a directory from the result. `--include` limits the
   result to the directories that it names.
 - `--max-depth 2` does not include a project at depth 3. `--max-depth`

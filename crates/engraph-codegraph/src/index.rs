@@ -4,8 +4,10 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
+use ignore::{IncrementalIgnore, WalkBuilder};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -633,6 +635,7 @@ pub fn discover_workspace_repos(workspace_root: &Path) -> Result<Vec<PathBuf>> {
     if is_indexable_root(workspace_root) {
         return Ok(vec![workspace_root.to_path_buf()]);
     }
+    let mut ig = discovery_ignores(workspace_root);
     let mut out = Vec::new();
     let mut entries: Vec<_> = std::fs::read_dir(workspace_root)
         .with_context(|| format!("reading workspace root {}", workspace_root.display()))?
@@ -644,11 +647,28 @@ pub fn discover_workspace_repos(workspace_root: &Path) -> Result<Vec<PathBuf>> {
         if !path.is_dir() {
             continue;
         }
+        // An ignored child is skipped unless it is its own git repo.
+        if ig.matched(entry.file_name(), true).is_ignore() && !path.join(".git").exists() {
+            continue;
+        }
         if is_indexable_root(&path) {
             out.push(path);
         }
     }
     Ok(out)
+}
+
+/// The ignore rules discovery obeys below `root`: the `ignore` crate's
+/// defaults (`.gitignore` inside a git repo, `.ignore`, `.git/info/exclude`,
+/// the global git excludes), the same rules as `git ls-files
+/// --exclude-standard`. Hidden dirs are not filtered here; each caller
+/// decides about them.
+fn discovery_ignores(root: &Path) -> IncrementalIgnore {
+    WalkBuilder::new(root)
+        .hidden(false)
+        .build_matchers()
+        .pop()
+        .expect("the builder has one root, so one matcher")
 }
 
 fn is_indexable_root(path: &Path) -> bool {
@@ -724,16 +744,27 @@ fn discover_repos_recursive(root: &Path) -> Result<Vec<PathBuf>> {
         anyhow::bail!("workspace root is not a directory: {}", root.display());
     }
     let mut out = Vec::new();
-    walk_recursive(root, 0, &HashSet::new(), &mut out);
+    walk_recursive(
+        root,
+        Path::new(""),
+        0,
+        &HashSet::new(),
+        &mut discovery_ignores(root),
+        &mut out,
+    );
     out.sort();
     out.dedup();
     Ok(out)
 }
 
+/// `rel` is `dir`'s path below the root of `ig`, the ignore rules that govern
+/// `dir`.
 fn walk_recursive(
     dir: &Path,
+    rel: &Path,
     depth: usize,
     claimed: &HashSet<&'static str>,
+    ig: &mut IncrementalIgnore,
     out: &mut Vec<PathBuf>,
 ) {
     if depth > RECURSIVE_MAX_DEPTH {
@@ -762,7 +793,7 @@ fn walk_recursive(
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let mut children: Vec<PathBuf> = entries
+    let mut children: Vec<OsString> = entries
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let ft = e.file_type().ok()?;
@@ -771,12 +802,28 @@ fn walk_recursive(
             if ft.is_symlink() || !ft.is_dir() || is_pruned_dir(&e.file_name().to_string_lossy()) {
                 return None;
             }
-            Some(e.path())
+            Some(e.file_name())
         })
         .collect();
     children.sort();
-    for child in children {
-        walk_recursive(&child, depth + 1, &child_claimed, out);
+    for name in children {
+        let child = dir.join(&name);
+        let child_rel = rel.join(&name);
+        if !ig.matched(&child_rel, true).is_ignore() {
+            walk_recursive(&child, &child_rel, depth + 1, &child_claimed, ig, out);
+        } else if child.join(".git").exists() {
+            // An ignored dir that is its own git repo: its parent's rules
+            // don't govern it, so walk it under its own.
+            let mut child_ig = discovery_ignores(&child);
+            walk_recursive(
+                &child,
+                Path::new(""),
+                depth + 1,
+                &child_claimed,
+                &mut child_ig,
+                out,
+            );
+        }
     }
 }
 
@@ -1193,6 +1240,83 @@ mod tests {
         dir_with(root.path(), "sub", "go.mod");
         // Bazel covers the subtree → the nested go.mod is not a separate project.
         assert_eq!(recursive_roots(root.path()), vec![r]);
+    }
+
+    /// `.gitignore` applies only inside a git repo (the `ignore` crate's
+    /// `require_git` default), so the fixtures that test it need one.
+    fn git_init(dir: &Path) {
+        let out = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git init failed: {out:?}");
+    }
+
+    #[test]
+    fn recursive_obeys_gitignore() {
+        let root = tempfile::tempdir().unwrap();
+        git_init(root.path());
+        std::fs::write(root.path().join(".gitignore"), "gen-out/\n").unwrap();
+        let r = dir_with(root.path(), "", "Cargo.toml");
+        dir_with(root.path(), "gen-out/x", "go.mod");
+        let go = dir_with(root.path(), "svc", "go.mod");
+        assert_eq!(recursive_roots(root.path()), vec![r, go]);
+    }
+
+    #[test]
+    fn recursive_obeys_ignore_file() {
+        // `.ignore` applies with or without git.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".ignore"), "scratch-dir/\n").unwrap();
+        let r = dir_with(root.path(), "", "Cargo.toml");
+        dir_with(root.path(), "scratch-dir", "go.mod");
+        assert_eq!(recursive_roots(root.path()), vec![r]);
+    }
+
+    #[test]
+    fn workspace_obeys_gitignore() {
+        let root = tempfile::tempdir().unwrap();
+        git_init(root.path());
+        std::fs::write(root.path().join(".gitignore"), "gen-out/\n").unwrap();
+        let a = dir_with(root.path(), "a", "Cargo.toml");
+        dir_with(root.path(), "gen-out", "Cargo.toml");
+        assert_eq!(discover_workspace_repos(root.path()).unwrap(), vec![a]);
+    }
+
+    #[test]
+    fn recursive_rescues_ignored_nested_repo() {
+        // A repo the parent ignores is still found, and the parent's rules
+        // don't govern inside it: `gen-out/` matches at any depth in the
+        // parent's repo, but not in `app`'s.
+        let root = tempfile::tempdir().unwrap();
+        git_init(root.path());
+        std::fs::write(root.path().join(".gitignore"), "app/\ngen-out/\n").unwrap();
+        let r = dir_with(root.path(), "", "Cargo.toml");
+        let app = dir_with(root.path(), "app", "go.mod");
+        git_init(&app);
+        let py = dir_with(root.path(), "app/gen-out", "pyproject.toml");
+        assert_eq!(recursive_roots(root.path()), vec![r, app, py]);
+    }
+
+    #[test]
+    fn workspace_rescues_ignored_nested_repo() {
+        let root = tempfile::tempdir().unwrap();
+        git_init(root.path());
+        std::fs::write(root.path().join(".gitignore"), "app/\ngen-out/\n").unwrap();
+        let app = dir_with(root.path(), "app", "Cargo.toml");
+        git_init(&app);
+        dir_with(root.path(), "gen-out", "Cargo.toml");
+        assert_eq!(discover_workspace_repos(root.path()).unwrap(), vec![app]);
+    }
+
+    #[test]
+    fn workspace_keeps_hidden_children() {
+        // Plain `--workspace` does not skip hidden children (unlike
+        // `--recursive`, which prunes them in `is_pruned_dir`).
+        let root = tempfile::tempdir().unwrap();
+        let hidden = dir_with(root.path(), ".hidden", "Cargo.toml");
+        assert_eq!(discover_workspace_repos(root.path()).unwrap(), vec![hidden]);
     }
 
     #[test]

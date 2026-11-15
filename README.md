@@ -75,7 +75,7 @@ Index runs are serialized per project with an OS file lock on `locks/index-<hash
 
 `scripts/install-scip-indexers.sh` is an idempotent installer for all five upstream indexers with per-toolchain prerequisite checks.
 
-**Cross-repo stitching:** `engraph index --workspace <dir>` indexes every sub-repo with a recognized build manifest in one pass — immediate children only, or add **`--recursive`** to discover projects at any depth (nested and mixed-language modules, e.g. a `go/` submodule inside a Rust crate), pruning build/dep dirs (`node_modules`, `target`, …) and stopping at Bazel roots. Because `entities.id` is the SCIP moniker, cross-repo references collapse onto the same row automatically. `engraph subgraph app_caller` surfaces calls into a dependency library with a `repo:<name>` annotation on the location:
+**Cross-repo stitching:** `engraph index --workspace <dir>` indexes every sub-repo with a recognized build manifest in one pass — immediate children only, or add **`--recursive`** to discover projects at any depth (nested and mixed-language modules, e.g. a `go/` submodule inside a Rust crate), pruning build/dep dirs (`node_modules`, `target`, …) and stopping at Bazel roots. Both modes skip directories that `.gitignore` (inside a git repo), `.ignore`, `.git/info/exclude`, or your global git excludes name, except a directory that is its own git repo. Because `entities.id` is the SCIP moniker, cross-repo references collapse onto the same row automatically. `engraph subgraph app_caller` surfaces calls into a dependency library with a `repo:<name>` annotation on the location:
 
 ```text
 **Calls**: `lib_foo` (repo:lib_a :: src/lib.rs:1)

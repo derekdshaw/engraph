@@ -19,6 +19,7 @@ protobuf.workspace = true
 sha2.workspace = true
 dirs.workspace = true
 chrono.workspace = true
+ignore.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

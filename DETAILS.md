@@ -1918,7 +1918,14 @@ per-repo results plus a workspace summary. Each discovered root's
 one git repo index into that repo's key as subtrees (§14). `--recursive`
 extends discovery below immediate children (to `RECURSIVE_MAX_DEPTH` = 16),
 pruning build/dep dirs (`node_modules`, `target`, …) and stopping at Bazel
-roots.
+roots. Both modes skip a directory that `.gitignore` (inside a git repo
+only), `.ignore`, `.git/info/exclude`, or the global git excludes name, the
+same rules as `git ls-files --exclude-standard`. Discovery keeps its own
+traversal and asks an `ignore::IncrementalIgnore` matcher about each child
+directory; the matcher loads and caches the ignore files of each directory
+on first use. An ignored directory that contains `.git` is still discovered,
+because it is a separate repo: discovery walks it with a new matcher rooted
+at it, so the parent's rules do not apply inside it.
 
 **Cross-repo subgraph annotation.** `format_markdown` now compares the
 queried entity's `project` with each related entity's. When they
