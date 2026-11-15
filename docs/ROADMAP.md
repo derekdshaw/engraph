@@ -29,7 +29,7 @@ Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md
 
 ## 2. Deeper workspace discovery
 
-You can select the projects that `engraph index --recursive` finds. The discovery obeys `.gitignore` files. Go modules and Python projects below a project of the same language are in the result.
+You can select the projects that `engraph index --recursive` finds. The discovery obeys `.gitignore` files. Go modules below a different Go module are in the result, and each language has its own rule for workspace members. A git submodule has its own project key.
 
 Plan: [`docs/plans/02-deeper-workspace-discovery-plan.md`](plans/02-deeper-workspace-discovery-plan.md)
 
