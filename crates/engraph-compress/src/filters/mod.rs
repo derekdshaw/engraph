@@ -196,8 +196,8 @@ pub fn pick(cmd: &str, args: &[String]) -> Filter {
 /// keeps a path-like command word verbatim in the wrapped command (the user
 /// named that binary, and a bare `gradlew` is not on PATH), so `engraph run`
 /// sees the path and must route on its basename. A plain word is returned
-/// as is.
-fn command_basename(cmd: &str) -> &str {
+/// as is. The hook classifies with the same function, so both sides agree.
+pub fn command_basename(cmd: &str) -> &str {
     if !(cmd.starts_with('/') || cmd.starts_with("./")) {
         return cmd;
     }

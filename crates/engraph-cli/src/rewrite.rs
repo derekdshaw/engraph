@@ -257,19 +257,14 @@ pub(crate) fn strip_command_prefix(argv: &mut Vec<String>) -> Option<Vec<String>
 }
 
 /// `/usr/bin/grep` → `grep`. Pure normalization so absolute-path invocations
-/// reach the same filter as the bare name.
+/// reach the same filter as the bare name. Same rule as `engraph run`
+/// (`filters::command_basename`), so the hook and the run classify alike.
 pub(crate) fn normalize_argv0(argv: &mut [String]) {
-    let Some(first) = argv.first_mut() else {
-        return;
-    };
-    if !(first.starts_with('/') || first.starts_with("./")) {
-        return;
-    }
-    if let Some(base) = std::path::Path::new(first.as_str())
-        .file_name()
-        .and_then(|s| s.to_str())
-    {
-        *first = base.to_string();
+    if let Some(first) = argv.first_mut() {
+        let base = filters::command_basename(first);
+        if base.len() != first.len() {
+            *first = base.to_string();
+        }
     }
 }
 

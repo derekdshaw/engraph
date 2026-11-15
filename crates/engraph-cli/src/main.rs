@@ -1312,7 +1312,7 @@ async fn run_wrapped_command(command: &str, args: &[String]) -> Result<std::proc
     // Matching the subcommand anywhere is robust to global options
     // (`git -C /repo push`); a false hit on a ref literally named `push` only
     // sets an env var that's a no-op for non-network git commands.
-    if std::path::Path::new(command).file_name() == Some("git".as_ref())
+    if filters::command_basename(command) == "git"
         && args
             .iter()
             .any(|a| matches!(a.as_str(), "push" | "pull" | "fetch"))
