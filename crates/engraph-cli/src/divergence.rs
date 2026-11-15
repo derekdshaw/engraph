@@ -584,7 +584,17 @@ mod tests {
         let project = crate::canonical_repo_key(&repo);
         // `svc-a/gen.rs` was untracked when it was indexed: it is in the
         // graph, but neither HEAD nor the recorded commit contains it.
-        std::fs::write(repo.join("svc-a/gen.rs"), "fn gen() {}\n").unwrap();
+        // Its mtime is set a minute back: `indexed_at` has millisecond
+        // precision and APFS/NTFS mtimes are finer, so a file written in the
+        // same millisecond as the record would read as newer than the index.
+        let gen_rs = repo.join("svc-a/gen.rs");
+        std::fs::write(&gen_rs, "fn gen() {}\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&gen_rs)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
         engraph_codegraph::record_indexed_commit(
             &conn,
             &project,
@@ -596,9 +606,10 @@ mod tests {
         let files: BTreeSet<&str> = ["svc-a/gen.rs", "svc-a/a.rs"].into_iter().collect();
         // Indexed after the file was written: nothing diverged.
         assert!(changed_since_index(&conn, &project, &repo, &files).is_empty());
-        // Indexed before: the untracked file counts as diverged; the tracked
-        // unmodified one does not.
+        // Modified after the index: the untracked file counts as diverged;
+        // the tracked unmodified one does not.
         backdate_index(&conn, 10);
+        std::fs::write(&gen_rs, "fn gen() { 1 }\n").unwrap();
         assert_eq!(
             changed_since_index(&conn, &project, &repo, &files),
             vec!["svc-a/gen.rs"]
