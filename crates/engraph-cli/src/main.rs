@@ -102,19 +102,37 @@ async fn main() -> Result<()> {
             let output = run_wrapped_command(&command, &args)
                 .await
                 .map_err(|e| anyhow::anyhow!("exec {command} failed: {e}"))?;
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let raw_stdout = String::from_utf8_lossy(&output.stdout);
+            let raw_stderr = String::from_utf8_lossy(&output.stderr);
             let exit_code = output.status.code().unwrap_or(-1);
 
-            let (filter_fn, filter_id) = filters::pick(&command, &args);
-            let result = filter_fn(&FilterCtx {
-                args: &args,
+            // Strip ANSI escapes once, for every filter: some tools color
+            // their output even into a pipe (vitest), and most filters key on
+            // line prefixes that a leading color code defeats. Input tokens
+            // count the raw bytes — the escapes are what Claude would have
+            // received.
+            let picked = filters::pick(&command, &args);
+            let stdout = filters::util::strip_ansi(&raw_stdout);
+            let stderr = filters::util::strip_ansi(&raw_stderr);
+            // An event stream (a test, build, lint, or log run) collapses
+            // repeated log lines; content (a file read, a diff, a search)
+            // is data and passes untouched.
+            let (stdout, stderr) = match picked.kind {
+                filters::OutputKind::Event => (collapse_cow(stdout), collapse_cow(stderr)),
+                filters::OutputKind::Content => (stdout, stderr),
+            };
+            // The filter reads the launched command's args (`npx tsc
+            // --noEmit` gives `tsc` `["--noEmit"]`), the argv `pick` routed on.
+            let (_, filter_args) = filters::launched_command(&command, &args);
+            let result = (picked.run)(&FilterCtx {
+                args: filter_args,
                 stdout: &stdout,
                 stderr: &stderr,
                 exit_code,
             });
 
-            let input_tokens = tokens::count(&stdout) as i64 + tokens::count(&stderr) as i64;
+            let input_tokens =
+                tokens::count(&raw_stdout) as i64 + tokens::count(&raw_stderr) as i64;
             let output_tokens = tokens::count(&result.text) as i64;
             let elapsed = start.elapsed().as_millis() as i64;
             let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
@@ -124,7 +142,7 @@ async fn main() -> Result<()> {
                     session_id: session_id.as_deref(),
                     kind: EventKind::WrappedCmd,
                     feature: "output_filter",
-                    filter_id: Some(filter_id),
+                    filter_id: Some(picked.id),
                     input_tokens,
                     output_tokens,
                     latency_ms: elapsed,
@@ -1251,6 +1269,15 @@ pub(crate) fn git_current_toplevel(start: &std::path::Path) -> Option<std::path:
     Some(std::path::PathBuf::from(top))
 }
 
+/// Keep the original Cow when nothing collapsed (it may still borrow the
+/// raw output); take the new text only when the collapse produced one.
+fn collapse_cow(text: std::borrow::Cow<'_, str>) -> std::borrow::Cow<'_, str> {
+    match filters::util::collapse_repeated_lines(&text) {
+        std::borrow::Cow::Borrowed(_) => text,
+        std::borrow::Cow::Owned(o) => std::borrow::Cow::Owned(o),
+    }
+}
+
 /// Spawn a wrapped command through `tokio::process` and return its combined
 /// output. Inherits stdin so interactive commands work (`git log -p` pager,
 /// `cargo test -- --interactive`, anything reading from a TTY). Reads stdout
@@ -1288,7 +1315,7 @@ async fn run_wrapped_command(command: &str, args: &[String]) -> Result<std::proc
     // Matching the subcommand anywhere is robust to global options
     // (`git -C /repo push`); a false hit on a ref literally named `push` only
     // sets an env var that's a no-op for non-network git commands.
-    if command == "git"
+    if filters::command_basename(command) == "git"
         && args
             .iter()
             .any(|a| matches!(a.as_str(), "push" | "pull" | "fetch"))

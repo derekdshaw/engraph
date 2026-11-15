@@ -23,9 +23,9 @@ Small performance improvements are not items in this file. They are in
 
 ## 1. Code graph bugs
 
-The symbol pass shows all the lines of a failure. The hook rewrites the usual test commands of Gradle, uv, pnpm, and npx. A new untracked file starts `--if-changed`. A configured command that does not run says why. A failed scip-go module shows its error. A load removes the locals of each document.
+A failed driver of a multi-manifest repo is in the summary.
 
-Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Parts 1 to 6 and part 9 are complete, and the plan does not have them. The numbers of the other parts do not change. Part 10 (the textual fallback name) is optional.
+Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Parts 1 to 15 and 17 to 19 are complete, and the plan does not have them. The numbers of the other parts do not change.
 
 ## 2. Deeper workspace discovery
 

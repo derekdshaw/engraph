@@ -45,7 +45,7 @@
 //! any Bazel `--output_base` / cache behavior is owned by the configured command,
 //! not engraph. Go and TS read sources directly (no Bazel build subprocess).
 
-use crate::bazel::{bazel_binary, failure_tail, output_base_for, tail_lines};
+use crate::bazel::{FAILURE_TAIL_LINES, bazel_binary, failure_tail, output_base_for};
 use crate::scip_loader::{self, LoadOptions};
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
@@ -121,6 +121,14 @@ pub enum LangStatus {
         targets: usize,
         env: &'static str,
     },
+    /// `env` names a command, but none of the rule kinds engraph counts exist,
+    /// so it did not run. Names both: a plain "no targets" would read as a
+    /// bug to the user who exported the variable, and the kinds tell them
+    /// whether their code is built with rule classes engraph does not count.
+    SkippedNoTargetsForCommand {
+        rule_kinds: &'static [&'static str],
+        env: &'static str,
+    },
     Failed(String),
 }
 
@@ -149,6 +157,11 @@ impl fmt::Display for LangStatus {
             LangStatus::SkippedNotConfigured { targets, env } => {
                 write!(f, "skipped ({targets} targets, set {env} to index them)")
             }
+            LangStatus::SkippedNoTargetsForCommand { rule_kinds, env } => write!(
+                f,
+                "skipped (no {} targets; {env} not run)",
+                rule_kinds.join(", ")
+            ),
             LangStatus::Failed(msg) => write!(f, "failed: {}", msg),
         }
     }
@@ -316,7 +329,7 @@ fn run_language(
                 "{} exited with {}\n{}",
                 spec.binary,
                 output.status,
-                failure_tail(&output.stderr, &output.stdout, 20)
+                failure_tail(&output.stderr, &output.stdout, FAILURE_TAIL_LINES)
             )),
         });
     }
@@ -361,19 +374,25 @@ fn run_delegated(
         status,
     };
 
+    // The count gates the command either way (a `--workspace` run must not
+    // start the Java command in every repo without Java); the variable only
+    // decides what a zero count is reported as.
+    let cmd = std::env::var(cmd_env).ok().filter(|c| !c.trim().is_empty());
     let targets = bazel_count_targets(bazel, repo, spec.rule_kinds)?;
     if targets == 0 {
-        return Ok(skip(LangStatus::SkippedNoTargets));
-    }
-
-    let cmd = match std::env::var(cmd_env) {
-        Ok(c) if !c.trim().is_empty() => c,
-        _ => {
-            return Ok(skip(LangStatus::SkippedNotConfigured {
-                targets,
+        return Ok(skip(match cmd {
+            Some(_) => LangStatus::SkippedNoTargetsForCommand {
+                rule_kinds: spec.rule_kinds,
                 env: cmd_env,
-            }));
-        }
+            },
+            None => LangStatus::SkippedNoTargets,
+        }));
+    }
+    let Some(cmd) = cmd else {
+        return Ok(skip(LangStatus::SkippedNotConfigured {
+            targets,
+            env: cmd_env,
+        }));
     };
 
     let out_path = scip_dir.join(out_name);
@@ -397,7 +416,7 @@ fn run_delegated(
         return Ok(skip(LangStatus::Failed(format!(
             "{cmd_env} command exited with {}\n{}",
             output.status,
-            failure_tail(&output.stderr, &output.stdout, 25)
+            failure_tail(&output.stderr, &output.stdout, FAILURE_TAIL_LINES)
         ))));
     }
 
@@ -589,7 +608,7 @@ fn run_go_modules(
             tracing::warn!(
                 module = %module_root.display(),
                 "scip-go failed (isolated): {}",
-                tail_lines(&String::from_utf8_lossy(&output.stderr), 20)
+                failure_tail(&output.stderr, &output.stdout, FAILURE_TAIL_LINES)
             );
             continue;
         }
@@ -777,7 +796,7 @@ fn bazel_count_targets(bazel: &Path, repo: &Path, kinds: &[&str]) -> Result<usiz
             "bazel query for {} exited with {}\n{}",
             kinds.join(", "),
             out.status,
-            failure_tail(&out.stderr, &out.stdout, 20)
+            failure_tail(&out.stderr, &out.stdout, FAILURE_TAIL_LINES)
         );
     }
     Ok(count_label_kind_lines(&String::from_utf8_lossy(
@@ -949,6 +968,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lang_status_no_targets_for_command_names_the_kinds_and_the_env_var() {
+        // The user set the variable, so "no targets" alone would read as a
+        // bug: say which rule kinds were counted and that the command did
+        // not run.
+        let s = LangStatus::SkippedNoTargetsForCommand {
+            rule_kinds: &["java_library", "java_binary", "java_test"],
+            env: "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
+        };
+        assert_eq!(
+            format!("{s}"),
+            "skipped (no java_library, java_binary, java_test targets; \
+             ENGRAPH_BAZEL_SCIP_JAVA_CMD not run)"
+        );
+    }
+
     /// A stand-in `bazel` that prints `stdout`, then `stderr` (when it is not
     /// empty) on stderr, and exits with `code`. A shell script on unix; on
     /// Windows a batch file, which `Command` runs through `cmd.exe`.
@@ -1113,6 +1148,39 @@ mod tests {
                 env: "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
             }
         );
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn a_configured_command_with_no_targets_is_not_run_and_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = LANGS.iter().find(|s| s.language == "java").unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 0);
+        // A command that leaves a marker, to show it did not run. The `#`
+        // swallows the `"$1" "$2"` the runner appends.
+        let marker = tmp.path().join("ran");
+
+        let _env = cmd_env_lock();
+        // SAFETY: `_env` serializes every test that touches this variable.
+        unsafe {
+            std::env::set_var(
+                "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
+                format!(": > \"{}\" #", marker.display()),
+            )
+        };
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts);
+        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
+        assert_eq!(
+            r.unwrap().status,
+            LangStatus::SkippedNoTargetsForCommand {
+                rule_kinds: spec.rule_kinds,
+                env: "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
+            }
+        );
+        assert!(!marker.exists(), "the command must not run without targets");
         assert!(parts.is_empty());
     }
 

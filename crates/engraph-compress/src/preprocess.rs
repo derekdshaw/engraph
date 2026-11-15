@@ -49,15 +49,8 @@ fn html_comment_re() -> &'static Regex {
 fn drop_progress_lines(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for line in s.lines() {
-        if line.contains('\r') {
-            // carriage-return progress overwrites; keep only last segment
-            let last = line.rsplit('\r').next().unwrap_or("");
-            if !last.trim().is_empty() && !progress_re().is_match(last) {
-                out.push_str(last);
-                out.push('\n');
-            }
-            continue;
-        }
+        // `\r` overwrites are handled inside `strip_ansi` (collapse_overwrites),
+        // which runs before this pass, so a line here never carries one.
         if !line.trim().is_empty() && progress_re().is_match(line) {
             continue;
         }

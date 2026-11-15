@@ -70,7 +70,8 @@ const ERR: &str = "fatal: no such file or directory\n";
 
 fn run(argv: &[&str], exit_code: i32) -> (String, &'static str) {
     let args: Vec<String> = argv[1..].iter().map(|s| s.to_string()).collect();
-    let (f, id) = pick(argv[0], &args);
+    let picked = pick(argv[0], &args);
+    let (f, id) = (picked.run, picked.id);
     let out = f(&FilterCtx {
         args: &args,
         stdout: "",

@@ -306,6 +306,60 @@ fn if_changed_reindexes_only_the_changed_subtrees() {
 }
 
 #[test]
+fn if_changed_reindexes_on_a_new_untracked_file() {
+    if !rust_analyzer_present() {
+        return;
+    }
+    let (dir, mono) = mono();
+    let db = dir.path().join("u.db");
+    let out = engraph(&db, &mono, &["index", "svc-b"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Back-date the record so the new file's mtime is later than `indexed_at`
+    // whatever the clock granularity.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE index_state SET indexed_at = datetime('now', '-10 seconds')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    // A new untracked file: `git diff` cannot see it, `--if-changed` must.
+    // `src/bin/` so cargo auto-discovers it and rust-analyzer indexes it.
+    std::fs::create_dir_all(mono.join("svc-b/src/bin")).unwrap();
+    std::fs::write(
+        mono.join("svc-b/src/bin/extra.rs"),
+        "pub fn beta_untracked() {}\nfn main() {}\n",
+    )
+    .unwrap();
+
+    let out = engraph(&db, &mono, &["index", "--if-changed", "--dry-run", "."]);
+    let s = stdout(&out);
+    assert!(s.contains("would re-index") && s.contains("svc-b"), "{s}");
+
+    let out = engraph(&db, &mono, &["index", "--if-changed", "."]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = stdout(&out);
+    assert!(s.contains("indexed") && s.contains("svc-b"), "{s}");
+    assert!(
+        entity_names(&db).iter().any(|n| n == "beta_untracked"),
+        "untracked file's symbol missing from the graph"
+    );
+
+    // The same untracked file does not start a second refresh.
+    let out = engraph(&db, &mono, &["index", "--if-changed", "."]);
+    assert!(stdout(&out).contains("up to date"), "{}", stdout(&out));
+}
+
+#[test]
 fn auto_runs_record_one_event_with_filter_auto() {
     let (dir, mono) = mono();
     let db = dir.path().join("e.db");

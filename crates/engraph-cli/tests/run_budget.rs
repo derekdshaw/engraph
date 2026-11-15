@@ -151,3 +151,269 @@ fn wrapped_run_without_session_id_does_not_panic() {
         .unwrap();
     assert_eq!(n, 0, "no session id means no budget row");
 }
+
+#[cfg(unix)]
+#[test]
+fn launcher_run_uses_launched_commands_filter() {
+    use std::os::unix::fs::PermissionsExt;
+    // Fake `npx` on PATH so the test needs no Node toolchain. `engraph run
+    // npx tsc --noEmit` must record the `tsc` filter, not `generic`.
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("npx.db");
+    let fake = dir.path().join("npx");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\necho \"x.ts(1,1): error TS2304: Cannot find name 'foo'.\"\nexit 2\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let last_filter = || -> String {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT filter_id FROM events WHERE kind = 'wrapped_cmd' ORDER BY seq DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+
+    let out = Command::new(bin())
+        .env_clear()
+        .env("PATH", &path)
+        .env("ENGRAPH_DB_PATH", &db)
+        .args(["run", "npx", "tsc", "--noEmit"])
+        .output()
+        .expect("spawn engraph run");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "child exit code must pass through"
+    );
+    assert_eq!(last_filter(), "tsc");
+
+    // The hook keeps a path-like command word verbatim, so `engraph run` must
+    // classify `/abs/path/npx` the same as `npx`.
+    let out = Command::new(bin())
+        .env_clear()
+        .env("PATH", &path)
+        .env("ENGRAPH_DB_PATH", &db)
+        .args(["run", fake.to_str().unwrap(), "tsc", "--noEmit"])
+        .output()
+        .expect("spawn engraph run");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(last_filter(), "tsc");
+}
+
+#[cfg(unix)]
+#[test]
+fn wrapped_output_is_ansi_stripped_before_its_filter() {
+    use std::os::unix::fs::PermissionsExt;
+    // A runner that colors its output into a pipe puts an escape sequence
+    // before the check mark the js_test filter keys on. A fake `vitest`
+    // reproduces that; `engraph run` must strip the escapes before the
+    // filter sees the lines.
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("ansi.db");
+    let fake = dir.path().join("vitest");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         printf '\\033[32m✓\\033[39m src/a.test.ts (3 tests) 12ms\\n'\n\
+         printf '\\033[32m✓\\033[39m src/b.test.ts (2 tests) 8ms\\n'\n\
+         printf '\\033[31mFAIL\\033[39m src/c.test.ts > c > breaks\\n'\n\
+         printf ' Tests  1 failed | 5 passed (6)\\n'\n\
+         exit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .env_clear()
+        .env("PATH", path)
+        .env("ENGRAPH_DB_PATH", &db)
+        .args(["run", "vitest", "run"])
+        .output()
+        .expect("spawn engraph run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !text.contains('\x1b'),
+        "escapes reached the output:\n{text}"
+    );
+    assert!(
+        text.contains("dropped 2 pass lines"),
+        "pass lines were not recognized:\n{text}"
+    );
+    assert!(text.contains("FAIL src/c.test.ts"), "{text}");
+    assert!(text.contains("Tests  1 failed | 5 passed (6)"), "{text}");
+}
+
+#[cfg(unix)]
+#[test]
+fn repeated_timestamped_log_lines_are_collapsed_before_the_filter() {
+    use std::os::unix::fs::PermissionsExt;
+    // Application code that logs in each test writes the same line with a
+    // new timestamp; `engraph run` keeps the first and counts the rest.
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("repeat.db");
+    let fake = dir.path().join("vitest");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         echo '10:23:21:255 [xhr-interceptor] constructing the interceptor...'\n\
+         echo '10:23:21:278 [xhr-interceptor] constructing the interceptor...'\n\
+         echo '10:23:22:001 [xhr-interceptor] constructing the interceptor...'\n\
+         echo ' Tests  5 passed (5)'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .env_clear()
+        .env("PATH", path)
+        .env("ENGRAPH_DB_PATH", &db)
+        .args(["run", "vitest", "run"])
+        .output()
+        .expect("spawn engraph run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        text.matches("constructing the interceptor").count(),
+        1,
+        "{text}"
+    );
+    assert!(
+        text.contains("[engraph: + 2 more lines like the one above]"),
+        "{text}"
+    );
+    assert!(text.contains("Tests  5 passed (5)"), "{text}");
+}
+
+#[cfg(unix)]
+#[test]
+fn cat_of_content_is_never_collapsed() {
+    // A file read is content: every line is data, also when lines repeat —
+    // with or without timestamps (a log fixture).
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("cat.db");
+    let fixture = dir.path().join("app.log");
+    let content = "10:00:01 GET /x\n10:00:02 GET /x\n10:00:03 GET /x\nplain\nplain\nplain\n";
+    std::fs::write(&fixture, content).unwrap();
+
+    let out = Command::new(bin())
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("ENGRAPH_DB_PATH", &db)
+        .args(["run", "cat", fixture.to_str().unwrap()])
+        .output()
+        .expect("spawn engraph run");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        content,
+        "cat output must be the file, byte for byte"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn adjacent_identical_lines_of_an_event_run_are_collapsed() {
+    use std::os::unix::fs::PermissionsExt;
+    // A test runner (an event stream) that writes the same line again and
+    // again in a row.
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("frames.db");
+    let fake = dir.path().join("pytest");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         for i in 1 2 3; do\n\
+           echo 'Error: coverage write failed'\n\
+         done\n\
+         echo '3 failed in 1.2s'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .env_clear()
+        .env("PATH", path)
+        .env("ENGRAPH_DB_PATH", &db)
+        .args(["run", "pytest"])
+        .output()
+        .expect("spawn engraph run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(text.matches("coverage write failed").count(), 1, "{text}");
+    assert!(
+        text.contains("[engraph: + 2 more lines like the one above]"),
+        "{text}"
+    );
+    assert!(text.contains("3 failed in 1.2s"), "{text}");
+}
+
+#[cfg(unix)]
+#[test]
+fn lines_repeated_a_block_apart_in_an_event_run_are_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    // Three failing tests with the same assertion: each failure keeps its
+    // own assertion lines, and no marker replaces them.
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("failures.db");
+    let fake = dir.path().join("cargo");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         for t in a b c; do\n\
+           echo \"---- $t stdout ----\"\n\
+           echo \"thread '$t' panicked at src/lib.rs:3:5:\"\n\
+           echo 'assertion `left == right` failed'\n\
+           echo '  left: 1'\n\
+           echo ' right: 2'\n\
+           echo\n\
+         done\n\
+         echo 'test result: FAILED. 0 passed; 3 failed; 0 ignored'\n\
+         exit 101\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .env_clear()
+        .env("PATH", path)
+        .env("ENGRAPH_DB_PATH", &db)
+        .args(["run", "cargo", "test"])
+        .output()
+        .expect("spawn engraph run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        text.matches("assertion `left == right` failed").count(),
+        3,
+        "{text}"
+    );
+    assert_eq!(text.matches("left: 1").count(), 3, "{text}");
+    assert!(!text.contains("more lines like the one above"), "{text}");
+}

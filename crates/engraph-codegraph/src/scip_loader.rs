@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
 use protobuf::{EnumOrUnknown, Message};
 use scip::types::{Document, Index, SymbolRole, symbol_information::Kind as SymKind};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -169,6 +169,7 @@ pub fn load_with_options(
         }
     }
     let multi_document = defined_in_several_documents(&index);
+    let schemes = LoadSchemes::of(&index, &current_symbols);
 
     // One transaction for the whole load: atomic swap from the reader's POV.
     conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -250,7 +251,15 @@ pub fn load_with_options(
 
     for doc in &index.documents {
         stats.documents_seen += 1;
-        load_document(conn, project, doc, &sym_kind, &multi_document, &mut stats)?;
+        load_document(
+            conn,
+            project,
+            doc,
+            &sym_kind,
+            &multi_document,
+            &schemes,
+            &mut stats,
+        )?;
     }
     if options.prune_stale {
         stats.entities_pruned += prune_stale_symbols(conn, project, &prefix)?;
@@ -286,6 +295,7 @@ fn load_document(
     doc: &Document,
     sym_kind: &HashMap<String, SymKind>,
     multi_document: &HashSet<String>,
+    schemes: &LoadSchemes,
     stats: &mut LoadStats,
 ) -> Result<()> {
     // Insert one entity per SymbolInformation in this doc. We capture
@@ -296,7 +306,7 @@ fn load_document(
     // sym -> lines of the definition's `enclosing_range` (the whole function
     // or class, decorators included), when the indexer writes one.
     let mut def_scope: HashMap<String, (i32, i32)> = HashMap::new();
-    let doc_scheme = document_scheme(doc);
+    let doc_scheme = document_scheme(doc).or_else(|| schemes.fallback(doc));
     let mut def_generated: HashMap<String, bool> = HashMap::new();
 
     for occ in &doc.occurrences {
@@ -608,9 +618,54 @@ fn ensure_placeholder_entity(
     Ok(())
 }
 
+/// The schemes of one load, for the locals of a document that has no global
+/// symbol of its own (`document_scheme` is `None`). Such locals would get
+/// `scheme` NULL, which `IN_SCOPE` never matches, so no later load could
+/// remove them — not even after the file is deleted. The fallback is the
+/// load's only scheme when it has one; in a merged load (one indexer per
+/// language), the scheme the other documents with the same file extension
+/// carry. `None` when neither applies, which leaves the locals as before.
+struct LoadSchemes {
+    all: BTreeSet<String>,
+    by_extension: HashMap<String, String>,
+}
+
+impl LoadSchemes {
+    fn of(index: &Index, current_symbols: &HashSet<String>) -> Self {
+        let all = current_symbols
+            .iter()
+            .filter_map(|s| scheme(s))
+            .map(str::to_string)
+            .collect();
+        let mut by_extension = HashMap::new();
+        for doc in &index.documents {
+            if let (Some(s), Some(ext)) = (document_scheme(doc), extension(&doc.relative_path)) {
+                by_extension
+                    .entry(ext.to_string())
+                    .or_insert_with(|| s.to_string());
+            }
+        }
+        Self { all, by_extension }
+    }
+
+    fn fallback(&self, doc: &Document) -> Option<&str> {
+        if self.all.len() == 1 {
+            return self.all.iter().next().map(String::as_str);
+        }
+        self.by_extension
+            .get(extension(&doc.relative_path)?)
+            .map(String::as_str)
+    }
+}
+
+fn extension(path: &str) -> Option<&str> {
+    std::path::Path::new(path).extension()?.to_str()
+}
+
 /// The scheme (indexer) of a document: that of its first global symbol, in
 /// its symbols, then in its occurrences (references to other packages carry
-/// the indexer's scheme too). `None` when the document has only locals.
+/// the indexer's scheme too). `None` when the document has only locals; the
+/// loader then falls back to `LoadSchemes`.
 fn document_scheme(doc: &Document) -> Option<&str> {
     doc.symbols
         .iter()
@@ -883,22 +938,51 @@ fn without_generics(type_name: &str) -> &str {
         .trim()
 }
 
-/// Last-resort name: the last descriptor token with its trailing `().`
-/// punctuation removed. Keeps `#` and `!`, since it cannot tell a suffix from
-/// a name character without the grammar.
+/// Last-resort name for an id the SCIP grammar rejects: the name of its last
+/// descriptor, found without the grammar. The descriptors start after the
+/// fourth space-separated field (scheme, package manager, package name,
+/// package version), not at the last space: only those four fields escape a
+/// literal space as two spaces (`accept_space_escaped_identifier`), and a
+/// descriptor can hold a single one (``impl#[`Result<T, E>`]unwrap().``).
+/// Then the trailing suffix punctuation goes (`().`, `#`, `!`, `:`), and the
+/// text after the last descriptor separator is the name; an escaped name
+/// (`` `weird.name` ``) is taken whole.
 fn fallback_display_name_textual(moniker: &str) -> String {
-    moniker
-        .rsplit_once(' ')
-        .map(|(_, last)| {
-            last.trim_end_matches('.')
-                .trim_end_matches(')')
-                .trim_end_matches('(')
-                .rsplit('/')
-                .next()
-                .unwrap_or(last)
-                .to_string()
-        })
-        .unwrap_or_else(|| moniker.to_string())
+    let trimmed = after_package_fields(moniker).trim_end_matches(['.', ')', '(', '#', '!', ':']);
+    if let Some((_, name)) = trimmed
+        .strip_suffix('`')
+        .and_then(|inner| inner.rsplit_once('`'))
+    {
+        return name.to_string();
+    }
+    trimmed
+        .rsplit(['/', '#', ']', '(', ')', '.', '!', ':'])
+        .next()
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+/// The text after the four space-separated fields of a SCIP id, where two
+/// spaces together inside a field are one literal space. An id with fewer
+/// fields (`local 5`) gives its last field.
+fn after_package_fields(moniker: &str) -> &str {
+    let bytes = moniker.as_bytes();
+    let (mut fields, mut i) = (0usize, 0usize);
+    while i < bytes.len() && fields < 4 {
+        if bytes[i] == b' ' {
+            if bytes.get(i + 1) == Some(&b' ') {
+                i += 2;
+                continue;
+            }
+            fields += 1;
+        }
+        i += 1;
+    }
+    if fields < 4 {
+        moniker.rsplit(' ').next().unwrap_or(moniker)
+    } else {
+        &moniker[i..]
+    }
 }
 
 /// RAII transaction guard mirroring engraph-ingest's TxGuard: rolls back on
@@ -1121,6 +1205,52 @@ mod tests {
         assert_eq!(
             fallback_display_name("rust-analyzer cargo lib 0.1.0 mod/foo()"),
             "foo"
+        );
+    }
+
+    #[test]
+    fn textual_fallback_name_is_the_last_descriptor_name() {
+        // The descriptors follow four space-separated fields; a descriptor can
+        // hold a space (a generic type), so the split must count fields, not
+        // take the last space.
+        assert_eq!(
+            fallback_display_name_textual("x cargo core 1.0 result/impl#[`Result<T, E>`]unwrap()."),
+            "unwrap"
+        );
+        assert_eq!(
+            fallback_display_name_textual("x cargo alloc 1.0 vec/impl#[`Vec<T, A>`]push()."),
+            "push"
+        );
+        assert_eq!(
+            fallback_display_name_textual("x cargo fd 0.1.0 config/Config#full_path_base()."),
+            "full_path_base"
+        );
+        // Two spaces inside one of the four fields are one literal space.
+        assert_eq!(
+            fallback_display_name_textual("x cargo my  pkg 1.0 mod/foo()."),
+            "foo"
+        );
+        // An escaped last name keeps its dots; a type keeps nothing of `#`.
+        assert_eq!(
+            fallback_display_name_textual("x cargo lib 1.0 `weird.name`()."),
+            "weird.name"
+        );
+        assert_eq!(
+            fallback_display_name_textual("x cargo fd 0.1.0 config/Config#"),
+            "Config"
+        );
+        assert_eq!(fallback_display_name_textual("local 5"), "5");
+    }
+
+    #[test]
+    fn a_rejected_id_with_a_generic_type_gets_the_method_name() {
+        // No trailing `.` after `()`: the SCIP grammar rejects the id, so the
+        // name comes from the textual fallback.
+        assert_eq!(
+            fallback_display_name(
+                "rust-analyzer cargo core 1.0 result/impl#[`Result<T, E>`]unwrap()"
+            ),
+            "unwrap"
         );
     }
 

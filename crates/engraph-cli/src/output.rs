@@ -58,16 +58,31 @@ pub(crate) fn scope_label(project: &str, subtree: &str) -> String {
 }
 
 /// Print the per-language outcome of the Bazel symbol-level pass so a run that
-/// produced 0 symbols doesn't read as a clean success. Multi-line failure
-/// messages (which carry a stderr tail) are collapsed to their first line.
+/// produced 0 symbols doesn't read as a clean success.
 pub(crate) fn print_symbol_langs(langs: &[engraph_codegraph::SymbolLangSummary], indent: &str) {
+    print!("{}", format_symbol_langs(langs, indent));
+}
+
+/// One `symbol[<lang>]: <status> (<n> SCIP bytes)` line per language. A
+/// failure's status is multi-line — the exit code or signal, then a stderr or
+/// stdout tail — and the first line alone never says what went wrong
+/// (`scip-python exited with signal: 6 (SIGABRT)` hides `JavaScript heap out
+/// of memory`), so the rest follows it, indented four deeper, blank lines
+/// dropped.
+fn format_symbol_langs(langs: &[engraph_codegraph::SymbolLangSummary], indent: &str) -> String {
+    let mut out = String::new();
     for l in langs {
-        let status = l.status.lines().next().unwrap_or("").trim();
-        println!(
-            "{indent}symbol[{}]: {} ({} SCIP bytes)",
-            l.language, status, l.scip_bytes
-        );
+        let mut lines = l.status.lines();
+        let first = lines.next().unwrap_or("").trim();
+        out.push_str(&format!(
+            "{indent}symbol[{}]: {first} ({} SCIP bytes)\n",
+            l.language, l.scip_bytes
+        ));
+        for line in lines.map(str::trim).filter(|l| !l.is_empty()) {
+            out.push_str(&format!("{indent}    {line}\n"));
+        }
     }
+    out
 }
 
 pub(crate) fn print_repo_plan(repo: &Path, plan: &engraph_codegraph::IndexPlan) {
@@ -369,6 +384,36 @@ pub(crate) fn csv_line(fields: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lang(status: &str) -> engraph_codegraph::SymbolLangSummary {
+        engraph_codegraph::SymbolLangSummary {
+            language: "python",
+            status: status.to_string(),
+            scip_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn symbol_lang_failure_tail_follows_the_summary_line_indented() {
+        let status = "failed: scip-python exited with signal: 6 (SIGABRT)\n\
+                      stderr (tail):\n\
+                      \n\
+                      FATAL ERROR: CALL_AND_RETRY_LAST Allocation failed - JavaScript heap out of memory";
+        assert_eq!(
+            format_symbol_langs(&[lang(status)], "  "),
+            "  symbol[python]: failed: scip-python exited with signal: 6 (SIGABRT) (0 SCIP bytes)\n\
+             \x20     stderr (tail):\n\
+             \x20     FATAL ERROR: CALL_AND_RETRY_LAST Allocation failed - JavaScript heap out of memory\n"
+        );
+    }
+
+    #[test]
+    fn symbol_lang_one_line_status_prints_as_before() {
+        assert_eq!(
+            format_symbol_langs(&[lang("indexed")], "  "),
+            "  symbol[python]: indexed (0 SCIP bytes)\n"
+        );
+    }
 
     #[test]
     fn fit_left_keeps_short_unchanged() {

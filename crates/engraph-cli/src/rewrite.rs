@@ -64,15 +64,17 @@ fn classify_for_wrap(segment: &str) -> Option<(Vec<String>, Vec<String>, &'stati
     if argv.is_empty() {
         return None;
     }
-    normalize_argv0(&mut argv);
+    // The wrapped argv keeps a path-like argv[0] (`/usr/bin/git`, `./gradlew`)
+    // verbatim: the user named that binary, and a bare `gradlew` is not on
+    // PATH. Only the classification copy is normalized; `filters::pick` does
+    // the same for `engraph run`.
     let mut classify = argv.clone();
+    normalize_argv0(&mut classify);
     strip_git_global_opts(&mut classify);
     if classify.is_empty() {
         return None;
     }
-    let cmd_word = classify[0].as_str();
-    let arg_word = classify.get(1).map(String::as_str).unwrap_or("");
-    let (_filter_fn, filter_id) = filters::pick(cmd_word, &[arg_word.to_string()]);
+    let filter_id = filters::pick(classify[0].as_str(), &classify[1..]).id;
     if filter_id == "generic" {
         return None;
     }
@@ -255,19 +257,14 @@ pub(crate) fn strip_command_prefix(argv: &mut Vec<String>) -> Option<Vec<String>
 }
 
 /// `/usr/bin/grep` → `grep`. Pure normalization so absolute-path invocations
-/// reach the same filter as the bare name.
+/// reach the same filter as the bare name. Same rule as `engraph run`
+/// (`filters::command_basename`), so the hook and the run classify alike.
 pub(crate) fn normalize_argv0(argv: &mut [String]) {
-    let Some(first) = argv.first_mut() else {
-        return;
-    };
-    if !(first.starts_with('/') || first.starts_with("./")) {
-        return;
-    }
-    if let Some(base) = std::path::Path::new(first.as_str())
-        .file_name()
-        .and_then(|s| s.to_str())
-    {
-        *first = base.to_string();
+    if let Some(first) = argv.first_mut() {
+        let base = filters::command_basename(first);
+        if base.len() != first.len() {
+            *first = base.to_string();
+        }
     }
 }
 

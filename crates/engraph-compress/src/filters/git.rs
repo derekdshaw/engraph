@@ -77,10 +77,7 @@ fn is_subject_line(stripped: &str) -> bool {
             return false;
         }
     }
-    if commit_re().is_match(stripped) {
-        return false;
-    }
-    true
+    !commit_re().is_match(stripped)
 }
 
 /// `git diff` — keep file headers and hunk headers, summarize each hunk as

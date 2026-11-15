@@ -155,9 +155,13 @@ pub fn record_indexed_commit(
         rusqlite::params![project, subtree],
     )?;
     if let Some(sha) = commit {
+        // Sub-second `indexed_at`: the untracked-file divergence check
+        // compares file mtimes against it, and the column default is whole
+        // seconds — too coarse for a file created moments after the index.
         conn.execute(
-            "INSERT INTO index_state (project, subtree, commit_sha, source, lang, bazel_symbols)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO index_state (project, subtree, commit_sha, source, lang, bazel_symbols, \
+             indexed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%d %H:%M:%f','now'))",
             rusqlite::params![
                 project,
                 subtree,
@@ -179,6 +183,23 @@ pub fn indexed_commits(conn: &PooledConn, project: &str) -> Result<Vec<(String, 
     let rows = stmt
         .query_map([project], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// When each recorded subtree of `project` was indexed, by subtree, as
+/// fractional epoch seconds — what the untracked-file divergence check
+/// compares file mtimes against.
+pub fn indexed_at_by_subtree(
+    conn: &PooledConn,
+    project: &str,
+) -> Result<std::collections::HashMap<String, f64>> {
+    let mut stmt = conn.prepare(
+        "SELECT subtree, (julianday(indexed_at) - 2440587.5) * 86400.0
+         FROM index_state WHERE project = ?1",
+    )?;
+    let rows = stmt
+        .query_map([project], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
 }
 
@@ -578,7 +599,7 @@ fn run_driver_into(out_dir: &Path, repo: &Path, drv: &dyn driver::Driver) -> Res
             "{} exited with {}\n{}",
             drv.name(),
             output.status,
-            bazel::failure_tail(&output.stderr, &output.stdout, 25)
+            bazel::failure_tail(&output.stderr, &output.stdout, bazel::FAILURE_TAIL_LINES)
         );
     }
     if !output.stderr.is_empty() {
@@ -654,6 +675,31 @@ fn detected_langs(dir: &Path) -> HashSet<&'static str> {
         }
     }
     langs
+}
+
+/// The file extensions a refresh of `dir`, indexed as `mode`, would read:
+/// those of the drivers `index_repo_in` picks for it — the `--lang` pin, or
+/// else every driver whose probe matches, in the same order of precedence.
+/// `None` when no driver list describes what the run reads (a prebuilt
+/// `--scip` or manifest, a Bazel workspace, or no driver matching); the
+/// caller then counts every file.
+pub fn source_extensions(dir: &Path, mode: &IndexMode) -> Option<Vec<&'static str>> {
+    if mode.source != IndexSource::Drivers {
+        return None;
+    }
+    let drivers: Vec<Box<dyn driver::Driver>> = match &mode.lang {
+        Some(name) => driver::by_name(name).into_iter().collect(),
+        None if bazel::detect_bazel(dir) => return None,
+        None => driver::registry()
+            .into_iter()
+            .filter(|d| d.detect(dir))
+            .collect(),
+    };
+    let exts: Vec<&'static str> = drivers
+        .iter()
+        .flat_map(|d| d.extensions().iter().copied())
+        .collect();
+    (!exts.is_empty()).then_some(exts)
 }
 
 /// Directories `--recursive` never descends into: hidden dirs and the usual
@@ -1197,6 +1243,37 @@ mod tests {
         assert!(index_modes(&conn, "/other").unwrap().is_empty());
     }
 
+    #[test]
+    fn source_extensions_follow_the_drivers_a_refresh_would_run() {
+        let root = tempfile::tempdir().unwrap();
+        let auto = IndexMode::default();
+        // Detected drivers: every matching one contributes.
+        let rs = dir_with(root.path(), "rs", "Cargo.toml");
+        assert_eq!(source_extensions(&rs, &auto), Some(vec!["rs"]));
+        let ts = dir_with(root.path(), "ts", "package.json");
+        std::fs::write(ts.join("tsconfig.json"), "{}").unwrap();
+        std::fs::write(ts.join("pyproject.toml"), "").unwrap();
+        let exts = source_extensions(&ts, &auto).unwrap();
+        assert!(exts.contains(&"js") && exts.contains(&"tsx") && exts.contains(&"py"));
+        // A `--lang` pin wins over detection.
+        let pinned = IndexMode {
+            lang: Some("scip-go".into()),
+            ..IndexMode::default()
+        };
+        assert_eq!(source_extensions(&rs, &pinned), Some(vec!["go"]));
+        // No list describes these: every file counts.
+        let none = dir_with(root.path(), "none", "README.md");
+        assert_eq!(source_extensions(&none, &auto), None);
+        let bazel = dir_with(root.path(), "bazel", "MODULE.bazel");
+        std::fs::write(bazel.join("Cargo.toml"), "").unwrap();
+        assert_eq!(source_extensions(&bazel, &auto), None);
+        let scip = IndexMode {
+            source: IndexSource::Scip,
+            ..IndexMode::default()
+        };
+        assert_eq!(source_extensions(&rs, &scip), None);
+    }
+
     /// An indexer that fails the way scip-typescript does: the error on
     /// stdout, nothing on stderr.
     struct StdoutOnlyIndexer;
@@ -1206,6 +1283,9 @@ mod tests {
         }
         fn detect(&self, _: &Path) -> bool {
             true
+        }
+        fn extensions(&self) -> &'static [&'static str] {
+            &[]
         }
         fn command(&self, _: &Path, _: &Path) -> std::process::Command {
             let mut c = std::process::Command::new("sh");

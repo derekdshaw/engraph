@@ -312,8 +312,63 @@ code (`engraph-cli` `Cmd::Run` branch).
 ### 4.1 Dispatch
 
 `filters::pick(cmd, args)` (`engraph-compress::filters`) is a
-single big `match` returning `(FilterFn, &'static str)`. The unknown
-fallback is `(generic::filter, "generic")`.
+single big `match` returning a `Filter { id, kind, run }` descriptor,
+where `kind: OutputKind` (`Event` or `Content`) is declared on every arm,
+beside the command it classifies — a new filter cannot be added without
+the decision, and the fallback is content, so an unknown command can
+never be collapsed. Before the
+match, `command_basename` reduces a path-like `cmd` (`/usr/bin/git`,
+`./gradlew`) to its basename, and `strip_launcher` peels a launcher
+prefix (`uv run`, `python -m`, `python3 -m`, `npx`, `pnpm exec`) so the
+launched command routes: `pick("uv", ["run", "pytest"])` selects the
+`pytest` filter. The unknown fallback is `(generic::filter, "generic")`.
+
+Before `pick`'s choice runs, `engraph run` strips ANSI escapes from stdout
+and stderr once (`util::strip_ansi`) — CSI (colors, cursor moves) and OSC
+(terminal hyperlinks, as on cargo's `Finished` line with color forced) —
+so every filter sees plain text.
+Inside the strip, `collapse_overwrites` first removes the text a terminal
+would have overwritten — a segment that a cursor movement (`ESC[…A`–`H`),
+a whole-line erase (`ESC[1K`, `ESC[2K`), or a `\r` with more text after it
+follows; a segment ended by `\n` is a line and stays (`ESC[K` erases to
+the right of real text). It runs while the sequences are still present —
+they are the evidence of the overwrite — and the regex then removes what
+remains. A rich console (`gradle --console=rich`) and forced-color
+progress bars thus leave no joined fragments. The `\r` rule that
+`drop_progress_lines` carried for the `compress()` path now lives here
+for both paths.
+Libraries color their output into a pipe: with `DEBUG=1` in the
+environment, 1,508 of 1,670 lines of `hono-typescript`'s `vitest run`
+carried escapes (the debug lines of its request interceptors, which
+`@open-draft/logger` writes only when `DEBUG` is set), 27 KB of a 157 KB
+run. Most filters key on
+line prefixes (`✓`, `PASS`, `ok\t`, `warning:`), which a leading color code
+defeats, so the strip is central rather than per filter; the `bazel`, `git`
+and `search` filters also strip for themselves, which is now redundant but
+harmless. Input tokens still count the raw bytes: the escapes are what
+Claude would have received.
+
+After the strip, and only when the picked filter's kind is `Event`,
+`util::collapse_repeated_lines` collapses repeated log lines: a line that
+starts with a timestamp (`10:23:21:255`, `2026-11-14T10:23:21.255Z`,
+`[10:23:21]`, …) is keyed by the text after it and collapses at 2
+occurrences anywhere in the output: the first line of a key stays, the
+later ones go, and `[engraph: + N more lines like the one above]` follows
+the first. A line with no timestamp collapses only in a run of 3 or more
+identical lines next to each other (the threshold keeps a coincidental
+repeat of real output). One that recurs a block apart stays: it belongs
+to a different diagnostic — the `|` gutter of every rustc warning, the
+`left:`/`right:` of every failed `assert_eq!` — and folding it across the
+whole output removed those lines from all but the first diagnostic (and
+cut `cargo build`'s warning count). That gives up the coverage case below:
+its 7 frames repeat a block apart, so they stay. A blank line never
+collapses. Kept lines are unchanged, so no filter's prefix
+test changes; the text is returned borrowed when nothing collapses. For
+`Content` filters (file reads, diffs, searches, listings) the collapse
+never runs: every line is data — `engraph run cat app.log` returns the
+file. The cases that found it: hono's tests with `DEBUG=1` wrote 1,508
+interceptor debug lines, and a coverage failure repeated the same 7 stack
+frames 145 times.
 
 Each `FilterFn` has signature
 `fn(&FilterCtx) -> FilterOutput` where `FilterCtx` carries the four
@@ -362,7 +417,7 @@ Specific noise patterns by family:
 | tree / fd / ls | depth-truncated; long flat lists capped | first N entries; depth limit | `truncated N more entries` |
 | rg / grep | flat match lists capped | first N matches | `truncated N more matches` |
 | docker / kubectl | annotations / spec blobs | events, container/pod summaries | row caps |
-| npm / pnpm / yarn | per-package "added N" progress | totals, vulnerability count | summary |
+| npm / pnpm / yarn (install, test) | per-package "added N" progress | totals, vulnerability count | summary |
 | pytest / pip / uv / go test / go mod tidy | pass-progress lines | failed test output, summary | counts |
 | lint (ruff / mypy / eslint / tsc) | info / progress lines | diagnostics (errors, warnings) | `[engraph: <name> N errors, M warnings, exit C]` |
 | make / mvn / gradle (incl. `./gradlew`) | recipe echo, dir-change, download / progress lines | errors, build / test results | dropped-line count + exit |
@@ -470,7 +525,8 @@ has_unquoted_shell_meta(command)? → rewrite_pipeline(command):
 otherwise (plain command):
     classify_for_wrap(command):
         strip_command_prefix(argv): sudo/env → None; peel `FOO=bar` (whitespace value → None)
-        normalize_argv0(argv): /usr/bin/grep → grep
+        normalize_argv0 (classification copy only): /usr/bin/grep → grep;
+            the wrapped argv keeps the path the user typed
         strip_git_global_opts(argv): drop -C/-c/--git-dir=/--work-tree= when argv[0] == "git"
         pick(argv[0], argv[1..]) == "generic"? → None
     None? → Passthrough
@@ -548,8 +604,12 @@ invoke, per command or per pipeline stage):
   command correctly.
 - `normalize_argv0` maps absolute and `./`-prefixed argv[0]
   values through `Path::file_name` so `/usr/bin/grep` and
-  `./bin/git` classify the same as the bare names. Pure
-  normalization — does nothing to non-path argv[0].
+  `./gradlew` classify the same as the bare names. Does nothing to
+  non-path argv[0]. It runs on the classification copy only: the
+  wrapped argv keeps the path, so the binary the user named is the
+  one that runs (and a bare `gradlew` is not on PATH anyway).
+  `filters::pick` applies the same basename rule (`command_basename`),
+  so `engraph run /usr/bin/git log` selects `git_log`.
 - `strip_git_global_opts` walks argv when argv[0] == "git"
   and drops the global options `-C path`, `-c key=value`,
   `--git-dir=…`, `--work-tree=…`. Without this, `git -C /tmp status`
@@ -615,6 +675,12 @@ Shared with the native `PreToolUse(Grep)` path:
   references that object, so `git gc` prunes it after `gc.pruneExpire`
   (2 weeks by default). After that the diff fails and every file counts
   as changed until the next `engraph index`.
+  `git diff` never reports a file that is untracked now and absent from
+  the recorded commit (`stash create` excludes untracked files too), so
+  a matched file that is untracked (`git ls-files --others
+  --exclude-standard`) counts as changed when its mtime is later than
+  the covering subtree's `index_state.indexed_at` — written at
+  sub-second precision for exactly this comparison.
 
 The gate matters: a permissive heuristic would deny on common
 identifiers like `new` / `run` / `parse` (any of which has dozens of
@@ -1035,7 +1101,18 @@ index automatically; run `engraph index` by hand there.
 `--if-changed` itself (`Cmd::Index`, `main.rs`) resolves the project key with
 `index_scope`, lists the subtrees `divergence::changed_subtrees` reports — one
 `git diff --quiet <commit> -- <subtree>` per `index_state` row, at the current
-checkout's toplevel; an unresolvable commit counts as changed — drops subtrees
+checkout's toplevel; an unresolvable commit counts as changed, and so does an
+untracked file under the subtree with an mtime later than the row's
+`indexed_at` (the diff is blind to untracked files; the check runs only when
+the diff is clean). Only an untracked file the subtree's indexers can read
+counts: `engraph_codegraph::source_extensions` takes the drivers a refresh
+would run there — the recorded `--lang` pin, else every driver whose
+`detect` matches the subtree directory, the precedence `index_repo_in`
+uses — and joins their `Driver::extensions` lists (each the full set the
+indexer reads in any configuration, so a new `.js` in a TypeScript project
+counts even when `allowJs` is off). A note or a log does not start a
+refresh. A subtree that no list describes (a Bazel workspace, no matching
+driver) counts every untracked file — drops subtrees
 nested under another changed one (`outermost_subtrees`), and re-indexes each
 at `<toplevel>/<subtree>` with `index_single`, which re-records that subtree's
 commit. It repeats how the subtree was indexed (`index_state.source`, `lang`,
@@ -1442,7 +1519,7 @@ SCIP run finishes; it would not replace SCIP's call edges.
 The crate depends on `scip = "0.7"` and `protobuf = "3.7"` (rust-protobuf;
 scip ships pre-generated message code so no `protoc` is needed at build
 time). The bump from scip 0.5 → 0.7 raised the workspace MSRV from 1.75
-to 1.95. The 4.x line of `protobuf` on crates.io is prerelease-only
+to 1.95; it is now 1.100, the toolchain CI builds and lints with. The 4.x line of `protobuf` on crates.io is prerelease-only
 (`4.x.y-release` suffix; cargo's plain-version constraints exclude
 prereleases by default) and the upstream API is a partial rewrite — we
 stay on the 3.x stable line.
@@ -1688,7 +1765,14 @@ symbols whose id starts with one of its schemes, and locals whose
 `scheme` column (schema v13: the scheme of the local's document, that
 of its first global symbol or reference) is one of them. Thus a load
 removes the locals of a deleted file, and a `--lang` run or a prebuilt
-SCIP file of one language keeps the locals of the others.
+SCIP file of one language keeps the locals of the others. A document with
+no global symbol at all (a script with only local declarations and no
+reference to another file) has no scheme of its own; its locals take the
+load's scheme when the load has one, else — in a merged load, one indexer
+per language — the scheme of the other documents with the same file
+extension (`LoadSchemes`). Without that, their `scheme` stayed NULL, which
+`IN_SCOPE` never matches, and the locals outlived the file. None of the
+test projects has such a document.
 
 **ID strategy.** `entities.id` is the raw SCIP moniker
 (`rust-analyzer cargo engraph-core 0.1.0 schema/run_migrations().`).
@@ -1992,6 +2076,13 @@ flag is still available to opt in on a single-repo run.
   stores them verbatim as `file_path`, so two modules' `main.go` would
   collide otherwise). Per-module failures are isolated; `--module-version`
   is pinned (like `SCIP_PYTHON_VERSION`) for cross-commit-stable IDs.
+  A failed module's `WARN` line carries `failure_tail` (stderr, or stdout
+  when stderr is empty). The `failed` count counts process failures — a
+  nonzero scip-go exit, e.g. a malformed `go.mod`. A Go source file that
+  does not parse is **not** a counted failure: scip-go exits 0 and writes a
+  thin index for the module (verified 2026-11-14 on `func (`), so a module
+  with broken source lowers the symbol count silently. That is scip-go's
+  behavior; engraph has no signal to count it.
   `IndexedModules { indexed, failed, targets }` surfaces the gazelle gap:
   go.mod-rooted modules « `go_library` targets. When
   `ENGRAPH_BAZEL_SCIP_GO_CMD` is set the Go pass delegates to it instead
@@ -2024,24 +2115,36 @@ blob is loaded once. Metadata from the first non-empty input wins.
 the symbol-level pass. `LangStatus`: `Indexed`, `IndexedModules {
 indexed, failed, targets }` (Go's per-module aggregate),
 `SkippedNoTargets`, `SkippedNoIndexer { binary }`,
-`SkippedNotConfigured { targets, env }`, `Failed(tail)` — each
+`SkippedNotConfigured { targets, env }`,
+`SkippedNoTargetsForCommand { rule_kinds, env }`, `Failed(tail)` — each
 language reports independently. The tail is the end of stderr, or of
 stdout with the label `stdout (tail):` when stderr is empty
 (scip-typescript writes its errors to stdout); the standalone driver
-error uses the same `bazel::failure_tail`. A failed target-count query is
+error uses the same `bazel::failure_tail`. The summary printer
+(`output::format_symbol_langs`) keeps the first line of a failure on the
+`symbol[…]` line and prints the tail under it, indented, blank lines
+dropped: the exit code or signal alone never says what to do, while the
+tail carries the reason (`JavaScript heap out of memory`). A failed target-count query is
 `Failed` too, not `SkippedNoTargets`: its first line names the rule kinds
 and the exit status (`bazel query for java_library, java_binary,
 java_test exited with exit status: 2`). An unknown rule kind is not a
 failure — Bazel 9.3.2 exits 0 with `INFO: Empty results` — and a broken
 `BUILD` file fails the target-level query first.
 
-**One skip report for a missing command.** Every delegated path counts
-targets *before* it reads its env var, so the two skips say different
+**One skip report for a missing command.** Every delegated path gates
+its command on the target count, so the skips say different
 things: `SkippedNoTargets` ("no code of this language here", the same text
 TS and Python use) versus `SkippedNotConfigured { targets, env }` ("N
 targets this command would index"). Reading the env var first told a
 Go-only workspace to configure a Java indexer, and told a Java workspace
-only that the variable was unset, with no count. One variant covers both
+only that the variable was unset, with no count. A set variable with a
+zero count is `SkippedNoTargetsForCommand { rule_kinds, env }` —
+`skipped (no java_library, java_binary, java_test targets;
+ENGRAPH_BAZEL_SCIP_JAVA_CMD not run)`: the count still gates the command
+(a `--workspace` run must not start the Java command in every repo without
+Java), and the variable is read only to choose the message, so the user
+who exported it sees which rule classes were counted instead of a bare
+"no targets". One variant covers both
 routes into that state — a language always delegated because its build is
 repo-specific (Java), and one whose native pass found no root (Go with no
 `go.mod`, a pure gazelle repo) — so a new delegated language needs no new
@@ -2069,7 +2172,8 @@ chains after the target-level pass; `driver_name` reports
 **Tests.** `run_java`'s delegation is unit-tested in-crate (a fake
 command writes a known SCIP, `run_java` merges it; the unconfigured case
 reports `SkippedNotConfigured` with the target count, and a workspace with
-no targets reports `SkippedNoTargets` without reading the env var). These
+no targets reports `SkippedNoTargets`, or `SkippedNoTargetsForCommand`
+when the variable is set, without running the command). These
 use a fake `bazel` that answers queries with `label_kind` lines: a shell
 script on unix, a batch file on Windows (`Command` runs a `.cmd` through
 `cmd.exe`). On unix a child process writes the script, so a parallel test's

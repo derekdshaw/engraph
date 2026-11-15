@@ -64,7 +64,7 @@ fn golden_fixtures_byte_exact() {
             Stream::Stdout => (input.as_str(), ""),
             Stream::Stderr => ("", input.as_str()),
         };
-        let (filter_fn, _) = filters::pick(case.cmd, &args);
+        let filter_fn = filters::pick(case.cmd, &args).run;
         let out = filter_fn(&FilterCtx {
             args: &args,
             stdout,

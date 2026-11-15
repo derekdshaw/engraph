@@ -283,16 +283,17 @@ fn env_command_prefix_is_passthrough() {
 }
 
 #[test]
-fn absolute_path_argv0_is_normalized() {
+fn absolute_path_argv0_is_kept_verbatim() {
     let (_t, db) = db_dir();
-    // `/usr/bin/git log` should classify the same as `git log`.
+    // `/usr/bin/git log` classifies the same as `git log`, and the wrap runs
+    // the binary the user named.
     let out = run_hook(&db, "/usr/bin/git log -n 5");
     let v = parse(&out).expect("expected rewrite JSON");
     let updated = v
         .pointer("/hookSpecificOutput/updatedInput/command")
         .and_then(|s| s.as_str())
         .unwrap();
-    assert_eq!(updated, "engraph run git log -n 5");
+    assert_eq!(updated, "engraph run /usr/bin/git log -n 5");
 }
 
 #[test]
@@ -354,6 +355,51 @@ fn head_with_flags_is_rewritten() {
         .and_then(|s| s.as_str())
         .unwrap();
     assert_eq!(updated, "engraph run head -n 100 foo.py");
+}
+
+#[test]
+fn gradlew_wrapper_is_rewritten_verbatim() {
+    let (_dir, db) = db_dir();
+    let out = run_hook(&db, "./gradlew test");
+    let v = parse(&out).expect("expected rewrite for ./gradlew");
+    let updated = v["hookSpecificOutput"]["updatedInput"]["command"]
+        .as_str()
+        .unwrap();
+    // `./gradlew` must stay verbatim: its basename is not on PATH.
+    assert_eq!(updated, "engraph run ./gradlew test");
+}
+
+#[test]
+fn launcher_commands_are_rewritten_verbatim() {
+    let (_dir, db) = db_dir();
+    for cmd in [
+        "uv run pytest",
+        "python -m pytest",
+        "npx tsc --noEmit",
+        "npx vitest run",
+        "pnpm exec vitest run",
+    ] {
+        let out = run_hook(&db, cmd);
+        let v =
+            parse(&out).unwrap_or_else(|| panic!("expected rewrite for `{cmd}`, got passthrough"));
+        let updated = v["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap();
+        assert_eq!(updated, format!("engraph run {cmd}"), "command: {cmd}");
+    }
+}
+
+#[test]
+fn second_arg_subcommands_are_rewritten() {
+    // Arms that key on the second argument (`go mod tidy`) need the full argv
+    // tail, not just the first word, to classify in the hook.
+    let (_dir, db) = db_dir();
+    let out = run_hook(&db, "go mod tidy");
+    let v = parse(&out).expect("expected rewrite for `go mod tidy`");
+    let updated = v["hookSpecificOutput"]["updatedInput"]["command"]
+        .as_str()
+        .unwrap();
+    assert_eq!(updated, "engraph run go mod tidy");
 }
 
 #[test]
