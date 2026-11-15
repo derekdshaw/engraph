@@ -121,8 +121,11 @@ async fn main() -> Result<()> {
                 filters::OutputKind::Event => (collapse_cow(stdout), collapse_cow(stderr)),
                 filters::OutputKind::Content => (stdout, stderr),
             };
+            // The filter reads the launched command's args (`npx tsc
+            // --noEmit` gives `tsc` `["--noEmit"]`), the argv `pick` routed on.
+            let (_, filter_args) = filters::launched_command(&command, &args);
             let result = (picked.run)(&FilterCtx {
-                args: &args,
+                args: filter_args,
                 stdout: &stdout,
                 stderr: &stderr,
                 exit_code,

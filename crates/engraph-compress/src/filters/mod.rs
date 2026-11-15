@@ -81,7 +81,7 @@ impl Filter {
 }
 
 pub fn pick(cmd: &str, args: &[String]) -> Filter {
-    let (cmd, args) = strip_launcher(command_basename(cmd), args);
+    let (cmd, args) = launched_command(cmd, args);
     // `git`'s subcommand can be preceded by global options (`-C <path>`,
     // `-c <k=v>`, `--git-dir[=...]`, `--work-tree[=...]`). Skip them so we
     // classify on the subcommand, not the global flag — otherwise
@@ -207,13 +207,20 @@ pub fn command_basename(cmd: &str) -> &str {
         .unwrap_or(cmd)
 }
 
+/// The command `pick` routes on and the args that belong to it: the
+/// basename of `cmd`, with a launcher prefix peeled (`npx tsc --noEmit` is
+/// `tsc` with `["--noEmit"]`). `engraph run` hands the filter these args, so
+/// a filter that reads `FilterCtx::args` (`git`, `read`, `search`, `docker`)
+/// sees the same argv whether or not a launcher ran the command.
+pub fn launched_command<'a>(cmd: &'a str, args: &'a [String]) -> (&'a str, &'a [String]) {
+    strip_launcher(command_basename(cmd), args)
+}
+
 /// Peel a launcher prefix so the launched command selects the filter:
 /// `uv run pytest` classifies as `pytest`, `npx tsc` as `tsc`, `python -m
 /// pytest` as `pytest`, `pnpm exec vitest` as `vitest`. Launcher flags
 /// (`npx --yes`, `uv run --with`) are not peeled; the flag word classifies as
-/// `generic`, the same as before launchers were recognized. Callers that pass
-/// the unstripped args on to the filter are fine: no filter reachable through
-/// a launcher reads `FilterCtx::args`.
+/// `generic`, the same as before launchers were recognized.
 fn strip_launcher<'a>(cmd: &'a str, args: &'a [String]) -> (&'a str, &'a [String]) {
     let first = args.first().map(String::as_str).unwrap_or("");
     let launched = match (cmd, first) {
@@ -296,6 +303,16 @@ mod tests {
             pick("pnpm", &argv(&["exec", "vitest", "run"])).id,
             "js_test"
         );
+    }
+
+    #[test]
+    fn launched_command_gives_the_launched_commands_args() {
+        let a = argv(&["tsc", "--noEmit"]);
+        assert_eq!(launched_command("npx", &a), ("tsc", &a[1..]));
+        let a = argv(&["run", "git", "log", "--oneline"]);
+        assert_eq!(launched_command("uv", &a), ("git", &a[2..]));
+        let a = argv(&["log"]);
+        assert_eq!(launched_command("/usr/bin/git", &a), ("git", &a[..]));
     }
 
     #[test]
