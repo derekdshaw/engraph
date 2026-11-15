@@ -26,35 +26,50 @@ fn log_key<'a>(re: &Regex, line: &'a str) -> Option<&'a str> {
     (!rest.is_empty()).then_some(rest)
 }
 
-/// Collapse log lines that repeat with only their timestamp changed —
-/// application code logging in every test writes the same line again and
-/// again. The first line of each text stays, the later ones go, and
-/// `[engraph: + N more lines like the one above]` follows the first; the
-/// repeats need not be consecutive. Kept lines are unchanged, so a filter's
-/// prefix test sees them as before. Lines with no leading timestamp are
-/// never collapsed. Returns `Cow::Borrowed(text)` when nothing repeats.
+/// The dedupe key of a line: `(stamped, text)` — the text after a leading
+/// timestamp, or the whole trimmed line when it has none. A stamped
+/// `GET /x` and a bare `GET /x` are different keys, so one cannot absorb
+/// the other. Blank lines have no key and never collapse.
+fn repeat_key<'a>(re: &Regex, line: &'a str) -> Option<(bool, &'a str)> {
+    if let Some(k) = log_key(re, line) {
+        return Some((true, k));
+    }
+    let t = line.trim();
+    (!t.is_empty()).then_some((false, t))
+}
+
+/// Collapse repeated log lines. A line that repeats with only its leading
+/// timestamp changed collapses at 2 occurrences; a line with no timestamp
+/// must repeat 3 or more times (a threshold keeps a coincidental repeat of
+/// real output), and a blank line never collapses. The first line stays,
+/// the later ones go, and `[engraph: + N more lines like the one above]`
+/// follows the first; the repeats need not be consecutive. Kept lines are
+/// unchanged, so a filter's prefix test sees them as before. The caller
+/// gates on `OutputKind`: this runs only for an event stream, never for
+/// content. Returns `Cow::Borrowed(text)` when nothing collapses.
 pub fn collapse_repeated_lines(text: &str) -> std::borrow::Cow<'_, str> {
     let re = timestamp_prefix_re();
-    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let threshold = |stamped: bool| if stamped { 2 } else { 3 };
+    let mut counts: HashMap<(bool, &str), usize> = HashMap::new();
     for line in text.lines() {
-        if let Some(k) = log_key(re, line) {
+        if let Some(k) = repeat_key(re, line) {
             *counts.entry(k).or_insert(0) += 1;
         }
     }
-    if !counts.values().any(|&n| n > 1) {
+    if !counts.iter().any(|(&(s, _), &n)| n >= threshold(s)) {
         return std::borrow::Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len());
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: HashSet<(bool, &str)> = HashSet::new();
     for line in text.lines() {
-        match log_key(re, line) {
-            Some(k) if counts[k] > 1 => {
+        match repeat_key(re, line) {
+            Some(k) if counts[&k] >= threshold(k.0) => {
                 if seen.insert(k) {
                     out.push_str(line);
                     out.push('\n');
                     out.push_str(&format!(
                         "[engraph: + {} more lines like the one above]\n",
-                        counts[k] - 1
+                        counts[&k] - 1
                     ));
                 }
             }
@@ -70,14 +85,115 @@ pub fn collapse_repeated_lines(text: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
-/// Strip ANSI CSI escape sequences (SGR colors, cursor moves, DEC private modes
-/// like `\x1b[?25l`). Matches `ESC[<digits/semicolons/?><letter>`. Returns
-/// `Cow::Borrowed(s)` when no escapes match, avoiding a clone for the common
-/// case of plain-text input.
+/// Strip ANSI escape sequences: CSI (SGR colors, cursor moves, DEC private
+/// modes like `\x1b[?25l`) and OSC (`ESC]…BEL` or `ESC]…ESC\\` — terminal
+/// hyperlinks, as on cargo's `Finished` line with color forced, and titles).
+/// Returns `Cow::Borrowed(s)` when no escapes match, avoiding a clone for
+/// the common case of plain-text input.
 pub fn strip_ansi(s: &str) -> std::borrow::Cow<'_, str> {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"\x1b\[[0-9;?]*[a-zA-Z]").unwrap());
-    re.replace_all(s, "")
+    let re = RE.get_or_init(|| {
+        Regex::new(r"\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\))").unwrap()
+    });
+    // Overwritten text goes first, while the sequences that prove the
+    // overwrite are still present; the regex then removes what remains
+    // (SGR colors, DEC private modes).
+    match collapse_overwrites(s) {
+        std::borrow::Cow::Borrowed(b) => re.replace_all(b, ""),
+        std::borrow::Cow::Owned(o) => std::borrow::Cow::Owned(re.replace_all(&o, "").into_owned()),
+    }
+}
+
+/// Remove the text a terminal would have overwritten. A progress bar is
+/// written, then repositioned over: a cursor movement (`ESC[…A`–`H`), a
+/// whole-line erase (`ESC[1K`, `ESC[2K`, `ESC[…J`), or a `\r` with more text
+/// after it marks the segment before it as overwritten. A segment ended by
+/// `\n` is a line and stays (`ESC[K`/`ESC[0K` before the `\n` erases to the
+/// right of real text, so the text stays); a newline whose whole segment was
+/// overwritten away is dropped with it. Other sequences pass through for
+/// `strip_ansi`'s regex. Borrowed and unchanged when the text has no escape
+/// and no `\r`.
+fn collapse_overwrites(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains('\x1b') && !s.contains('\r') {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut line = String::new();
+    let mut cleared = false; // the segment lost text to an overwrite
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            0x1b if bytes.get(i + 1) == Some(&b'[') => {
+                let mut j = i + 2;
+                while j < bytes.len() && matches!(bytes[j], b'0'..=b'9' | b';' | b'?') {
+                    j += 1;
+                }
+                let params = &s[i + 2..j];
+                match bytes.get(j) {
+                    // Cursor movement: the segment was repositioned over.
+                    Some(b'A'..=b'H') => {
+                        if !line.is_empty() {
+                            line.clear();
+                            cleared = true;
+                        }
+                    }
+                    // Erase: `K`/`0K` erases right of the text (keep); the
+                    // other erases remove what was written before them.
+                    Some(b'K') if !(params.is_empty() || params == "0") => {
+                        if !line.is_empty() {
+                            line.clear();
+                            cleared = true;
+                        }
+                    }
+                    Some(b'J') => {
+                        if !line.is_empty() {
+                            line.clear();
+                            cleared = true;
+                        }
+                    }
+                    // SGR and the rest: keep for the regex pass.
+                    Some(_) => line.push_str(&s[i..=j]),
+                    None => {}
+                }
+                i = j + 1;
+            }
+            b'\r' => {
+                if bytes.get(i + 1) == Some(&b'\n') {
+                    out.push_str(&line);
+                    out.push('\n');
+                    line.clear();
+                    cleared = false;
+                    i += 2;
+                } else {
+                    if !line.is_empty() {
+                        line.clear();
+                        cleared = true;
+                    }
+                    i += 1;
+                }
+            }
+            b'\n' => {
+                if !(cleared && line.is_empty()) {
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+                line.clear();
+                cleared = false;
+                i += 1;
+            }
+            _ => {
+                let start = i;
+                i += 1;
+                while i < bytes.len() && !matches!(bytes[i], 0x1b | b'\r' | b'\n') {
+                    i += 1;
+                }
+                line.push_str(&s[start..i]);
+            }
+        }
+    }
+    out.push_str(&line);
+    std::borrow::Cow::Owned(out)
 }
 
 /// Collapse runs of consecutive identical lines into the line + a marker
@@ -254,11 +370,80 @@ mod tests {
     }
 
     #[test]
+    fn identical_untimestamped_lines_collapse_at_three_or_more() {
+        // Stack frames of a repeated error: no timestamp, repeats a block
+        // apart.
+        let text = " \u{276f} writeCoverageFile node_modules/x.js:1\nother a\n \u{276f} writeCoverageFile node_modules/x.js:1\nother b\n \u{276f} writeCoverageFile node_modules/x.js:1\n";
+        assert_eq!(
+            collapse_repeated_lines(text),
+            " \u{276f} writeCoverageFile node_modules/x.js:1\n[engraph: + 2 more lines like the one above]\nother a\nother b\n"
+        );
+    }
+
+    #[test]
+    fn two_identical_untimestamped_lines_stay() {
+        // A coincidental repeat of real output; the threshold is 3.
+        let text = "same\nmiddle\nsame\n";
+        let out = collapse_repeated_lines(text);
+        assert_eq!(out, text);
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn blank_lines_never_collapse() {
+        let text = "a\n\n\n\n\nb\n";
+        assert_eq!(collapse_repeated_lines(text), text);
+    }
+
+    #[test]
     fn lines_without_a_timestamp_or_with_different_text_are_unchanged() {
         let text = "same\nsame\n10:00:00 a\n10:00:01 b\n";
         let out = collapse_repeated_lines(text);
         assert_eq!(out, text);
         assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn strip_ansi_drops_text_a_rich_console_overwrote() {
+        // The gradle --console=rich line of plan 01 bug 18: progress bar
+        // fragments positioned over each other with cursor movement, then
+        // the real lines, each ended by an erase-to-end and a newline.
+        let input = "\n\n\x1b[2A\x1b[1m<\x1b[0;1m-------------> 0% CONFIGURING [109ms]\x1b[m\x1b[38D\x1b[1B\x1b[1m> root project\x1b[m\x1b[14D\x1b[1B\x1b[2A\x1b[1m<\x1b[0;1m-------------> 50% EXECUTING\x1b[m\x1b[26D\x1b[1B\x1b[1m> :test\x1b[m\x1b[7D\x1b[1B\x1b[2ADeprecated Gradle features were used in this build.\x1b[0K\nBUILD SUCCESSFUL in 1s\x1b[0K\n9 actionable tasks: 9 up-to-date\x1b[0K\n";
+        assert_eq!(
+            strip_ansi(input),
+            "\n\nDeprecated Gradle features were used in this build.\nBUILD SUCCESSFUL in 1s\n9 actionable tasks: 9 up-to-date\n"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_overwrite_primitives() {
+        // \r with more text after it overwrites the segment before it.
+        assert_eq!(strip_ansi("a\rb\n"), "b\n");
+        // Erase to the end of the line keeps the text before it.
+        assert_eq!(strip_ansi("line\x1b[0K\n"), "line\n");
+        assert_eq!(strip_ansi("line\x1b[K\n"), "line\n");
+        // A whole-line erase removes the text before it.
+        assert_eq!(strip_ansi("x\x1b[2Ky\n"), "y\n");
+        // A cursor movement means the segment before it was overwritten.
+        assert_eq!(strip_ansi("one\x1b[1Atwo\n"), "two\n");
+        // \r\n is a line end, not an overwrite.
+        assert_eq!(strip_ansi("keep\r\nnext\n"), "keep\nnext\n");
+    }
+
+    #[test]
+    fn strip_ansi_keeps_plain_text_borrowed() {
+        let plain = "no escapes here\njust text\n";
+        assert!(matches!(strip_ansi(plain), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn strip_ansi_removes_osc_sequences() {
+        // cargo's Finished line carries an OSC 8 hyperlink when color is
+        // forced: ESC ] 8 ; ; url ESC \ around the text.
+        let s = "\x1b]8;;https://doc.rust-lang.org/cargo\x1b\\Finished\x1b]8;;\x1b\\ `dev` profile";
+        assert_eq!(strip_ansi(s), "Finished `dev` profile");
+        // A BEL-terminated OSC (a terminal title) goes too.
+        assert_eq!(strip_ansi("\x1b]0;title\x07text"), "text");
     }
 
     #[test]
