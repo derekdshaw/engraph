@@ -303,3 +303,71 @@ fn repeated_timestamped_log_lines_are_collapsed_before_the_filter() {
     );
     assert!(text.contains("Tests  5 passed (5)"), "{text}");
 }
+
+#[cfg(unix)]
+#[test]
+fn cat_of_content_is_never_collapsed() {
+    // A file read is content: every line is data, also when lines repeat —
+    // with or without timestamps (a log fixture).
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("cat.db");
+    let fixture = dir.path().join("app.log");
+    let content = "10:00:01 GET /x\n10:00:02 GET /x\n10:00:03 GET /x\nplain\nplain\nplain\n";
+    std::fs::write(&fixture, content).unwrap();
+
+    let out = Command::new(bin())
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("ENGRAPH_DB_PATH", &db)
+        .args(["run", "cat", fixture.to_str().unwrap()])
+        .output()
+        .expect("spawn engraph run");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        content,
+        "cat output must be the file, byte for byte"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn identical_frame_lines_of_an_event_run_are_collapsed() {
+    use std::os::unix::fs::PermissionsExt;
+    // A test runner (an event stream) that repeats the same stack frame
+    // lines, a block apart, as a repeated error does.
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("frames.db");
+    let fake = dir.path().join("pytest");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         for i in 1 2 3; do\n\
+           echo 'Error: coverage write failed'\n\
+           echo ' at writeCoverageFile node_modules/x.js:1'\n\
+           echo ' at TestRunner.onAfterRunFiles node_modules/y.js:2'\n\
+         done\n\
+         echo '3 failed in 1.2s'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .env_clear()
+        .env("PATH", path)
+        .env("ENGRAPH_DB_PATH", &db)
+        .args(["run", "pytest"])
+        .output()
+        .expect("spawn engraph run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(text.matches("writeCoverageFile").count(), 1, "{text}");
+    assert!(
+        text.contains("[engraph: + 2 more lines like the one above]"),
+        "{text}"
+    );
+    assert!(text.contains("3 failed in 1.2s"), "{text}");
+}

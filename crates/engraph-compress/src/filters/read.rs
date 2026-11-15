@@ -13,7 +13,7 @@ pub fn cat(ctx: &FilterCtx<'_>) -> FilterOutput {
     let raw = util::combine(ctx.stdout, ctx.stderr);
     let path = extract_file_path(ctx.args);
     let text = apply_language_strip(&raw, path.as_deref());
-    let text = util::dedup_consecutive(&text);
+    let text = collapse_blank_runs(&text);
     let text = window(&text, CAT_HEAD_LINES, CAT_TAIL_LINES);
     let text = fallback_if_emptied(&raw, text);
     FilterOutput {
@@ -24,11 +24,11 @@ pub fn cat(ctx: &FilterCtx<'_>) -> FilterOutput {
 
 pub fn head_tail(ctx: &FilterCtx<'_>) -> FilterOutput {
     // The user already chose a window via `head -n` / `tail -n`. Don't
-    // re-window; just strip comments and dedup blanks.
+    // re-window; just strip comments and collapse blank runs.
     let raw = util::combine(ctx.stdout, ctx.stderr);
     let path = extract_file_path(ctx.args);
     let text = apply_language_strip(&raw, path.as_deref());
-    let text = util::dedup_consecutive(&text);
+    let text = collapse_blank_runs(&text);
     let text = fallback_if_emptied(&raw, text);
     FilterOutput {
         text,
@@ -69,20 +69,29 @@ fn comment_markers_for(ext: &str) -> Option<&'static [&'static str]> {
 
 fn strip_line_comments(text: &str, markers: &[&str]) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut prev_blank = false;
     for line in text.lines() {
-        let trimmed = line.trim_start();
-        if markers.iter().any(|m| trimmed.starts_with(m)) {
+        if markers.iter().any(|m| line.trim_start().starts_with(m)) {
             continue;
         }
-        if trimmed.is_empty() {
-            if prev_blank {
-                continue;
-            }
-            prev_blank = true;
-        } else {
-            prev_blank = false;
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Keep at most one blank line in a row, for every file type. This is the
+/// only folding a read does: a file read is content, so identical
+/// non-blank lines stay — a repeated data row is data, and a marker in its
+/// place would be text that is not in the file.
+fn collapse_blank_runs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut prev_blank = false;
+    for line in text.lines() {
+        let blank = line.trim().is_empty();
+        if blank && prev_blank {
+            continue;
         }
+        prev_blank = blank;
         out.push_str(line);
         out.push('\n');
     }

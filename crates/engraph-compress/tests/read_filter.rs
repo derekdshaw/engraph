@@ -14,7 +14,8 @@ fn ctx<'a>(args: &'a [String], stdout: &'a str) -> FilterCtx<'a> {
 }
 
 fn run(cmd: &str, args: &[String], stdout: &str) -> (String, &'static str) {
-    let (filter, id) = filters::pick(cmd, args);
+    let picked = filters::pick(cmd, args);
+    let (filter, id) = (picked.run, picked.id);
     let out = filter(&ctx(args, stdout));
     assert_eq!(out.filter_id, id, "filter_id round-trip");
     (out.text, id)
@@ -80,6 +81,32 @@ fn cat_collapses_blank_lines() {
         !text.contains("\n\n\n"),
         "multi-blank not collapsed: {text:?}"
     );
+}
+
+#[test]
+fn cat_collapses_blank_lines_in_any_extension() {
+    // The blank-run collapse is not tied to comment stripping: a .txt (no
+    // comment markers) gets it too, as one blank line, with no marker.
+    let content = "a\n\n\n\n\nb\n";
+    let args = vec!["notes.txt".to_string()];
+    let (text, _) = run("cat", &args, content);
+    assert_eq!(text, "a\n\nb\n");
+}
+
+#[test]
+fn cat_keeps_repeated_data_rows() {
+    // A file read is content: identical consecutive rows are data, not a
+    // run to fold, and no marker stands in for them.
+    let content = "row\nrow\nrow\nend\n";
+    let args = vec!["data.csv".to_string()];
+    let (text, _) = run("cat", &args, content);
+    assert_eq!(text, content);
+    let (text, _) = run(
+        "head",
+        &["-n".to_string(), "4".to_string(), "data.csv".to_string()],
+        content,
+    );
+    assert_eq!(text, content);
 }
 
 #[test]
