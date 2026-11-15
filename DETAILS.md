@@ -1519,7 +1519,7 @@ SCIP run finishes; it would not replace SCIP's call edges.
 The crate depends on `scip = "0.7"` and `protobuf = "3.7"` (rust-protobuf;
 scip ships pre-generated message code so no `protoc` is needed at build
 time). The bump from scip 0.5 → 0.7 raised the workspace MSRV from 1.75
-to 1.95. The 4.x line of `protobuf` on crates.io is prerelease-only
+to 1.95; it is now 1.100, the toolchain CI builds and lints with. The 4.x line of `protobuf` on crates.io is prerelease-only
 (`4.x.y-release` suffix; cargo's plain-version constraints exclude
 prereleases by default) and the upstream API is a partial rewrite — we
 stay on the 3.x stable line.
