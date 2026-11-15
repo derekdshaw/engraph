@@ -938,22 +938,51 @@ fn without_generics(type_name: &str) -> &str {
         .trim()
 }
 
-/// Last-resort name: the last descriptor token with its trailing `().`
-/// punctuation removed. Keeps `#` and `!`, since it cannot tell a suffix from
-/// a name character without the grammar.
+/// Last-resort name for an id the SCIP grammar rejects: the name of its last
+/// descriptor, found without the grammar. The descriptors start after the
+/// fourth space-separated field (scheme, package manager, package name,
+/// package version), not at the last space: only those four fields escape a
+/// literal space as two spaces (`accept_space_escaped_identifier`), and a
+/// descriptor can hold a single one (``impl#[`Result<T, E>`]unwrap().``).
+/// Then the trailing suffix punctuation goes (`().`, `#`, `!`, `:`), and the
+/// text after the last descriptor separator is the name; an escaped name
+/// (`` `weird.name` ``) is taken whole.
 fn fallback_display_name_textual(moniker: &str) -> String {
-    moniker
-        .rsplit_once(' ')
-        .map(|(_, last)| {
-            last.trim_end_matches('.')
-                .trim_end_matches(')')
-                .trim_end_matches('(')
-                .rsplit('/')
-                .next()
-                .unwrap_or(last)
-                .to_string()
-        })
-        .unwrap_or_else(|| moniker.to_string())
+    let trimmed = after_package_fields(moniker).trim_end_matches(['.', ')', '(', '#', '!', ':']);
+    if let Some((_, name)) = trimmed
+        .strip_suffix('`')
+        .and_then(|inner| inner.rsplit_once('`'))
+    {
+        return name.to_string();
+    }
+    trimmed
+        .rsplit(['/', '#', ']', '(', ')', '.', '!', ':'])
+        .next()
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+/// The text after the four space-separated fields of a SCIP id, where two
+/// spaces together inside a field are one literal space. An id with fewer
+/// fields (`local 5`) gives its last field.
+fn after_package_fields(moniker: &str) -> &str {
+    let bytes = moniker.as_bytes();
+    let (mut fields, mut i) = (0usize, 0usize);
+    while i < bytes.len() && fields < 4 {
+        if bytes[i] == b' ' {
+            if bytes.get(i + 1) == Some(&b' ') {
+                i += 2;
+                continue;
+            }
+            fields += 1;
+        }
+        i += 1;
+    }
+    if fields < 4 {
+        moniker.rsplit(' ').next().unwrap_or(moniker)
+    } else {
+        &moniker[i..]
+    }
 }
 
 /// RAII transaction guard mirroring engraph-ingest's TxGuard: rolls back on
@@ -1176,6 +1205,52 @@ mod tests {
         assert_eq!(
             fallback_display_name("rust-analyzer cargo lib 0.1.0 mod/foo()"),
             "foo"
+        );
+    }
+
+    #[test]
+    fn textual_fallback_name_is_the_last_descriptor_name() {
+        // The descriptors follow four space-separated fields; a descriptor can
+        // hold a space (a generic type), so the split must count fields, not
+        // take the last space.
+        assert_eq!(
+            fallback_display_name_textual("x cargo core 1.0 result/impl#[`Result<T, E>`]unwrap()."),
+            "unwrap"
+        );
+        assert_eq!(
+            fallback_display_name_textual("x cargo alloc 1.0 vec/impl#[`Vec<T, A>`]push()."),
+            "push"
+        );
+        assert_eq!(
+            fallback_display_name_textual("x cargo fd 0.1.0 config/Config#full_path_base()."),
+            "full_path_base"
+        );
+        // Two spaces inside one of the four fields are one literal space.
+        assert_eq!(
+            fallback_display_name_textual("x cargo my  pkg 1.0 mod/foo()."),
+            "foo"
+        );
+        // An escaped last name keeps its dots; a type keeps nothing of `#`.
+        assert_eq!(
+            fallback_display_name_textual("x cargo lib 1.0 `weird.name`()."),
+            "weird.name"
+        );
+        assert_eq!(
+            fallback_display_name_textual("x cargo fd 0.1.0 config/Config#"),
+            "Config"
+        );
+        assert_eq!(fallback_display_name_textual("local 5"), "5");
+    }
+
+    #[test]
+    fn a_rejected_id_with_a_generic_type_gets_the_method_name() {
+        // No trailing `.` after `()`: the SCIP grammar rejects the id, so the
+        // name comes from the textual fallback.
+        assert_eq!(
+            fallback_display_name(
+                "rust-analyzer cargo core 1.0 result/impl#[`Result<T, E>`]unwrap()"
+            ),
+            "unwrap"
         );
     }
 
