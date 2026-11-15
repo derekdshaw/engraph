@@ -1266,13 +1266,6 @@ pub(crate) fn git_current_toplevel(start: &std::path::Path) -> Option<std::path:
     Some(std::path::PathBuf::from(top))
 }
 
-/// Spawn a wrapped command through `tokio::process` and return its combined
-/// output. Inherits stdin so interactive commands work (`git log -p` pager,
-/// `cargo test -- --interactive`, anything reading from a TTY). Reads stdout
-/// and stderr concurrently so neither can deadlock by filling its pipe buffer
-/// while we wait on the other. Terminal SIGINT/SIGTERM still reach the child
-/// directly via the shared process group; the parent ignores them so it stays
-/// alive long enough to drain the child's last output and record telemetry.
 /// Keep the original Cow when nothing collapsed (it may still borrow the
 /// raw output); take the new text only when the collapse produced one.
 fn collapse_cow(text: std::borrow::Cow<'_, str>) -> std::borrow::Cow<'_, str> {
@@ -1282,6 +1275,13 @@ fn collapse_cow(text: std::borrow::Cow<'_, str>) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Spawn a wrapped command through `tokio::process` and return its combined
+/// output. Inherits stdin so interactive commands work (`git log -p` pager,
+/// `cargo test -- --interactive`, anything reading from a TTY). Reads stdout
+/// and stderr concurrently so neither can deadlock by filling its pipe buffer
+/// while we wait on the other. Terminal SIGINT/SIGTERM still reach the child
+/// directly via the shared process group; the parent ignores them so it stays
+/// alive long enough to drain the child's last output and record telemetry.
 async fn run_wrapped_command(command: &str, args: &[String]) -> Result<std::process::Output> {
     // Best-effort: install no-op handlers so the parent doesn't die on Ctrl-C
     // before the child finishes draining. On platforms where signal registration
