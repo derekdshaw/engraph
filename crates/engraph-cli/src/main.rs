@@ -111,15 +111,17 @@ async fn main() -> Result<()> {
             // line prefixes that a leading color code defeats. Input tokens
             // count the raw bytes — the escapes are what Claude would have
             // received.
+            let picked = filters::pick(&command, &args);
             let stdout = filters::util::strip_ansi(&raw_stdout);
             let stderr = filters::util::strip_ansi(&raw_stderr);
-            // Then collapse log lines that repeat with only their timestamp
-            // changed (application code logging in every test): the first
-            // stays, the rest become a count. No filter sees the repeats.
-            let stdout = filters::util::collapse_repeated_lines(&stdout);
-            let stderr = filters::util::collapse_repeated_lines(&stderr);
-            let (filter_fn, filter_id) = filters::pick(&command, &args);
-            let result = filter_fn(&FilterCtx {
+            // An event stream (a test, build, lint, or log run) collapses
+            // repeated log lines; content (a file read, a diff, a search)
+            // is data and passes untouched.
+            let (stdout, stderr) = match picked.kind {
+                filters::OutputKind::Event => (collapse_cow(stdout), collapse_cow(stderr)),
+                filters::OutputKind::Content => (stdout, stderr),
+            };
+            let result = (picked.run)(&FilterCtx {
                 args: &args,
                 stdout: &stdout,
                 stderr: &stderr,
@@ -137,7 +139,7 @@ async fn main() -> Result<()> {
                     session_id: session_id.as_deref(),
                     kind: EventKind::WrappedCmd,
                     feature: "output_filter",
-                    filter_id: Some(filter_id),
+                    filter_id: Some(picked.id),
                     input_tokens,
                     output_tokens,
                     latency_ms: elapsed,
@@ -1271,6 +1273,15 @@ pub(crate) fn git_current_toplevel(start: &std::path::Path) -> Option<std::path:
 /// while we wait on the other. Terminal SIGINT/SIGTERM still reach the child
 /// directly via the shared process group; the parent ignores them so it stays
 /// alive long enough to drain the child's last output and record telemetry.
+/// Keep the original Cow when nothing collapsed (it may still borrow the
+/// raw output); take the new text only when the collapse produced one.
+fn collapse_cow(text: std::borrow::Cow<'_, str>) -> std::borrow::Cow<'_, str> {
+    match filters::util::collapse_repeated_lines(&text) {
+        std::borrow::Cow::Borrowed(_) => text,
+        std::borrow::Cow::Owned(o) => std::borrow::Cow::Owned(o),
+    }
+}
+
 async fn run_wrapped_command(command: &str, args: &[String]) -> Result<std::process::Output> {
     // Best-effort: install no-op handlers so the parent doesn't die on Ctrl-C
     // before the child finishes draining. On platforms where signal registration

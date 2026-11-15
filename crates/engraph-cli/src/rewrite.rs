@@ -74,7 +74,7 @@ fn classify_for_wrap(segment: &str) -> Option<(Vec<String>, Vec<String>, &'stati
     if classify.is_empty() {
         return None;
     }
-    let (_filter_fn, filter_id) = filters::pick(classify[0].as_str(), &classify[1..]);
+    let filter_id = filters::pick(classify[0].as_str(), &classify[1..]).id;
     if filter_id == "generic" {
         return None;
     }

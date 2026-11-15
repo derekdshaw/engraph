@@ -39,7 +39,48 @@ pub struct FilterOutput {
 
 pub type FilterFn = fn(&FilterCtx) -> FilterOutput;
 
-pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
+/// What a command's output is. Decides the generic passes `engraph run`
+/// applies before the filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputKind {
+    /// A test, build, lint, install, or log run. Lines are events: an
+    /// identical repeated line is noise, as is one that repeats with only
+    /// its timestamp changed.
+    Event,
+    /// A file read, a diff, search matches, a listing, a table. Every line
+    /// is data; nothing is collapsed. The safe default: an unknown command
+    /// is content.
+    Content,
+}
+
+/// The filter `pick` chose: the function, its telemetry id, and what kind
+/// of output it reads. The kind is declared beside the command it
+/// classifies, so a new arm cannot be added without the decision.
+#[derive(Debug, Clone, Copy)]
+pub struct Filter {
+    pub id: &'static str,
+    pub kind: OutputKind,
+    pub run: FilterFn,
+}
+
+impl Filter {
+    const fn event(id: &'static str, run: FilterFn) -> Self {
+        Self {
+            id,
+            kind: OutputKind::Event,
+            run,
+        }
+    }
+    const fn content(id: &'static str, run: FilterFn) -> Self {
+        Self {
+            id,
+            kind: OutputKind::Content,
+            run,
+        }
+    }
+}
+
+pub fn pick(cmd: &str, args: &[String]) -> Filter {
     let (cmd, args) = strip_launcher(command_basename(cmd), args);
     // `git`'s subcommand can be preceded by global options (`-C <path>`,
     // `-c <k=v>`, `--git-dir[=...]`, `--work-tree[=...]`). Skip them so we
@@ -54,94 +95,100 @@ pub fn pick(cmd: &str, args: &[String]) -> (FilterFn, &'static str) {
     let second = args.get(1).map(|s| s.as_str()).unwrap_or("");
     match (cmd, first) {
         // git
-        ("git", "log") => (git::log, "git_log"),
-        ("git", "diff") => (git::diff, "git_diff"),
-        ("git", "status") => (git::status, "git_status"),
-        ("git", "show") => (git::show, "git_show"),
-        ("git", "push") => (git::push, "git_push"),
-        ("git", "pull") => (git::pull, "git_pull"),
-        ("git", "fetch") => (git::fetch, "git_fetch"),
-        ("git", "commit") => (git::commit, "git_commit"),
+        ("git", "log") => Filter::content("git_log", git::log),
+        ("git", "diff") => Filter::content("git_diff", git::diff),
+        ("git", "status") => Filter::content("git_status", git::status),
+        ("git", "show") => Filter::content("git_show", git::show),
+        ("git", "push") => Filter::content("git_push", git::push),
+        ("git", "pull") => Filter::content("git_pull", git::pull),
+        ("git", "fetch") => Filter::content("git_fetch", git::fetch),
+        ("git", "commit") => Filter::content("git_commit", git::commit),
         // (`git add` is silent on success — wrapping it only adds latency.)
 
         // cargo / rust
-        ("cargo", "test") => (cargo::test, "cargo_test"),
-        ("cargo", "build") => (cargo::build, "cargo_build"),
-        ("cargo", "check") => (cargo::check, "cargo_check"),
-        ("cargo", "clippy") => (cargo::clippy, "cargo_clippy"),
-        ("cargo", "doc") => (cargo::doc, "cargo_doc"),
-        ("cargo", "bench") => (cargo::bench, "cargo_bench"),
-        ("cargo", "audit") => (cargo::audit, "cargo_audit"),
-        ("cargo", "tree") => (cargo::tree_cmd, "cargo_tree"),
+        ("cargo", "test") => Filter::event("cargo_test", cargo::test),
+        ("cargo", "build") => Filter::event("cargo_build", cargo::build),
+        ("cargo", "check") => Filter::event("cargo_check", cargo::check),
+        ("cargo", "clippy") => Filter::event("cargo_clippy", cargo::clippy),
+        ("cargo", "doc") => Filter::event("cargo_doc", cargo::doc),
+        ("cargo", "bench") => Filter::event("cargo_bench", cargo::bench),
+        ("cargo", "audit") => Filter::event("cargo_audit", cargo::audit),
+        ("cargo", "tree") => Filter::content("cargo_tree", cargo::tree_cmd),
 
         // npm
-        ("npm", "install" | "i" | "ci") => (npm::install, "npm_install"),
+        ("npm", "install" | "i" | "ci") => Filter::event("npm_install", npm::install),
         // pnpm and yarn run package.json scripts with npm-shaped output;
         // `yarn t` is a user script, not a test alias, so it stays generic.
-        ("npm" | "pnpm", "test" | "t") | ("yarn", "test") => (npm::test, "npm_test"),
+        ("npm" | "pnpm", "test" | "t") | ("yarn", "test") => Filter::event("npm_test", npm::test),
 
         // Python
-        ("pytest", _) => (python::pytest, "pytest"),
-        ("pip", "install") => (python::pip_install, "pip_install"),
-        ("pip", "list") => (python::pip_list, "pip_list"),
-        ("uv", "install" | "sync" | "add") => (python::uv, "uv"),
+        ("pytest", _) => Filter::event("pytest", python::pytest),
+        ("pip", "install") => Filter::event("pip_install", python::pip_install),
+        ("pip", "list") => Filter::content("pip_list", python::pip_list),
+        ("uv", "install" | "sync" | "add") => Filter::event("uv", python::uv),
 
         // Lint family (shared shape)
-        ("ruff", _) => (lint::ruff, "ruff"),
-        ("mypy", _) => (lint::mypy, "mypy"),
-        ("eslint", _) => (lint::eslint, "eslint"),
-        ("tsc", _) => (lint::tsc, "tsc"),
+        ("ruff", _) => Filter::event("ruff", lint::ruff),
+        ("mypy", _) => Filter::event("mypy", lint::mypy),
+        ("eslint", _) => Filter::event("eslint", lint::eslint),
+        ("tsc", _) => Filter::event("tsc", lint::tsc),
 
         // Go
-        ("go", "test") => (go::test, "go_test"),
-        ("go", "build") => (go::build, "go_build"),
-        ("go", "vet") => (go::vet, "go_vet"),
-        ("go", "mod") if second == "tidy" => (go::mod_tidy, "go_mod_tidy"),
-        ("go", "mod") if second == "download" => (go::mod_download, "go_mod_download"),
+        ("go", "test") => Filter::event("go_test", go::test),
+        ("go", "build") => Filter::event("go_build", go::build),
+        ("go", "vet") => Filter::event("go_vet", go::vet),
+        ("go", "mod") if second == "tidy" => Filter::event("go_mod_tidy", go::mod_tidy),
+        ("go", "mod") if second == "download" => Filter::event("go_mod_download", go::mod_download),
 
         // Bazel (`bazelisk` is the common version-pinning wrapper)
-        ("bazel" | "bazelisk", "build") => (bazel::build, "bazel_build"),
-        ("bazel" | "bazelisk", "test") => (bazel::test, "bazel_test"),
-        ("bazel" | "bazelisk", "query" | "cquery" | "aquery") => (bazel::query, "bazel_query"),
+        ("bazel" | "bazelisk", "build") => Filter::event("bazel_build", bazel::build),
+        ("bazel" | "bazelisk", "test") => Filter::event("bazel_test", bazel::test),
+        ("bazel" | "bazelisk", "query" | "cquery" | "aquery") => {
+            Filter::content("bazel_query", bazel::query)
+        }
 
         // JS/TS extras
-        ("yarn", "install" | "add") => (js::yarn_install, "yarn_install"),
-        ("pnpm", "install" | "add" | "i") => (js::pnpm_install, "pnpm_install"),
-        ("jest" | "vitest" | "mocha", _) => (js::js_test, "js_test"),
+        ("yarn", "install" | "add") => Filter::event("yarn_install", js::yarn_install),
+        ("pnpm", "install" | "add" | "i") => Filter::event("pnpm_install", js::pnpm_install),
+        ("jest" | "vitest" | "mocha", _) => Filter::event("js_test", js::js_test),
 
         // Containers
-        ("docker", "ps" | "images") => (docker::ps, "docker_ps"),
-        ("docker", "logs") => (docker::logs, "docker_logs"),
+        ("docker", "ps" | "images") => Filter::content("docker_ps", docker::ps),
+        ("docker", "logs") => Filter::event("docker_logs", docker::logs),
         ("docker", "compose") if matches!(second, "ps" | "logs") => {
-            (docker::compose, "docker_compose")
+            Filter::content("docker_compose", docker::compose)
         }
-        ("kubectl", "get") => (kubectl::get, "kubectl_get"),
-        ("kubectl", "logs") => (kubectl::logs, "kubectl_logs"),
-        ("kubectl", "describe") => (kubectl::describe, "kubectl_describe"),
+        ("kubectl", "get") => Filter::content("kubectl_get", kubectl::get),
+        ("kubectl", "logs") => Filter::event("kubectl_logs", kubectl::logs),
+        ("kubectl", "describe") => Filter::content("kubectl_describe", kubectl::describe),
 
         // gh
-        ("gh", "pr" | "issue" | "repo") if matches!(second, "list") => (gh::list, "gh_list"),
-        ("gh", "pr" | "issue" | "repo") if matches!(second, "view") => (gh::view, "gh_view"),
+        ("gh", "pr" | "issue" | "repo") if matches!(second, "list") => {
+            Filter::content("gh_list", gh::list)
+        }
+        ("gh", "pr" | "issue" | "repo") if matches!(second, "view") => {
+            Filter::content("gh_view", gh::view)
+        }
 
         // Build systems
-        ("make", _) => (make::make, "make"),
-        ("mvn", _) => (jvm::mvn, "mvn"),
-        ("gradle" | "gradlew", _) => (jvm::gradle, "gradle"),
+        ("make", _) => Filter::event("make", make::make),
+        ("mvn", _) => Filter::event("mvn", jvm::mvn),
+        ("gradle" | "gradlew", _) => Filter::event("gradle", jvm::gradle),
 
         // Search
-        ("rg" | "grep", _) => (search::rg, "rg"),
+        ("rg" | "grep", _) => Filter::content("rg", search::rg),
 
         // Listings / trees
-        ("tree", _) => (tree::tree, "tree"),
-        ("fd", _) => (tree::fd, "fd"),
-        ("find", _) => (tree::find_cmd, "find"),
-        ("ls", _) => (tree::ls, "ls"),
+        ("tree", _) => Filter::content("tree", tree::tree),
+        ("fd", _) => Filter::content("fd", tree::fd),
+        ("find", _) => Filter::content("find", tree::find_cmd),
+        ("ls", _) => Filter::content("ls", tree::ls),
 
         // File reads: whole-file (cat/bat/less) and user-windowed (head/tail).
-        ("cat" | "bat" | "less", _) => (read::cat, "read_cat"),
-        ("head" | "tail", _) => (read::head_tail, "read_head_tail"),
+        ("cat" | "bat" | "less", _) => Filter::content("read_cat", read::cat),
+        ("head" | "tail", _) => Filter::content("read_head_tail", read::head_tail),
 
-        _ => (generic::filter, "generic"),
+        _ => Filter::content("generic", generic::filter),
     }
 }
 
@@ -211,70 +258,87 @@ mod tests {
 
     #[test]
     fn git_global_opts_classify_to_subcommand() {
-        assert_eq!(pick("git", &argv(&["-C", "/repo", "log"])).1, "git_log");
+        assert_eq!(pick("git", &argv(&["-C", "/repo", "log"])).id, "git_log");
         assert_eq!(
-            pick("git", &argv(&["-c", "color.ui=always", "log"])).1,
+            pick("git", &argv(&["-c", "color.ui=always", "log"])).id,
             "git_log"
         );
-        assert_eq!(pick("git", &argv(&["-C", "/repo", "show"])).1, "git_show");
+        assert_eq!(pick("git", &argv(&["-C", "/repo", "show"])).id, "git_show");
         assert_eq!(
-            pick("git", &argv(&["--git-dir=/r/.git", "diff"])).1,
+            pick("git", &argv(&["--git-dir=/r/.git", "diff"])).id,
             "git_diff"
         );
         assert_eq!(
-            pick("git", &argv(&["-C", "/repo", "status"])).1,
+            pick("git", &argv(&["-C", "/repo", "status"])).id,
             "git_status"
         );
     }
 
     #[test]
     fn git_without_global_opts_still_classifies() {
-        assert_eq!(pick("git", &argv(&["log", "--oneline"])).1, "git_log");
+        assert_eq!(pick("git", &argv(&["log", "--oneline"])).id, "git_log");
     }
 
     #[test]
     fn gradlew_classifies_to_gradle() {
-        assert_eq!(pick("gradlew", &argv(&["test"])).1, "gradle");
-        assert_eq!(pick("./gradlew", &argv(&["test"])).1, "gradle");
+        assert_eq!(pick("gradlew", &argv(&["test"])).id, "gradle");
+        assert_eq!(pick("./gradlew", &argv(&["test"])).id, "gradle");
     }
 
     #[test]
     fn launcher_prefix_classifies_to_launched_command() {
-        assert_eq!(pick("uv", &argv(&["run", "pytest"])).1, "pytest");
-        assert_eq!(pick("python", &argv(&["-m", "pytest"])).1, "pytest");
-        assert_eq!(pick("python3", &argv(&["-m", "pytest"])).1, "pytest");
-        assert_eq!(pick("npx", &argv(&["tsc", "--noEmit"])).1, "tsc");
-        assert_eq!(pick("npx", &argv(&["vitest", "run"])).1, "js_test");
-        assert_eq!(pick("pnpm", &argv(&["exec", "vitest", "run"])).1, "js_test");
+        assert_eq!(pick("uv", &argv(&["run", "pytest"])).id, "pytest");
+        assert_eq!(pick("python", &argv(&["-m", "pytest"])).id, "pytest");
+        assert_eq!(pick("python3", &argv(&["-m", "pytest"])).id, "pytest");
+        assert_eq!(pick("npx", &argv(&["tsc", "--noEmit"])).id, "tsc");
+        assert_eq!(pick("npx", &argv(&["vitest", "run"])).id, "js_test");
+        assert_eq!(
+            pick("pnpm", &argv(&["exec", "vitest", "run"])).id,
+            "js_test"
+        );
     }
 
     #[test]
     fn bare_or_flagged_launcher_stays_generic() {
-        assert_eq!(pick("npx", &argv(&[])).1, "generic");
-        assert_eq!(pick("uv", &argv(&["run"])).1, "generic");
-        assert_eq!(pick("python", &argv(&["-m"])).1, "generic");
-        assert_eq!(pick("npx", &argv(&["--yes", "vitest"])).1, "generic");
+        assert_eq!(pick("npx", &argv(&[])).id, "generic");
+        assert_eq!(pick("uv", &argv(&["run"])).id, "generic");
+        assert_eq!(pick("python", &argv(&["-m"])).id, "generic");
+        assert_eq!(pick("npx", &argv(&["--yes", "vitest"])).id, "generic");
     }
 
     #[test]
     fn pnpm_and_yarn_test_use_npm_test_filter() {
-        assert_eq!(pick("pnpm", &argv(&["test"])).1, "npm_test");
-        assert_eq!(pick("pnpm", &argv(&["t"])).1, "npm_test");
-        assert_eq!(pick("yarn", &argv(&["test"])).1, "npm_test");
+        assert_eq!(pick("pnpm", &argv(&["test"])).id, "npm_test");
+        assert_eq!(pick("pnpm", &argv(&["t"])).id, "npm_test");
+        assert_eq!(pick("yarn", &argv(&["test"])).id, "npm_test");
     }
 
     #[test]
     fn path_like_command_word_classifies_by_basename() {
-        assert_eq!(pick("/usr/bin/git", &argv(&["log"])).1, "git_log");
+        assert_eq!(pick("/usr/bin/git", &argv(&["log"])).id, "git_log");
         assert_eq!(
-            pick("./node_modules/.bin/tsc", &argv(&["--noEmit"])).1,
+            pick("./node_modules/.bin/tsc", &argv(&["--noEmit"])).id,
             "tsc"
+        );
+    }
+
+    #[test]
+    fn pick_declares_output_kinds() {
+        assert_eq!(pick("pytest", &argv(&[])).kind, OutputKind::Event);
+        assert_eq!(pick("gradle", &argv(&["test"])).kind, OutputKind::Event);
+        assert_eq!(pick("cat", &argv(&["x"])).kind, OutputKind::Content);
+        assert_eq!(pick("git", &argv(&["diff"])).kind, OutputKind::Content);
+        assert_eq!(pick("rg", &argv(&["foo"])).kind, OutputKind::Content);
+        // An unknown command is content: it can never be collapsed.
+        assert_eq!(
+            pick("totally-made-up", &argv(&[])).kind,
+            OutputKind::Content
         );
     }
 
     #[test]
     fn git_trailing_value_flag_does_not_panic() {
         // Malformed `git -C` (no value, no subcommand) must classify, not panic.
-        assert_eq!(pick("git", &argv(&["-C"])).1, "generic");
+        assert_eq!(pick("git", &argv(&["-C"])).id, "generic");
     }
 }

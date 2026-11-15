@@ -31,7 +31,7 @@ fn git_log_under_quarter() {
         ));
     }
     let args = vec!["log".to_string()];
-    let (filter, _) = filters::pick("git", &args);
+    let filter = filters::pick("git", &args).run;
     let out = filter(&ctx(&args, &input));
     let r = ratio(&input, &out.text);
     assert!(r < 0.3, "git_log ratio {r:.3} >= 0.3");
@@ -48,7 +48,7 @@ fn cargo_test_drops_passes() {
     }
     stdout.push_str("\ntest result: ok. 100 passed; 0 failed; 0 ignored\n");
     let args = vec!["test".to_string()];
-    let (filter, _) = filters::pick("cargo", &args);
+    let filter = filters::pick("cargo", &args).run;
     let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.2, "cargo_test ratio {r:.3} >= 0.2");
@@ -64,7 +64,7 @@ fn cargo_build_drops_compiling_lines() {
     stderr.push_str("warning: unused variable: `x`\n   --> src/lib.rs:10:9\n");
     stderr.push_str("    Finished `dev` profile [unoptimized] target(s) in 5.43s\n");
     let args = vec!["build".to_string()];
-    let (filter, _) = filters::pick("cargo", &args);
+    let filter = filters::pick("cargo", &args).run;
     let out = filter(&FilterCtx {
         args: &args,
         stdout: "",
@@ -82,7 +82,7 @@ fn npm_install_keeps_summary() {
     let stdout = "\
 added 1 package\nadded 1 package\nadded 1 package\nadded 1 package\nadded 1 package\nadded 1 package\nadded 1 package\nadded 1 package\nadded 1 package\nadded 1 package\nadded 12 packages in 4s\n\nfound 0 vulnerabilities\n";
     let args = vec!["install".to_string()];
-    let (filter, _) = filters::pick("npm", &args);
+    let filter = filters::pick("npm", &args).run;
     let out = filter(&ctx(&args, stdout));
     assert!(out.text.contains("added 12 packages in 4s"));
     assert!(out.text.contains("0 vulnerabilities"));
@@ -104,7 +104,7 @@ fn git_log_graph_handles_decoration() {
 |       Add tests
 ";
     let args = vec!["log".to_string(), "--graph".to_string()];
-    let (filter, _) = filters::pick("git", &args);
+    let filter = filters::pick("git", &args).run;
     let out = filter(&ctx(&args, input));
     assert!(
         out.text.contains("aaaaaaa Fix something"),
@@ -122,7 +122,7 @@ fn git_diff_stat_passes_through() {
  2 files changed, 3 insertions(+), 3 deletions(-)
 ";
     let args = vec!["diff".to_string(), "--stat".to_string()];
-    let (filter, _) = filters::pick("git", &args);
+    let filter = filters::pick("git", &args).run;
     let out = filter(&ctx(&args, input));
     assert!(out.text.contains("foo.rs"));
     assert!(out.text.contains("2 files changed"));
@@ -148,7 +148,7 @@ panicked at d
 test result: FAILED. 3 passed; 2 failed; 0 ignored
 ";
     let args = vec!["test".to_string()];
-    let (filter, _) = filters::pick("cargo", &args);
+    let filter = filters::pick("cargo", &args).run;
     let out = filter(&ctx(&args, stdout));
     assert!(
         out.text.contains("failed 2,"),
@@ -173,7 +173,7 @@ fn tree_ratio_below_half() {
         }
     }
     let args = vec![];
-    let (filter, _) = filters::pick("tree", &args);
+    let filter = filters::pick("tree", &args).run;
     let out = filter(&ctx(&args, &input));
     let r = ratio(&input, &out.text);
     assert!(r < 0.5, "tree ratio {r:.3} >= 0.5");
@@ -183,7 +183,7 @@ fn tree_ratio_below_half() {
 fn fd_truncates_long_lists() {
     let input: String = (0..400).map(|i| format!("src/path/file{i}.rs\n")).collect();
     let args = vec![];
-    let (filter, _) = filters::pick("fd", &args);
+    let filter = filters::pick("fd", &args).run;
     let out = filter(&ctx(&args, &input));
     let r = ratio(&input, &out.text);
     assert!(r < 0.6, "fd ratio {r:.3} >= 0.6");
@@ -199,7 +199,7 @@ fn npm_install_ratio_under_half() {
     input.push_str("added 200 packages in 12s\n");
     input.push_str("found 0 vulnerabilities\n");
     let args = vec!["install".to_string()];
-    let (filter, _) = filters::pick("npm", &args);
+    let filter = filters::pick("npm", &args).run;
     let out = filter(&ctx(&args, &input));
     let r = ratio(&input, &out.text);
     assert!(r < 0.2, "npm_install ratio {r:.3} >= 0.2");
@@ -217,7 +217,7 @@ fn pytest_drops_pass_progress() {
     }
     stdout.push_str("=================== 200 passed in 1.23s =====================\n");
     let args = vec!["-q".to_string()];
-    let (filter, _) = filters::pick("pytest", &args);
+    let filter = filters::pick("pytest", &args).run;
     let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.3, "pytest ratio {r:.3} >= 0.3");
@@ -236,7 +236,7 @@ fn pip_install_drops_collecting_lines() {
     stdout.push_str("Installing collected packages: package-0, package-1\n");
     stdout.push_str("Successfully installed package-0-1.0.0 package-1-1.0.0\n");
     let args = vec!["install".to_string()];
-    let (filter, _) = filters::pick("pip", &args);
+    let filter = filters::pick("pip", &args).run;
     let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.2, "pip_install ratio {r:.3} >= 0.2");
@@ -251,7 +251,7 @@ fn go_test_caps_summary() {
     }
     stdout.push_str("PASS\nok  \texample.com/m\t0.05s\n");
     let args = vec!["test".to_string()];
-    let (filter, _) = filters::pick("go", &args);
+    let filter = filters::pick("go", &args).run;
     let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.3, "go_test ratio {r:.3} >= 0.3");
@@ -268,7 +268,7 @@ fn yarn_install_drops_resolution_spam() {
     }
     stdout.push_str("Done in 4.2s\n");
     let args = vec!["install".to_string()];
-    let (filter, _) = filters::pick("yarn", &args);
+    let filter = filters::pick("yarn", &args).run;
     let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.2, "yarn_install ratio {r:.3} >= 0.2");
@@ -281,7 +281,7 @@ fn docker_ps_truncates_long_table() {
         .map(|i| format!("container-{i}  running\n"))
         .collect();
     let args = vec!["ps".to_string()];
-    let (filter, _) = filters::pick("docker", &args);
+    let filter = filters::pick("docker", &args).run;
     let out = filter(&ctx(&args, &input));
     let r = ratio(&input, &out.text);
     assert!(r < 0.8, "docker_ps ratio {r:.3} >= 0.8");
@@ -300,7 +300,7 @@ fn kubectl_describe_drops_spec_annotations() {
     }
     stdout.push_str("Events:\n  Normal Pulled\n");
     let args = vec!["describe".to_string()];
-    let (filter, _) = filters::pick("kubectl", &args);
+    let filter = filters::pick("kubectl", &args).run;
     let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.4, "kubectl_describe ratio {r:.3} >= 0.4");
@@ -318,7 +318,7 @@ fn make_drops_dir_echoes() {
     }
     stdout.push_str("file42.c:10: error: 'x' undeclared\n");
     let args = vec![];
-    let (filter, _) = filters::pick("make", &args);
+    let filter = filters::pick("make", &args).run;
     let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.1, "make ratio {r:.3} >= 0.1");
@@ -331,7 +331,7 @@ fn rg_truncates_long_match_lists() {
         .map(|i| format!("src/file{i}.rs:10:42:match-here\n"))
         .collect();
     let args = vec!["pattern".to_string()];
-    let (filter, _) = filters::pick("rg", &args);
+    let filter = filters::pick("rg", &args).run;
     let out = filter(&ctx(&args, &input));
     let r = ratio(&input, &out.text);
     assert!(r < 0.6, "rg ratio {r:.3} >= 0.6");
@@ -351,7 +351,7 @@ fn rg_groups_multi_match_files() {
         }
     }
     let args = vec!["handler".to_string()];
-    let (filter, _) = filters::pick("rg", &args);
+    let filter = filters::pick("rg", &args).run;
     let out = filter(&ctx(&args, &input));
     let r = ratio(&input, &out.text);
     assert!(r < 0.6, "rg grouped ratio {r:.3} >= 0.6");
@@ -371,7 +371,7 @@ fn git_status_strips_boilerplate() {
     }
     input.push_str("\nUntracked files:\n  (use \"git add <file>...\" to include in what will be committed)\n\tnew_thing.rs\n\nno changes added to commit (use \"git add\" and/or \"git commit -a\")\n");
     let args = vec!["status".to_string()];
-    let (filter, _) = filters::pick("git", &args);
+    let filter = filters::pick("git", &args).run;
     let out = filter(&ctx(&args, &input));
     let r = ratio(&input, &out.text);
     assert!(r < 0.65, "git_status ratio {r:.3} >= 0.65");
@@ -403,7 +403,7 @@ fn cargo_test_strips_backtraces_on_failures() {
     }
     stdout.push_str("test result: FAILED. 0 passed; 3 failed; 0 ignored\n");
     let args = vec!["test".to_string()];
-    let (filter, _) = filters::pick("cargo", &args);
+    let filter = filters::pick("cargo", &args).run;
     let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.4, "cargo_test failing-run ratio {r:.3} >= 0.4");
@@ -427,7 +427,7 @@ fn cargo_build_collapses_warnings() {
     }
     stderr.push_str("    Finished `dev` profile in 2.0s\n");
     let args = vec!["build".to_string()];
-    let (filter, _) = filters::pick("cargo", &args);
+    let filter = filters::pick("cargo", &args).run;
     let out = filter(&FilterCtx {
         args: &args,
         stdout: "",
@@ -452,7 +452,8 @@ fn find_groups_by_directory() {
         }
     }
     let args = vec![".".to_string()];
-    let (filter, id) = filters::pick("find", &args);
+    let picked = filters::pick("find", &args);
+    let (filter, id) = (picked.run, picked.id);
     assert_eq!(id, "find");
     let out = filter(&ctx(&args, &input));
     let r = ratio(&input, &out.text);
@@ -473,7 +474,8 @@ To github.com:user/repo.git
    abc1234..def5678  main -> main
 ";
     let args = vec!["push".to_string()];
-    let (filter, id) = filters::pick("git", &args);
+    let picked = filters::pick("git", &args);
+    let (filter, id) = (picked.run, picked.id);
     assert_eq!(id, "git_push");
     let out = filter(&FilterCtx {
         args: &args,
@@ -501,7 +503,8 @@ fn bazel_build_drops_progress() {
     }
     stderr.push_str("ERROR: /w/pkg/BUILD.bazel:1:1: Compiling failed: (Exit 1)\nsrc/foo.cc:5:10: error: 'x' was not declared\nERROR: Build did NOT complete successfully\n");
     let args = vec!["build".to_string()];
-    let (filter, id) = filters::pick("bazel", &args);
+    let picked = filters::pick("bazel", &args);
+    let (filter, id) = (picked.run, picked.id);
     assert_eq!(id, "bazel_build");
     let out = filter(&FilterCtx {
         args: &args,
@@ -526,7 +529,8 @@ fn bazel_test_drops_passed_targets() {
     );
     stdout.push_str("Executed 151 out of 151 tests: 150 tests pass and 1 fails locally.\n");
     let args = vec!["test".to_string()];
-    let (filter, id) = filters::pick("bazel", &args);
+    let picked = filters::pick("bazel", &args);
+    let (filter, id) = (picked.run, picked.id);
     assert_eq!(id, "bazel_test");
     let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
@@ -547,7 +551,7 @@ fn go_test_strips_goroutine_dumps() {
     }
     stdout.push_str("exit status 2\nFAIL\texample.com/m\t0.012s\n");
     let args = vec!["test".to_string()];
-    let (filter, _) = filters::pick("go", &args);
+    let filter = filters::pick("go", &args).run;
     let out = filter(&ctx(&args, &stdout));
     let r = ratio(&stdout, &out.text);
     assert!(r < 0.3, "go_test goroutine-dump ratio {r:.3} >= 0.3");
@@ -558,7 +562,7 @@ fn go_test_strips_goroutine_dumps() {
 #[test]
 fn unknown_command_falls_back_to_generic() {
     let args = vec!["something".to_string()];
-    let (_, id) = filters::pick("totally-made-up", &args);
+    let id = filters::pick("totally-made-up", &args).id;
     assert_eq!(id, "generic");
 }
 
@@ -595,7 +599,8 @@ fn picker_and_filter_output_agree_on_filter_id() {
     ];
     for (cmd, args, expected) in cases {
         let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        let (filter_fn, picker_id) = filters::pick(cmd, &args_owned);
+        let picked = filters::pick(cmd, &args_owned);
+        let (filter_fn, picker_id) = (picked.run, picked.id);
         assert_eq!(
             picker_id, *expected,
             "picker id mismatch for {cmd} {args:?}"
