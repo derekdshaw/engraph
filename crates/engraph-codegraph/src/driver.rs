@@ -143,8 +143,32 @@ impl Driver for ScipGo {
         if let Some(uses) = go_work_uses(repo) {
             c.args(uses.iter().map(|u| go_work_pattern(u)));
         }
+        if outside_its_go_work(repo) {
+            c.env("GOWORK", "off");
+        }
         c
     }
+}
+
+/// Whether the nearest `go.work` above `dir` does not list it. Go then
+/// builds nothing in `dir`, and scip-go exits 0 with an empty index, so the
+/// run needs `GOWORK=off`. A `go.work` in `dir` itself is the one its run
+/// uses (`ScipGo::command`).
+pub(crate) fn outside_its_go_work(dir: &Path) -> bool {
+    if dir.join("go.work").is_file() {
+        return false;
+    }
+    dir.ancestors()
+        .skip(1)
+        .find_map(|work_dir| {
+            let uses = go_work_uses(work_dir)?;
+            let rel = crate::index::workspace_rel(work_dir, dir);
+            Some(!uses.iter().any(|u| {
+                let u = go_work_rel(u);
+                u == rel || Path::new(u) == dir
+            }))
+        })
+        .unwrap_or(false)
 }
 
 /// The `use` directories of the `go.work` in `dir`, as written: relative to
@@ -465,6 +489,29 @@ mod tests {
             args(dir.path()),
             [&base[..], &["./...", "./tools/...", "./svc/..."]].concat()
         );
+    }
+
+    #[test]
+    fn scip_go_turns_off_a_go_work_that_does_not_list_the_module() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("go.work"), "go 1.21\n\nuse ./a\n").unwrap();
+        for m in ["a", "c"] {
+            std::fs::create_dir_all(root.join(m)).unwrap();
+            std::fs::write(root.join(m).join("go.mod"), "module x\n").unwrap();
+        }
+        let gowork = |dir: &Path| {
+            ScipGo
+                .command(dir, Path::new("/tmp/out/index.scip"))
+                .get_envs()
+                .find(|(k, _)| *k == "GOWORK")
+                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        // Listed, or the go.work root itself: Go uses the go.work.
+        assert_eq!(gowork(&root.join("a")), None);
+        assert_eq!(gowork(root), None);
+        // Not listed: Go would build nothing in it.
+        assert_eq!(gowork(&root.join("c")), Some("off".into()));
     }
 
     #[test]

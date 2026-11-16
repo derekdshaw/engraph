@@ -623,6 +623,9 @@ fn run_go_modules(
             .current_dir(repo)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if patterns.is_empty() && crate::driver::outside_its_go_work(&repo.join(rel)) {
+            cmd.env("GOWORK", "off");
+        }
         tracing::info!(driver = spec.binary, module = %module_root.display(), ?patterns, "running scip-go for module");
         let output = cmd
             .output()
@@ -1445,6 +1448,32 @@ mod tests {
                 defs[0]
             );
         }
+    }
+
+    #[test]
+    fn go_modules_pass_indexes_a_module_its_go_work_does_not_list() {
+        if !indexer_present("scip-go") {
+            eprintln!("skip: scip-go not installed");
+            return;
+        }
+        let spec = LANGS.iter().find(|s| s.language == "go").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        go_caller_and_helper(&repo, true);
+        std::fs::create_dir_all(repo.join("c")).unwrap();
+        std::fs::write(repo.join("c/go.mod"), "module example.com/c\n\ngo 1.21\n").unwrap();
+        std::fs::write(
+            repo.join("c/c.go"),
+            "package c\n\nfunc Lone() int { return 3 }\n",
+        )
+        .unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 3);
+        let mut parts = Vec::new();
+        run_go_modules(spec, &repo, &bazel, &scip_dir, &mut parts).unwrap();
+        let (defs, _) = go_symbols(&parts, "`example.com/c`/Lone().");
+        assert_eq!(defs.len(), 1, "{defs:?}");
     }
 
     #[test]

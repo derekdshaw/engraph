@@ -1539,7 +1539,7 @@ crate that does cross-file `who-calls` across Rust/Python/Go/TS/Java.
 |---|---|---|
 | `RustAnalyzer` | `Cargo.toml` | `rust-analyzer scip <repo> --output <out>` (chdir into repo) |
 | `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <out> --project-name <basename> --project-version 0.0.0` |
-| `ScipGo` | `go.mod` or `go.work` | `scip-go --module-root <repo> --output <out>` (chdir into repo); with a `go.work`, also one `./<dir>/...` package pattern per `use` directory, since scip-go's default `./...` covers only the root module |
+| `ScipGo` | `go.mod` or `go.work` | `scip-go --module-root <repo> --output <out>` (chdir into repo); with a `go.work`, also one `./<dir>/...` package pattern per `use` directory, since scip-go's default `./...` covers only the root module; `GOWORK=off` when the nearest `go.work` above the repo does not list it (`outside_its_go_work`), since Go then builds nothing there |
 | `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index --output <out>` (chdir into repo); in a pnpm or yarn workspace (`TsWorkspace`), also `--pnpm-workspaces` / `--yarn-workspaces <repo>` |
 | `ScipJava` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java index --output <out>` (chdir into repo) |
 
@@ -2148,7 +2148,8 @@ flag is still available to opt in on a single-repo run.
   time, scip-go gives a reference into another listed module the version
   `.` while the definition has the pinned version, so the relation pointed
   at a placeholder (verified 2026-11-16, scip-go 0.2.7). The module count
-  still counts each listed module.
+  still counts each listed module. A module run alone gets `GOWORK=off`
+  when the nearest `go.work` above it does not list it, as in the driver.
   `rebase_documents` prepends the module's repo-relative dir to its
   document paths (scip-go emits module-root-relative paths and the loader
   stores them verbatim as `file_path`, so two modules' `main.go` would

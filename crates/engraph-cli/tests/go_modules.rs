@@ -295,3 +295,34 @@ fn a_vendored_copy_of_a_module_adds_no_second_symbol() {
         [Some("b/b.go".into())]
     );
 }
+
+#[test]
+fn a_module_its_go_work_does_not_list_still_gets_its_symbols() {
+    if !go_tools_present() {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("e.db");
+    let repo = caller_and_helper(dir.path(), true, false);
+    write(&repo, "c/go.mod", "module example.com/c\n\ngo 1.21\n");
+    write(
+        &repo,
+        "c/c.go",
+        "package c\n\nfunc Lone() int { return 3 }\n",
+    );
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "c"]);
+    index_ok(
+        &db,
+        dir.path(),
+        &["index", "--recursive", repo.to_str().unwrap()],
+    );
+    assert_eq!(
+        entity(&db, "Lone"),
+        Some((repo.to_string_lossy().into_owned(), "c/c.go".into()))
+    );
+    assert_eq!(
+        relation_targets(&db, "Caller", "Helper"),
+        [Some("b/b.go".into())]
+    );
+}
