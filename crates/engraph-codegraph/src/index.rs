@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use ignore::{IncrementalIgnore, WalkBuilder};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -682,27 +682,48 @@ fn examine_children(workspace_root: &Path) -> Result<Vec<DiscoveredDir>> {
 
 /// The record of `dir` examined with no ancestor project above it.
 fn examine_alone(dir: &Path, own_repo: bool) -> DiscoveredDir {
-    let langs = detected_langs(dir);
+    DiscoveredDir {
+        path: dir.to_path_buf(),
+        // With nothing claimed, no member rule (nor its tool check) runs.
+        outcome: classify(dir, &HashMap::new(), &|_| true),
+        own_repo,
+    }
+}
+
+/// What `dir` is: a Bazel root, a project, a member, or none of these.
+/// `claimed` maps each language that an ancestor project covers to that
+/// project, and `installed` is the tool check of `is_member`. Each detected
+/// language is new here, or covered by its parent, the nearest recorded
+/// project of that language, when its member rule says `dir` belongs to it.
+fn classify(
+    dir: &Path,
+    claimed: &HashMap<&'static str, PathBuf>,
+    installed: &dyn Fn(&str) -> bool,
+) -> DirOutcome {
+    let mut langs: Vec<&'static str> = Vec::new();
+    let mut covered: Vec<(&'static str, PathBuf)> = Vec::new();
+    for lang in detected_langs(dir) {
+        match claimed.get(lang) {
+            Some(parent) if is_member(lang, parent, dir, installed) => {
+                covered.push((lang, parent.clone()));
+            }
+            _ => langs.push(lang),
+        }
+    }
+    langs.sort();
+    covered.sort();
     // Bazel takes precedence: a Bazel monorepo often *also* has a Cargo.toml
     // / pyproject.toml in some subdirectory for IDE integration, but the
     // single-language SCIP driver would just thrash on the polyglot layout.
     // The target-level Bazel path is the right one for these.
-    let outcome = if langs.contains("bazel") {
+    if langs.contains(&"bazel") {
         DirOutcome::BazelRoot
-    } else if langs.is_empty() {
-        DirOutcome::NoManifest
+    } else if !langs.is_empty() {
+        DirOutcome::Project { langs, covered }
+    } else if !covered.is_empty() {
+        DirOutcome::Member { covered }
     } else {
-        let mut langs: Vec<&'static str> = langs.into_iter().collect();
-        langs.sort();
-        DirOutcome::Project {
-            langs,
-            covered: Vec::new(),
-        }
-    };
-    DiscoveredDir {
-        path: dir.to_path_buf(),
-        outcome,
-        own_repo,
+        DirOutcome::NoManifest
     }
 }
 
@@ -898,6 +919,15 @@ impl DiscoveryFilter {
     }
 }
 
+/// A glob over a `/`-separated path below a directory, as `workspace_rel`
+/// gives it: `*` stays within one level. A leading `./` and a trailing `/`
+/// (shell completion of a directory adds one) are dropped, since the path has
+/// neither.
+fn path_glob(pat: &str) -> Result<Glob, globset::Error> {
+    let pat = pat.strip_prefix("./").unwrap_or(pat).trim_end_matches('/');
+    GlobBuilder::new(pat).literal_separator(true).build()
+}
+
 /// The globs of one filter flag (`flag` names it in errors), or `None` when
 /// none were given.
 fn glob_set(flag: &str, pats: &[String]) -> Result<Option<GlobSet>> {
@@ -906,14 +936,7 @@ fn glob_set(flag: &str, pats: &[String]) -> Result<Option<GlobSet>> {
     }
     let mut set = GlobSetBuilder::new();
     for pat in pats {
-        // A discovered path never ends in `/`; shell completion of a
-        // directory adds one.
-        let pat = pat.strip_prefix("./").unwrap_or(pat).trim_end_matches('/');
-        let glob = GlobBuilder::new(pat)
-            .literal_separator(true)
-            .build()
-            .with_context(|| format!("invalid {flag} glob {pat}"))?;
-        set.add(glob);
+        set.add(path_glob(pat).with_context(|| format!("invalid {flag} glob {pat}"))?);
     }
     Ok(Some(set.build()?))
 }
@@ -927,7 +950,9 @@ fn discover(
 ) -> Result<Vec<DiscoveredDir>> {
     let mut dirs = match discovery {
         Discovery::Children => examine_children(root)?,
-        Discovery::Recursive { max_depth } => examine_recursive(root, max_depth, &driver::on_path)?,
+        Discovery::Recursive { max_depth } => {
+            examine_recursive(root, max_depth, &crate::which::on_path)?
+        }
     };
     filter.apply(root, &mut dirs);
     Ok(dirs)
@@ -937,7 +962,7 @@ fn discover(
 /// `Walker::walk` for the per-directory rules (prune build dirs, stop at
 /// Bazel, skip the members of a project above so they aren't each indexed;
 /// `is_member` gives the rule of each language). `installed` says whether a
-/// tool is on `PATH` (`driver::on_path`).
+/// tool is on `PATH` (`which::on_path`).
 fn examine_recursive(
     root: &Path,
     max_depth: usize,
@@ -1009,24 +1034,19 @@ fn typescript_workspace_lists(parent: &Path, dir: &Path, installed: &dyn Fn(&str
 /// glob excludes) list `rel`. Same glob rules as `--include`. A glob that does
 /// not compile matches nothing.
 fn workspace_globs_match(globs: &[String], rel: &str) -> bool {
-    let compiled = |g: &str| {
-        let g = g.strip_prefix("./").unwrap_or(g).trim_end_matches('/');
-        GlobBuilder::new(g)
-            .literal_separator(true)
-            .build()
-            .ok()
-            .map(|g| g.compile_matcher())
-    };
-    let (excludes, includes): (Vec<&String>, Vec<&String>) =
-        globs.iter().partition(|g| g.starts_with('!'));
-    includes
-        .iter()
-        .filter_map(|g| compiled(g))
-        .any(|m| m.is_match(rel))
-        && !excludes
-            .iter()
-            .filter_map(|g| compiled(&g[1..]))
-            .any(|m| m.is_match(rel))
+    let mut includes = GlobSetBuilder::new();
+    let mut excludes = GlobSetBuilder::new();
+    for g in globs {
+        let (set, pat) = match g.strip_prefix('!') {
+            Some(pat) => (&mut excludes, pat),
+            None => (&mut includes, g.as_str()),
+        };
+        if let Ok(glob) = path_glob(pat) {
+            set.add(glob);
+        }
+    }
+    let lists = |set: GlobSetBuilder| set.build().is_ok_and(|s| s.is_match(rel));
+    lists(includes) && !lists(excludes)
 }
 
 /// A recursive discovery: the depth limit, the tool check of `is_member`, and
@@ -1063,48 +1083,31 @@ impl Walker<'_> {
             self.record(dir, DirOutcome::BeyondMaxDepth { max_depth }, own_repo);
             return;
         }
-        // Each detected language is new here, or covered by its parent: the
-        // nearest recorded project of that language, when its member rule
-        // says `dir` belongs to it.
-        let mut langs: Vec<&'static str> = Vec::new();
-        let mut covered: Vec<(&'static str, PathBuf)> = Vec::new();
-        for lang in detected_langs(dir) {
-            match claimed.get(lang) {
-                Some(parent) if is_member(lang, parent, dir, self.installed) => {
-                    covered.push((lang, parent.clone()));
-                }
-                _ => langs.push(lang),
-            }
-        }
-        langs.sort();
-        covered.sort();
+        let outcome = classify(dir, claimed, self.installed);
 
         // A Bazel root is one indexable unit: record it and don't descend — the
         // target-level `bazel query` pass already covers the whole subtree.
-        if langs.contains(&"bazel") {
-            self.record(dir, DirOutcome::BazelRoot, own_repo);
+        if outcome == DirOutcome::BazelRoot {
+            self.record(dir, outcome, own_repo);
             return;
         }
 
-        // Record this dir as a project only if it introduces a language no
-        // ancestor already covers (else it's a workspace member / sub-package
-        // of an ancestor). Either way keep descending to catch nested modules
-        // of *other* languages.
+        // A project covers its new languages below it. A member or a plain
+        // dir covers nothing new. Either way keep descending to catch nested
+        // modules of *other* languages.
         let extended: HashMap<&'static str, PathBuf>;
-        let child_claimed = if langs.is_empty() {
-            if !covered.is_empty() {
-                self.record(dir, DirOutcome::Member { covered }, own_repo);
-            } else if own_repo {
-                self.record(dir, DirOutcome::NoManifest, own_repo);
-            }
-            claimed
-        } else {
+        let child_claimed = if let DirOutcome::Project { langs, .. } = &outcome {
             let mut map = claimed.clone();
             map.extend(langs.iter().map(|l| (*l, dir.to_path_buf())));
             extended = map;
-            self.record(dir, DirOutcome::Project { langs, covered }, own_repo);
             &extended
+        } else {
+            claimed
         };
+        // A plain dir is listed only when examined as its own repo.
+        if outcome != DirOutcome::NoManifest || own_repo {
+            self.record(dir, outcome, own_repo);
+        }
 
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;

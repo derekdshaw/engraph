@@ -270,7 +270,7 @@ pub(crate) fn bazel_binary() -> Result<PathBuf> {
     // Prefer `bazel` (so users with bazelisk symlinked benefit from
     // .bazelversion); fall back to `bazelisk` if only that's on PATH.
     for candidate in &["bazel", "bazelisk"] {
-        if which::which(candidate).is_ok() {
+        if crate::which::on_path(candidate) {
             return Ok(PathBuf::from(candidate));
         }
     }
@@ -331,30 +331,6 @@ impl Drop for TxGuard<'_> {
         if !self.done {
             let _ = self.conn.execute_batch("ROLLBACK");
         }
-    }
-}
-
-// Avoid pulling in a separate crate for a one-line PATH lookup; `Command`
-// itself resolves PATH on spawn, so this exists just for the friendlier
-// error in `bazel_binary` above.
-mod which {
-    use std::path::PathBuf;
-    pub fn which(bin: &str) -> Result<PathBuf, ()> {
-        let path = std::env::var_os("PATH").ok_or(())?;
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join(bin);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-            #[cfg(windows)]
-            {
-                let cand = dir.join(format!("{}.exe", bin));
-                if cand.is_file() {
-                    return Ok(cand);
-                }
-            }
-        }
-        Err(())
     }
 }
 

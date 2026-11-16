@@ -7,6 +7,7 @@ pub mod lock;
 pub mod relation_kind;
 pub mod scip_loader;
 pub mod subgraph;
+mod which;
 
 pub use bazel::{BazelStats, detect_bazel, index_bazel_workspace};
 pub use bazel_symbols::{

@@ -153,7 +153,7 @@ impl Driver for ScipTypescript {
         &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]
     }
     fn command(&self, repo: &Path, out: &Path) -> Command {
-        typescript_command(repo, out, &on_path)
+        typescript_command(repo, out, &crate::which::on_path)
     }
 }
 
@@ -213,22 +213,6 @@ fn typescript_command(repo: &Path, out: &Path, on_path: &dyn Fn(&str) -> bool) -
     let root = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
     c.arg(ws.flag()).arg(root);
     c
-}
-
-/// Whether `tool` is an executable file in a directory of `PATH`.
-pub(crate) fn on_path(tool: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| {
-        [
-            tool.to_string(),
-            format!("{tool}.exe"),
-            format!("{tool}.cmd"),
-        ]
-        .iter()
-        .any(|name| dir.join(name).is_file())
-    })
 }
 
 /// A JavaScript workspace whose packages scip-typescript can index from the
