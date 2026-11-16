@@ -287,3 +287,9 @@ threads.
 ### Effort
 
 One day.
+
+---
+
+## 5. Read the member rule of a parent project one time
+
+`is_member` (`crates/engraph-codegraph/src/index.rs`) reads and parses the parent's `Cargo.toml`, `package.json` or `pnpm-workspace.yaml`, and compiles its globs, again for each nested crate or package below it; keep the rule with the parent in `claimed` if a large workspace shows the cost.
