@@ -2,19 +2,10 @@
 //! which discovers the projects without running an indexer.
 
 use std::path::Path;
-use std::process::Command;
 use tempfile::tempdir;
 
-fn engraph(db: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_engraph"))
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", std::env::var("HOME").unwrap_or_default())
-        .env("ENGRAPH_DB_PATH", db)
-        .args(args)
-        .output()
-        .expect("spawn engraph")
-}
+mod common;
+use common::engraph;
 
 fn manifest(root: &Path, rel: &str, name: &str) {
     let dir = root.join(rel);
@@ -33,6 +24,7 @@ fn max_depth_limits_recursive_discovery() {
 
     let out = engraph(
         &db,
+        dir.path(),
         &[
             "index",
             "--recursive",
@@ -51,7 +43,11 @@ fn max_depth_limits_recursive_discovery() {
     );
 
     // The default depth (16) reaches both.
-    let out = engraph(&db, &["index", "--recursive", "--dry-run", ws_arg]);
+    let out = engraph(
+        &db,
+        dir.path(),
+        &["index", "--recursive", "--dry-run", ws_arg],
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{out:?}");
     assert!(stdout.contains("discovered 2 repo(s)"), "{stdout}");
@@ -67,6 +63,7 @@ fn max_depth_requires_recursive() {
 
     let out = engraph(
         &db,
+        dir.path(),
         &[
             "index",
             "--workspace",
@@ -88,7 +85,7 @@ fn max_depth_requires_recursive() {
 fn discovered(db: &Path, ws: &Path, args: &[&str]) -> Vec<String> {
     let mut all = vec!["index", "--dry-run"];
     all.extend_from_slice(args);
-    let out = engraph(db, &all);
+    let out = engraph(db, ws, &all);
     assert!(out.status.success(), "{out:?}");
     String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -176,6 +173,7 @@ fn include_needs_workspace_discovery() {
     manifest(&ws, "", "Cargo.toml");
     let out = engraph(
         &db,
+        dir.path(),
         &["index", "--dry-run", "--include", "a", ws.to_str().unwrap()],
     );
     assert!(
@@ -197,6 +195,7 @@ fn include_rejects_a_bad_glob() {
     manifest(&ws, "a", "Cargo.toml");
     let out = engraph(
         &db,
+        dir.path(),
         &[
             "index",
             "--dry-run",
@@ -220,7 +219,7 @@ fn filtering_out_every_project_fails_the_run() {
     for filter in [["--include", "nothing/*"], ["--exclude", "a"]] {
         let mut args = vec!["index", "--recursive", ws.to_str().unwrap()];
         args.extend_from_slice(&filter);
-        let out = engraph(&db, &args);
+        let out = engraph(&db, dir.path(), &args);
         assert!(!out.status.success(), "{filter:?}: {out:?}");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
@@ -293,7 +292,7 @@ fn exclude_wins_over_include_with_a_warning() {
         "svc/x/deep",
     ];
     assert_eq!(discovered(&db, &ws, &args[2..]), ["svc/x"]);
-    let stderr = String::from_utf8_lossy(&engraph(&db, &args).stderr).into_owned();
+    let stderr = String::from_utf8_lossy(&engraph(&db, dir.path(), &args).stderr).into_owned();
     assert!(
         stderr.contains("svc/x/deep") && stderr.contains("--exclude"),
         "{stderr}"
@@ -301,6 +300,7 @@ fn exclude_wins_over_include_with_a_warning() {
     // Excluding a project no --include glob matched is not worth a warning.
     let out = engraph(
         &db,
+        dir.path(),
         &["index", "--dry-run", "--recursive", w, "--exclude", "svc/x"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -315,7 +315,11 @@ fn exclude_needs_workspace_discovery_and_a_valid_glob() {
     manifest(&ws, "a", "Cargo.toml");
     let w = ws.to_str().unwrap();
 
-    let out = engraph(&db, &["index", "--dry-run", "--exclude", "a", w]);
+    let out = engraph(
+        &db,
+        dir.path(),
+        &["index", "--dry-run", "--exclude", "a", w],
+    );
     assert!(
         !out.status.success(),
         "accepted --exclude without discovery"
@@ -328,6 +332,7 @@ fn exclude_needs_workspace_discovery_and_a_valid_glob() {
 
     let out = engraph(
         &db,
+        dir.path(),
         &["index", "--dry-run", "--recursive", w, "--exclude", "a["],
     );
     assert!(!out.status.success(), "accepted a bad glob");
@@ -350,6 +355,7 @@ fn dry_run_lists_each_examined_dir_with_its_cause() {
     manifest(&ws, "deep/er/still", "go.mod");
     let out = engraph(
         &db,
+        dir.path(),
         &[
             "index",
             "--dry-run",

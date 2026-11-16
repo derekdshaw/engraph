@@ -9,22 +9,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_engraph")
-}
+mod common;
+use common::bin;
 
+/// `common::engraph`, with the SCIP scratch file kept out of the user's data
+/// dir.
 fn engraph(db: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(bin())
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", std::env::var("HOME").unwrap_or_default())
-        .env("ENGRAPH_DB_PATH", db)
+    common::command(db, cwd, args)
         .env(
             "ENGRAPH_SCIP_OUTPUT_DIR",
             std::env::temp_dir().join("engraph-test-scip"),
         )
-        .current_dir(cwd)
-        .args(args)
         .output()
         .expect("spawn engraph")
 }
