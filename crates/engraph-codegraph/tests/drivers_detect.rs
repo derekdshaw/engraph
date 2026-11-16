@@ -52,6 +52,13 @@ fn go_mod_picks_scip_go() {
 }
 
 #[test]
+fn go_work_alone_picks_scip_go() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("go.work"), "go 1.21\n\nuse ./a\n").unwrap();
+    assert_eq!(detecting(dir.path()), vec!["scip-go"]);
+}
+
+#[test]
 fn package_json_alone_does_not_pick_typescript() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("package.json"), "{}\n").unwrap();

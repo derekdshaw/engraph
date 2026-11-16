@@ -9,13 +9,16 @@ of the plans.
 engraph indexes all Go modules of a repo, with correct relations between the
 modules. This is also true in Bazel repos.
 
-## Condition at this time (2026-10-30)
+## Condition at this time (2026-11-16)
 
-- The Go driver finds a module only when `go.mod` is in the indexed directory.
-  For a repo with more than one Go module, a `--recursive` index run is
-  necessary. But that run does not include a Go module below a different Go
-  module ([plan 02](completed/02-deeper-workspace-discovery-plan.md)).
-- The Go driver does not read `go.work` files.
+- The Go driver finds a module when `go.mod` or `go.work` is in the indexed
+  directory. For a repo with more than one Go module and no `go.work`, a
+  `--recursive` index run is necessary. That run includes a Go module below a
+  different Go module ([plan 02](completed/02-deeper-workspace-discovery-plan.md), step 10).
+- With a `go.work`, the Go driver gives scip-go one package pattern for each
+  `use` directory. One scip-go run indexes all the modules of the `go.work`.
+  A module that the `go.work` lists is a member of the `go.work` project in
+  `--recursive` discovery.
 - scip-go indexes only one build configuration. Thus, files with build tags for
   a different platform (for example `_linux.go` or `//go:build`) are not in the
   code graph.
@@ -32,14 +35,12 @@ modules. This is also true in Bazel repos.
 
 ## Steps
 
-1. Write a test with a root Go module and a second Go module in `tools/`.
-2. Make sure that `engraph index --recursive` indexes the two modules. [Plan 02](completed/02-deeper-workspace-discovery-plan.md),
-   step 10 changes the discovery for this.
-3. Find out if scip-go can index all modules of a `go.work` file in one
-   operation.
-4. If scip-go can do this, give the `go.work` directory to scip-go.
-5. If scip-go cannot do this, index each module of the `go.work` file as a
-   subtree of the repo.
+Steps 1 to 5 are complete. Step 3 found that scip-go 0.2.7 indexes all
+modules of a `go.work` file in one operation when it gets one `./<dir>/...`
+package pattern for each `use` directory. Its default pattern `./...`
+indexes only the module of the current directory. Thus step 4 applies, and
+step 5 does not.
+
 6. Write a test in which a function in module A uses a function in module B.
 7. Make sure that the relation from module A points to the symbol in module B.
    Do this for the native Go pass and for the merged SCIP data of the Bazel Go
@@ -64,6 +65,8 @@ target repo.
 
 - `engraph index --recursive` indexes the root module and the module in
   `tools/`.
+- `engraph index` of a `go.work` directory without a `go.mod` indexes each
+  module that the `go.work` lists.
 - A relation from module A to module B points to the correct symbol.
 - In the Bazel Go pass with `--go-tests`, a function in a `_test.go` file is in
   the code graph. Without `--go-tests`, it is not in the code graph.

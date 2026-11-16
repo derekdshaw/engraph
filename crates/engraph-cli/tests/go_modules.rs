@@ -101,3 +101,59 @@ fn recursive_index_covers_the_root_module_and_a_module_in_tools() {
         Some((project, "tools/tool.go".into()))
     );
 }
+
+#[test]
+fn go_work_root_indexes_every_listed_module() {
+    if !go_tools_present() {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("e.db");
+    let repo = dir.path().join("repo");
+    // No go.mod at the root: the go.work alone makes it a Go project.
+    write(
+        &repo,
+        "go.work",
+        "go 1.21\n\nuse (\n\t./tools\n\t./svc\n)\n",
+    );
+    write(
+        &repo,
+        "tools/go.mod",
+        "module example.com/tools\n\ngo 1.21\n",
+    );
+    write(
+        &repo,
+        "tools/tool.go",
+        "package tools\n\nfunc ToolHandler() int { return 2 }\n",
+    );
+    write(
+        &repo,
+        "svc/go.mod",
+        "module example.com/svc\n\ngo 1.21\n\nrequire example.com/tools v0.0.0\n",
+    );
+    write(
+        &repo,
+        "svc/svc.go",
+        "package svc\n\nimport \"example.com/tools\"\n\nfunc SvcHandler() int { return tools.ToolHandler() }\n",
+    );
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let repo = repo.canonicalize().unwrap();
+
+    let out = engraph(&db, dir.path(), &["index", repo.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "index: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let project = repo.to_string_lossy().into_owned();
+    assert_eq!(
+        entity(&db, "ToolHandler"),
+        Some((project.clone(), "tools/tool.go".into()))
+    );
+    assert_eq!(
+        entity(&db, "SvcHandler"),
+        Some((project, "svc/svc.go".into()))
+    );
+}

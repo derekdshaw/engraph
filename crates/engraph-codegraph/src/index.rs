@@ -1000,8 +1000,9 @@ fn is_member(lang: &str, parent: &Path, dir: &Path, installed: &dyn Fn(&str) -> 
         // own workspace (e.g. a `cargo fuzz` crate) is in no other.
         "rust-analyzer" => cargo_has_workspace(parent) && !cargo_has_workspace(dir),
         "scip-typescript" => typescript_workspace_lists(parent, dir, installed),
-        // Go tools leave a nested module out of the module above it.
-        "scip-go" => false,
+        // Go tools leave a nested module out of the module above it, unless
+        // the parent's go.work lists it.
+        "scip-go" => go_work_lists(parent, dir),
         // scip-python indexes every file below its directory, so a nested
         // project is in the parent's run; scip-java builds Maven and Gradle
         // multi-module projects from the root.
@@ -1018,6 +1019,14 @@ fn cargo_has_workspace(dir: &Path) -> bool {
             l.starts_with("[workspace]") || l.starts_with("[workspace.")
         })
     })
+}
+
+/// Whether the `go.work` in `parent` lists `dir` as a `use` directory: then
+/// scip-go indexes `dir` from `parent` (`driver::go_work_uses`).
+fn go_work_lists(parent: &Path, dir: &Path) -> bool {
+    let rel = workspace_rel(parent, dir);
+    driver::go_work_uses(parent)
+        .is_some_and(|uses| uses.iter().any(|u| driver::go_work_rel(u) == rel))
 }
 
 /// Whether `parent`'s workspace lists `dir`: a workspace whose packages
@@ -1897,6 +1906,23 @@ mod tests {
         git_init(&lib);
         let inner = dir_with(root, "lib/inner", "Cargo.toml");
         assert_eq!(recursive_roots(root), vec![r, lib, inner, vendored]);
+    }
+
+    #[test]
+    fn recursive_go_work_members_are_covered_by_the_root() {
+        // A go.work root without its own go.mod is a project; the modules
+        // it lists are its members, and a module it does not list is not.
+        let tmp = tempfile::tempdir().unwrap();
+        let r = dir_with(tmp.path(), "", "go.work");
+        std::fs::write(
+            r.join("go.work"),
+            "go 1.21\n\nuse (\n\t./tools\n\t./svc/api\n)\n",
+        )
+        .unwrap();
+        dir_with(tmp.path(), "tools", "go.mod");
+        dir_with(tmp.path(), "svc/api", "go.mod");
+        let other = dir_with(tmp.path(), "svc/other", "go.mod");
+        assert_eq!(recursive_roots(tmp.path()), vec![r, other]);
     }
 
     #[test]

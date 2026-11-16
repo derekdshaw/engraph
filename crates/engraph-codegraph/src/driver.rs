@@ -122,7 +122,7 @@ impl Driver for ScipGo {
         "scip-go"
     }
     fn detect(&self, repo: &Path) -> bool {
-        repo.join("go.mod").is_file()
+        repo.join("go.mod").is_file() || repo.join("go.work").is_file()
     }
     fn extensions(&self) -> &'static [&'static str] {
         &["go"]
@@ -137,7 +137,76 @@ impl Driver for ScipGo {
             .arg("--output")
             .arg(out)
             .current_dir(repo);
+        // scip-go's default pattern `./...` reaches only the module of the
+        // cwd. In a go.work, one `<dir>/...` pattern per `use` directory
+        // indexes every module in one run, each under its own module path.
+        if let Some(uses) = go_work_uses(repo) {
+            c.args(uses.iter().map(|u| go_work_pattern(u)));
+        }
         c
+    }
+}
+
+/// The `use` directories of the `go.work` in `dir`, as written: relative to
+/// `dir`, or absolute. `None` without a `go.work`.
+pub(crate) fn go_work_uses(dir: &Path) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(dir.join("go.work")).ok()?;
+    Some(parse_go_work_uses(&text))
+}
+
+/// The paths of the `use` directives of a `go.work`: `use ./a`, or a
+/// `use ( ... )` block with one path per line. A path may be quoted, and
+/// `//` starts a comment.
+fn parse_go_work_uses(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_block = false;
+    for line in text.lines() {
+        let line = line.split("//").next().unwrap_or_default().trim();
+        if line.is_empty() {
+            continue;
+        }
+        let path = if in_block {
+            if line == ")" {
+                in_block = false;
+                continue;
+            }
+            line
+        } else {
+            let Some(rest) = line
+                .strip_prefix("use")
+                .filter(|r| r.starts_with([' ', '\t', '(']))
+            else {
+                continue;
+            };
+            let rest = rest.trim();
+            if rest == "(" {
+                in_block = true;
+                continue;
+            }
+            rest
+        };
+        out.push(path.trim_matches('"').to_string());
+    }
+    out
+}
+
+/// A `use` path of a `go.work` as `workspace_rel` gives it: `.` for the root,
+/// else `/`-separated without a leading `./` or a trailing `/`. An absolute
+/// path stays as it is.
+pub(crate) fn go_work_rel(path: &str) -> &str {
+    if Path::new(path).is_absolute() {
+        return path;
+    }
+    let rel = path.trim_start_matches("./").trim_end_matches('/');
+    if rel.is_empty() { "." } else { rel }
+}
+
+/// The scip-go package pattern for every package of a `use` directory.
+fn go_work_pattern(path: &str) -> String {
+    match go_work_rel(path) {
+        "." => "./...".to_string(),
+        abs if Path::new(abs).is_absolute() => format!("{abs}/..."),
+        rel => format!("./{rel}/..."),
     }
 }
 
@@ -362,6 +431,40 @@ mod tests {
             std::fs::write(dir.path().join(f), "packages:\n  - 'packages/*'\n").unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn go_work_uses_reads_single_and_block_forms() {
+        let text = "go 1.21\n\nuse ./a // first\nuse (\n\t.\n\t\"./b/c\"\n\t/abs/d\n\t// comment line\n)\n\nuser ./not-a-use\n";
+        assert_eq!(parse_go_work_uses(text), ["./a", ".", "./b/c", "/abs/d"]);
+    }
+
+    #[test]
+    fn scip_go_names_each_go_work_module() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = |dir: &Path| -> Vec<String> {
+            ScipGo
+                .command(dir, Path::new("/tmp/out/index.scip"))
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let root = dir.path().to_string_lossy().into_owned();
+        let base = ["--module-root", &root, "--output", "/tmp/out/index.scip"];
+        // A plain module: scip-go's default `./...` covers it.
+        std::fs::write(dir.path().join("go.mod"), "module x\n").unwrap();
+        assert_eq!(args(dir.path()), base);
+        // A go.work: scip-go indexes only the patterns it is given, so one
+        // per `use` directory, the root included.
+        std::fs::write(
+            dir.path().join("go.work"),
+            "go 1.21\n\nuse (\n\t.\n\t./tools/\n\tsvc\n)\n",
+        )
+        .unwrap();
+        assert_eq!(
+            args(dir.path()),
+            [&base[..], &["./...", "./tools/...", "./svc/..."]].concat()
+        );
     }
 
     #[test]

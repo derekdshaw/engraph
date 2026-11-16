@@ -69,7 +69,7 @@ Index runs are serialized per project with an OS file lock on `locks/index-<hash
 |---|---|---|
 | `rust-analyzer` | `Cargo.toml` | `rust-analyzer` (rustup component) |
 | `scip-python` | `pyproject.toml` / `setup.py` | `@sourcegraph/scip-python` (npm) |
-| `scip-go` | `go.mod` | `github.com/scip-code/scip-go/cmd/scip-go` (go install) |
+| `scip-go` | `go.mod` / `go.work` | `github.com/scip-code/scip-go/cmd/scip-go` (go install) |
 | `scip-typescript` | `package.json` + `tsconfig.json` | `@sourcegraph/scip-typescript` (npm) |
 | `scip-java` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java` via Coursier (`cs install --contrib scip-java`) |
 
