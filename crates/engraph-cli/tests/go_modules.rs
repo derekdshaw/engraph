@@ -157,3 +157,141 @@ fn go_work_root_indexes_every_listed_module() {
         Some((project, "svc/svc.go".into()))
     );
 }
+
+/// A git repo with module `a` (`Caller`), which calls `Helper` of module `b`
+/// through a `replace` to `../b`. `go_work` adds a root `go.work` that lists
+/// both; `vendor` adds a vendored copy of `b` below `a`.
+fn caller_and_helper(dir: &Path, go_work: bool, vendor: bool) -> std::path::PathBuf {
+    let repo = dir.join("repo");
+    write(&repo, "b/go.mod", "module example.com/b\n\ngo 1.21\n");
+    write(
+        &repo,
+        "b/b.go",
+        "package b\n\nfunc Helper() int { return 2 }\n",
+    );
+    write(
+        &repo,
+        "a/go.mod",
+        "module example.com/a\n\ngo 1.21\n\nrequire example.com/b v0.0.0\n\nreplace example.com/b => ../b\n",
+    );
+    write(
+        &repo,
+        "a/a.go",
+        "package a\n\nimport \"example.com/b\"\n\nfunc Caller() int { return b.Helper() }\n",
+    );
+    if go_work {
+        write(&repo, "go.work", "go 1.21\n\nuse (\n\t./a\n\t./b\n)\n");
+    }
+    if vendor {
+        // What `go mod vendor` writes for the replaced module.
+        write(
+            &repo,
+            "a/vendor/modules.txt",
+            "# example.com/b v0.0.0 => ../b\n## explicit; go 1.21\nexample.com/b\n# example.com/b => ../b\n",
+        );
+        write(
+            &repo,
+            "a/vendor/example.com/b/b.go",
+            "package b\n\nfunc Helper() int { return 2 }\n",
+        );
+    }
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    repo.canonicalize().unwrap()
+}
+
+/// The file of each entity named `dst` that an entity named `src` has a
+/// relation to; `None` for a placeholder (a reference to no definition).
+fn relation_targets(db: &Path, src: &str, dst: &str) -> Vec<Option<String>> {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT d.file_path FROM relations r
+             JOIN entities s ON s.id = r.src_entity
+             JOIN entities d ON d.id = r.dst_entity
+             WHERE s.name = ?1 AND d.name = ?2",
+        )
+        .unwrap();
+    stmt.query_map([src, dst], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn entity_count(db: &Path, name: &str) -> i64 {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE name = ?1",
+            [name],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+fn index_ok(db: &Path, cwd: &Path, args: &[&str]) {
+    let out = engraph(db, cwd, args);
+    assert!(
+        out.status.success(),
+        "index: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn a_call_into_another_go_work_module_points_at_its_definition() {
+    if !go_tools_present() {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("e.db");
+    let repo = caller_and_helper(dir.path(), true, false);
+    index_ok(&db, dir.path(), &["index", repo.to_str().unwrap()]);
+    assert_eq!(
+        relation_targets(&db, "Caller", "Helper"),
+        [Some("b/b.go".into())]
+    );
+}
+
+#[test]
+fn a_call_into_a_separately_indexed_module_points_at_its_definition() {
+    if !go_tools_present() {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("e.db");
+    // No go.work: --recursive runs scip-go once per module.
+    let repo = caller_and_helper(dir.path(), false, false);
+    index_ok(
+        &db,
+        dir.path(),
+        &["index", "--recursive", repo.to_str().unwrap()],
+    );
+    assert_eq!(
+        relation_targets(&db, "Caller", "Helper"),
+        [Some("b/b.go".into())]
+    );
+}
+
+#[test]
+fn a_vendored_copy_of_a_module_adds_no_second_symbol() {
+    if !go_tools_present() {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("e.db");
+    let repo = caller_and_helper(dir.path(), false, true);
+    index_ok(
+        &db,
+        dir.path(),
+        &["index", "--recursive", repo.to_str().unwrap()],
+    );
+    // Discovery skips `vendor/`, and scip-go writes no document for a
+    // vendored package: the only `Helper` is the one in `b`.
+    assert_eq!(entity_count(&db, "Helper"), 1);
+    assert_eq!(
+        relation_targets(&db, "Caller", "Helper"),
+        [Some("b/b.go".into())]
+    );
+}
