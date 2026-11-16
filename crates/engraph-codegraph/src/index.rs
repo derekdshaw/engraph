@@ -748,40 +748,31 @@ pub enum Discovery {
     Recursive { max_depth: usize },
 }
 
-/// The `--include` globs of a workspace run. A glob matches the path of a
-/// discovered project below the workspace root, `/`-separated, with `.` for
-/// the root itself: `*` stays within one level and `**` crosses levels. A
-/// glob matches only the path it names, not the paths below it. With no glob,
-/// every project is kept.
+/// The `--include` and `--exclude` globs of a workspace run. A glob matches
+/// the path of a discovered project below the workspace root, `/`-separated,
+/// with `.` for the root itself: `*` stays within one level and `**` crosses
+/// levels. A glob matches only the path it names, not the paths below it.
+/// With include globs, only the projects they match are kept; a project an
+/// exclude glob matches is dropped, even if an include glob matches it too.
 #[derive(Debug, Default)]
 pub struct DiscoveryFilter {
     include: Option<GlobSet>,
+    exclude: Option<GlobSet>,
 }
 
 impl DiscoveryFilter {
-    pub fn new(include: &[String]) -> Result<Self> {
-        if include.is_empty() {
-            return Ok(Self::default());
-        }
-        let mut set = GlobSetBuilder::new();
-        for pat in include {
-            let pat = pat.strip_prefix("./").unwrap_or(pat);
-            let glob = GlobBuilder::new(pat)
-                .literal_separator(true)
-                .build()
-                .with_context(|| format!("invalid --include glob {pat}"))?;
-            set.add(glob);
-        }
+    pub fn new(include: &[String], exclude: &[String]) -> Result<Self> {
         Ok(Self {
-            include: Some(set.build()?),
+            include: glob_set("--include", include)?,
+            exclude: glob_set("--exclude", exclude)?,
         })
     }
 
     /// Whether `repo`, discovered under `root`, stays in the result.
     fn keeps(&self, root: &Path, repo: &Path) -> bool {
-        let Some(include) = &self.include else {
+        if self.include.is_none() && self.exclude.is_none() {
             return true;
-        };
+        }
         let rel: Vec<_> = repo
             .strip_prefix(root)
             .unwrap_or(repo)
@@ -793,8 +784,31 @@ impl DiscoveryFilter {
         } else {
             rel.join("/")
         };
-        include.is_match(rel)
+        let included = self.include.as_ref().is_none_or(|g| g.is_match(&rel));
+        let excluded = self.exclude.as_ref().is_some_and(|g| g.is_match(&rel));
+        if excluded && included && self.include.is_some() {
+            tracing::warn!("{rel} matches both --include and --exclude; --exclude wins");
+        }
+        included && !excluded
     }
+}
+
+/// The globs of one filter flag (`flag` names it in errors), or `None` when
+/// none were given.
+fn glob_set(flag: &str, pats: &[String]) -> Result<Option<GlobSet>> {
+    if pats.is_empty() {
+        return Ok(None);
+    }
+    let mut set = GlobSetBuilder::new();
+    for pat in pats {
+        let pat = pat.strip_prefix("./").unwrap_or(pat);
+        let glob = GlobBuilder::new(pat)
+            .literal_separator(true)
+            .build()
+            .with_context(|| format!("invalid {flag} glob {pat}"))?;
+        set.add(glob);
+    }
+    Ok(Some(set.build()?))
 }
 
 /// The projects a workspace run finds under `root`, before any filter.
@@ -942,7 +956,7 @@ pub fn index_workspace(
         .collect();
     if repos.is_empty() {
         anyhow::bail!(
-            "no project discovered under {} matches the --include globs",
+            "no project discovered under {} passes the --include and --exclude globs",
             workspace_root.display()
         );
     }

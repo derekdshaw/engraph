@@ -115,7 +115,10 @@ module above it.
    root. The flag operates with `--recursive` and with plain `--workspace`.
    The glob syntax is the same as for `--include`. If `--include` and
    `--exclude` match the same project, `--exclude` wins, and engraph shows a
-   warning that names the project.
+   warning that names the project. Complete: the flag filters the result
+   of discovery, as `--include` does. Excluding a project that no
+   `--include` glob matched gives no warning. A run that the two flags
+   leave with no project fails.
 6. In the `--dry-run` output, show each directory that the discovery found.
    `walk_recursive` must return a record for each directory that it examined,
    not only the recorded directories.

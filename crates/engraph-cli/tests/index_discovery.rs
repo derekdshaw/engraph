@@ -212,22 +212,128 @@ fn include_rejects_a_bad_glob() {
 }
 
 #[test]
-fn include_matching_nothing_fails_the_run() {
+fn filtering_out_every_project_fails_the_run() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("e.db");
     let ws = dir.path().join("ws");
     manifest(&ws, "a", "Cargo.toml");
+    for filter in [["--include", "nothing/*"], ["--exclude", "a"]] {
+        let mut args = vec!["index", "--recursive", ws.to_str().unwrap()];
+        args.extend_from_slice(&filter);
+        let out = engraph(&db, &args);
+        assert!(!out.status.success(), "{filter:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("passes the --include and --exclude globs"),
+            "{filter:?}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn exclude_drops_matching_projects() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("e.db");
+    let ws = dir.path().join("ws");
+    manifest(&ws, "", "pom.xml");
+    manifest(&ws, "a", "Cargo.toml");
+    manifest(&ws, "svc/x", "go.mod");
+    manifest(&ws, "svc/x/deep", "pyproject.toml");
+    let w = ws.to_str().unwrap();
+
+    assert_eq!(
+        discovered(&db, &ws, &["--recursive", w, "--exclude", "svc/**"]),
+        [".", "a"]
+    );
+    // Same glob rules as --include: `x/**` leaves `x` itself in.
+    assert_eq!(
+        discovered(&db, &ws, &["--recursive", w, "--exclude", "svc/x/**"]),
+        [".", "a", "svc/x"]
+    );
+    assert_eq!(
+        discovered(
+            &db,
+            &ws,
+            &["--recursive", w, "--exclude", ".", "--exclude", "./a"]
+        ),
+        ["svc/x", "svc/x/deep"]
+    );
+}
+
+#[test]
+fn exclude_filters_workspace_children() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("e.db");
+    let ws = dir.path().join("ws");
+    manifest(&ws, "a", "Cargo.toml");
+    manifest(&ws, "b", "Cargo.toml");
+    let w = ws.to_str().unwrap();
+    assert_eq!(
+        discovered(&db, &ws, &["--workspace", w, "--exclude", "a"]),
+        ["b"]
+    );
+}
+
+#[test]
+fn exclude_wins_over_include_with_a_warning() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("e.db");
+    let ws = dir.path().join("ws");
+    manifest(&ws, "svc/x", "go.mod");
+    manifest(&ws, "svc/x/deep", "pyproject.toml");
+    let w = ws.to_str().unwrap();
+    let args = [
+        "index",
+        "--dry-run",
+        "--recursive",
+        w,
+        "--include",
+        "svc/**",
+        "--exclude",
+        "svc/x/deep",
+    ];
+    assert_eq!(discovered(&db, &ws, &args[2..]), ["svc/x"]);
+    let stderr = String::from_utf8_lossy(&engraph(&db, &args).stderr).into_owned();
+    assert!(
+        stderr.contains("svc/x/deep") && stderr.contains("--exclude"),
+        "{stderr}"
+    );
+    // Excluding a project no --include glob matched is not worth a warning.
     let out = engraph(
         &db,
-        &[
-            "index",
-            "--recursive",
-            ws.to_str().unwrap(),
-            "--include",
-            "nothing/*",
-        ],
+        &["index", "--dry-run", "--recursive", w, "--exclude", "svc/x"],
     );
-    assert!(!out.status.success(), "{out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("matches the --include globs"), "{stderr}");
+    assert!(!stderr.contains("svc/x"), "{stderr}");
+}
+
+#[test]
+fn exclude_needs_workspace_discovery_and_a_valid_glob() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("e.db");
+    let ws = dir.path().join("ws");
+    manifest(&ws, "a", "Cargo.toml");
+    let w = ws.to_str().unwrap();
+
+    let out = engraph(&db, &["index", "--dry-run", "--exclude", "a", w]);
+    assert!(
+        !out.status.success(),
+        "accepted --exclude without discovery"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--workspace") && stderr.contains("--recursive"),
+        "{stderr}"
+    );
+
+    let out = engraph(
+        &db,
+        &["index", "--dry-run", "--recursive", w, "--exclude", "a["],
+    );
+    assert!(!out.status.success(), "accepted a bad glob");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--exclude") && stderr.contains("a["),
+        "{stderr}"
+    );
 }

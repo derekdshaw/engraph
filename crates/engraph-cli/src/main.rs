@@ -265,6 +265,7 @@ async fn main() -> Result<()> {
             recursive,
             max_depth,
             include,
+            exclude,
             dry_run,
             if_changed,
             auto,
@@ -294,7 +295,7 @@ async fn main() -> Result<()> {
             } else {
                 engraph_codegraph::Discovery::Children
             };
-            let filter = engraph_codegraph::DiscoveryFilter::new(&include)?;
+            let filter = engraph_codegraph::DiscoveryFilter::new(&include, &exclude)?;
             let recursive_root: Option<PathBuf> = if recursive {
                 Some(workspace.clone().unwrap_or_else(|| repo.clone()))
             } else {

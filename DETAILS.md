@@ -1927,8 +1927,10 @@ on first use. An ignored directory that contains `.git` is still discovered,
 because it is a separate repo: discovery walks it with a new matcher rooted
 at it, so the parent's rules do not apply inside it.
 
-`--include <glob>` filters the discovered projects after discovery, in both
-modes (`DiscoveryFilter`). Each glob matches a project's `/`-separated path
+`--include <glob>` and `--exclude <glob>` filter the discovered projects
+after discovery, in both modes (`DiscoveryFilter`). A project that an
+exclude glob matches is dropped; if an include glob matches it too,
+`--exclude` wins and a `tracing` warning names it. Each glob matches a project's `/`-separated path
 below the workspace root, with `.` for the root. The globs use `globset`
 with `literal_separator`: `*` stays within one level, `**` crosses levels,
 and a glob matches only the path that it names. Discovery itself does not

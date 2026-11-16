@@ -182,6 +182,12 @@ pub(crate) enum Cmd {
         /// matches only the path it names. Repeat to add globs.
         #[arg(long, value_name = "GLOB", requires = "discovery")]
         include: Vec<String>,
+        /// With --workspace or --recursive: drop the discovered projects whose
+        /// path below the workspace root matches a glob. Same glob rules as
+        /// --include; when both match a project, --exclude wins with a
+        /// warning. Repeat to add globs.
+        #[arg(long, value_name = "GLOB", requires = "discovery")]
+        exclude: Vec<String>,
         /// Preview what would be indexed (chosen path, drivers, symbol-level
         /// languages, discovered repos) without spawning any indexer, running
         /// Bazel, or writing the codegraph. Composes with all other flags.
