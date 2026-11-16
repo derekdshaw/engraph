@@ -204,6 +204,23 @@ module above it.
     - Use the same conditions as `is_member`, so that a package is a member
       only if the run of its parent indexes it.
     - Make a separate commit for this step.
+
+    Complete:
+    - `driver::TsWorkspace::of` is the one check for the driver and for
+      `is_member`.
+    - With a workspace flag, scip-typescript indexes only the packages that
+      the tool lists. `pnpm ls -r` lists the root, but yarn 1
+      (`yarn workspaces info`) does not. Thus the driver also gives the root
+      as a project, with its real path. scip-typescript skips a project that
+      it already indexed only if the path is the same string, and pnpm and
+      yarn print real paths. A test run (2026-11-16) showed the root once, in
+      pnpm and in yarn 1.
+    - The flag makes scip-typescript run `pnpm` or `yarn`, and the run fails
+      if the tool is not installed. If the tool is not on `PATH`, the driver
+      runs without the flag and shows a warning. The root is indexed as
+      before, and the members are not.
+    - A live test indexes a pnpm workspace. There is no live yarn test: a
+      `yarn` from Corepack can download yarn during the test.
 12. Find out if the plain `--workspace` mode must skip hidden children, as
     `--recursive` does. At this time, `--recursive` skips them
     (`is_pruned_dir`) and `--workspace` does not.

@@ -1540,7 +1540,7 @@ crate that does cross-file `who-calls` across Rust/Python/Go/TS/Java.
 | `RustAnalyzer` | `Cargo.toml` | `rust-analyzer scip <repo> --output <out>` (chdir into repo) |
 | `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <out> --project-name <basename> --project-version 0.0.0` |
 | `ScipGo` | `go.mod` | `scip-go --module-root <repo> --output <out>` (chdir into repo) |
-| `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index --output <out>` (chdir into repo) |
+| `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index --output <out>` (chdir into repo); in a pnpm or yarn workspace (`TsWorkspace`), also `--pnpm-workspaces` / `--yarn-workspaces <repo>` |
 | `ScipJava` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java index --output <out>` (chdir into repo) |
 
 `<out>` is `index.scip` inside a per-repo scratch directory `index.rs`
@@ -1955,6 +1955,19 @@ parent) indexes it in the parent's run (`is_member`):
 
 A member is not recorded, so a directory below a member checks the same
 parent. Workspace globs use the `--include` rules, relative to the parent.
+
+The TypeScript rule and the scip-typescript driver use one check,
+`driver::TsWorkspace::of`, so a package is a member only when its parent's
+run indexes it. In a pnpm workspace (`pnpm-workspace.yaml`) the driver adds
+`--pnpm-workspaces`; in a yarn workspace (`package.json` `workspaces` and a
+`yarn.lock`) it adds `--yarn-workspaces`. With either flag, scip-typescript
+indexes only the packages that the tool lists, and yarn 1 does not list the
+root, so the driver also names the root (its real path: scip-typescript
+skips a project that it already indexed only when the path is the same
+string, and the tools print real paths). The flag makes scip-typescript run
+`pnpm` or `yarn`; when that tool is not on `PATH`, the driver runs without
+the flag and logs a warning, so the root is still indexed and the members
+are not.
 
 Discovery produces a report, a `DiscoveredDir` for each directory that
 explains the result, with a `DirOutcome`: a project (with the languages that

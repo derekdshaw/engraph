@@ -984,75 +984,12 @@ fn cargo_has_workspace(dir: &Path) -> bool {
     })
 }
 
-/// Whether `parent`'s workspace lists `dir`, for a package manager whose
-/// workspaces scip-typescript can index from the parent: `pnpm-workspace.yaml`
-/// (`--pnpm-workspaces`), else `package.json` `workspaces` with a `yarn.lock`
-/// (`--yarn-workspaces`). npm has no such flag, so in an npm workspace no
-/// package is a member.
+/// Whether `parent`'s workspace lists `dir`: a workspace whose packages
+/// scip-typescript indexes from the parent (`driver::TsWorkspace`). npm has no
+/// flag for that, so in an npm workspace no package is a member.
 fn typescript_workspace_lists(parent: &Path, dir: &Path) -> bool {
-    let globs = if let Ok(yaml) = std::fs::read_to_string(parent.join("pnpm-workspace.yaml")) {
-        pnpm_packages(&yaml)
-    } else if parent.join("yarn.lock").is_file() {
-        package_json_workspaces(&parent.join("package.json"))
-    } else {
-        return false;
-    };
-    workspace_globs_match(&globs, &workspace_rel(parent, dir))
-}
-
-/// The `packages` list of a `pnpm-workspace.yaml`. Reads only the common
-/// block form (`packages:` and then `- <glob>` items, quoted or not), not a
-/// YAML parse.
-fn pnpm_packages(yaml: &str) -> Vec<String> {
-    let mut in_packages = false;
-    let mut out = Vec::new();
-    for line in yaml.lines() {
-        let body = line.trim();
-        if body.is_empty() || body.starts_with('#') {
-            continue;
-        }
-        // A line at column 0 that is not a list item starts a top-level key.
-        if !line.starts_with([' ', '\t', '-']) {
-            in_packages = body
-                .split('#')
-                .next()
-                .is_some_and(|k| k.trim() == "packages:");
-            continue;
-        }
-        if let Some(item) = body.strip_prefix('-').filter(|_| in_packages) {
-            let item = item.trim();
-            let glob = match item.chars().next() {
-                Some(q @ ('\'' | '"')) => item[1..].split(q).next().unwrap_or_default(),
-                _ => item.split(" #").next().unwrap_or_default().trim(),
-            };
-            if !glob.is_empty() {
-                out.push(glob.to_string());
-            }
-        }
-    }
-    out
-}
-
-/// The `workspaces` globs of a `package.json`: an array, or yarn's
-/// `{"packages": [...]}` object.
-fn package_json_workspaces(path: &Path) -> Vec<String> {
-    let Some(json) = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-    else {
-        return Vec::new();
-    };
-    let list = match &json["workspaces"] {
-        serde_json::Value::Object(o) => o.get("packages"),
-        w => Some(w),
-    };
-    list.and_then(|l| l.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|g| g.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+    driver::TsWorkspace::of(parent)
+        .is_some_and(|ws| workspace_globs_match(ws.globs(), &workspace_rel(parent, dir)))
 }
 
 /// Whether workspace `globs` (relative to the workspace's directory; a `!`
