@@ -155,7 +155,11 @@ module above it.
 10. Correct the project key of a git submodule. The key is the path of the
     submodule checkout. `in_linked_worktree` is false for a submodule
     checkout. A linked worktree of a normal repo must keep the key of its
-    main worktree. Make a separate commit for this step.
+    main worktree. Make a separate commit for this step. Complete: when the
+    first entry of `git worktree list --porcelain` is not `bare` and has no
+    `.git` entry, it is a submodule's gitdir, and `canonical_repo_key` uses
+    the checkout's own root. A bare repo's directory stays the shared key of
+    its worktrees.
 11. Replace the rule that makes a directory with the same language a member.
     Use a rule for each language. "The parent" is the nearest directory above
     that the discovery recorded for the same language, not the workspace root.

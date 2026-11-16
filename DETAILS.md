@@ -704,7 +704,11 @@ Flow:
    stores repo-relative ones under the repo's key, so
    `divergence::indexed_location` maps an absolute path to
    `(canonical_repo_key, path relative to the git toplevel)`. A linked
-   worktree maps to its repo's key. A relative path, or one outside git,
+   worktree maps to its repo's key. A git submodule maps to its own
+   checkout, not to the gitdir (`<parent>/.git/modules/<name>`) that `git
+   worktree list` reports for it, and not to the parent repo; the
+   SessionStart refresh and `--if-changed` therefore treat the submodule's
+   checkout as a main worktree. A relative path, or one outside git,
    is matched as given against any project.
 2. `engraph_codegraph::subgraph::entities_in_file(conn, project, path, 30)`
    — `WHERE file_path = ?1 AND (?2 IS NULL OR project = ?2) ORDER BY

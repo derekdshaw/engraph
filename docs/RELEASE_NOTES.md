@@ -24,6 +24,8 @@ Last update: 2026-11-15, main at `06909ef`
 
 ## Bugs
 
+- A git submodule got its gitdir (`<parent>/.git/modules/<name>`) as its project key, so engraph treated its checkout as a linked worktree: `engraph index --if-changed` and the SessionStart refresh skipped every submodule. A submodule now scopes to its own checkout.
+
 - `engraph run` showed no output when the shell had to expand a word of the command (`~`, `$`, a glob, or braces). The hook does not wrap these commands now.
 - When a command failed, 16 filters did not show its error text. They now add stderr when the exit code is not zero.
 - Extractive ranking cut file names and versions such as `CLAUDE.md` and `v1.2.3` at the dot.

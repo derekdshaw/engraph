@@ -1244,11 +1244,26 @@ fn git_main_worktree(start: &std::path::Path) -> Option<String> {
         return None;
     }
     let stdout = String::from_utf8(out.stdout).ok()?;
-    let path = stdout.lines().next()?.strip_prefix("worktree ")?.trim();
+    let mut first = stdout.split("\n\n").next()?.lines();
+    let path = first.next()?.strip_prefix("worktree ")?.trim();
     if path.is_empty() {
         return None;
     }
     let p = std::path::Path::new(path);
+    // In a submodule, the first entry is the gitdir (<parent>/.git/modules/
+    // <name>), not a checkout. Unlike a bare repo's directory — also listed
+    // first, with a `bare` attribute, and kept as the shared key of its
+    // worktrees — the gitdir is no key: fall back to this checkout's own
+    // root, so the submodule scopes to itself and `in_linked_worktree` stays
+    // false for it.
+    if !first.any(|l| l.trim() == "bare") && !p.join(".git").exists() {
+        return git_current_toplevel(start).map(|top| {
+            top.canonicalize()
+                .unwrap_or(top)
+                .to_string_lossy()
+                .into_owned()
+        });
+    }
     Some(
         p.canonicalize()
             .unwrap_or_else(|_| p.to_path_buf())

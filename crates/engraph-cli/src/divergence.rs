@@ -428,6 +428,40 @@ mod tests {
     }
 
     #[test]
+    fn a_submodule_scopes_to_its_checkout() {
+        let (dir, repo, _head) = repo();
+        let upstream = dir.path().join("upstream");
+        std::fs::create_dir_all(&upstream).unwrap();
+        std::fs::write(upstream.join("lib.rs"), "fn u() {}\n").unwrap();
+        git(&upstream, &["init", "-q"]);
+        git(&upstream, &["add", "."]);
+        git(&upstream, &["commit", "-q", "-m", "init"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                upstream.to_str().unwrap(),
+                "sm",
+            ],
+        );
+        let sm = repo.join("sm").canonicalize().unwrap();
+
+        // The key is the submodule checkout, not its gitdir under
+        // <parent>/.git/modules, and the checkout is not a linked worktree.
+        let (key, subtree) = index_scope(&sm);
+        assert_eq!(PathBuf::from(&key), sm);
+        assert_eq!(subtree, "");
+        assert!(!in_linked_worktree(&sm));
+
+        // A directory inside the submodule scopes to the submodule.
+        std::fs::create_dir_all(sm.join("src")).unwrap();
+        assert_eq!(index_scope(&sm.join("src")), (key, "src".to_string()));
+    }
+
+    #[test]
     fn subtree_changed_tracks_edits_under_the_subtree_only() {
         let (_dir, repo, head) = repo();
         // Far-future index time: only tracked changes can flag the subtree.
