@@ -124,6 +124,26 @@ module above it.
    not only the recorded directories.
 7. For each directory, show the cause for which the discovery included it or
    did not include it.
+
+   Steps 6 and 7 are complete, in one commit:
+   - The report lists each directory that explains the result, not each
+     directory that discovery examined: a full list has tens of thousands of
+     lines on a large tree. It lists each directory with a manifest, and each
+     place where discovery stopped (ignored, beyond `--max-depth`, a Bazel
+     root). It does not list a plain directory below the root or a directory
+     pruned by name. Plain `--workspace` lists every direct child.
+   - A member names the project that covers each of its languages. The walk
+     keeps a map from each language to the nearest ancestor project that
+     covers it.
+   - The dry run prints the report as a table of paths relative to the
+     workspace root and causes, before the list of discovered projects. The
+     report does not say which ignore file names an ignored directory,
+     because the `ignore` matcher does not give this.
+   - The report is the result of discovery for the real run too, so a dry
+     run and a real run cannot differ. The speed of discovery did not change
+     (2026-11-15, the benchmark of step 1).
+   - Plain `--workspace` lists hidden children, for example `.git`. See
+     step 12.
 8. Find out if a git repo in a subdirectory of a different git repo has a
    different project key. Complete: see
    [Project keys of nested git repos](#project-keys-of-nested-git-repos).

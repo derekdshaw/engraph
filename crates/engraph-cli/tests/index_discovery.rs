@@ -337,3 +337,52 @@ fn exclude_needs_workspace_discovery_and_a_valid_glob() {
         "{stderr}"
     );
 }
+
+#[test]
+fn dry_run_lists_each_examined_dir_with_its_cause() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("e.db");
+    let ws = dir.path().join("ws");
+    manifest(&ws, "", "Cargo.toml");
+    manifest(&ws, "crates/b", "Cargo.toml");
+    manifest(&ws, "svc", "go.mod");
+    manifest(&ws, "deep/er/still", "go.mod");
+    let out = engraph(
+        &db,
+        &[
+            "index",
+            "--dry-run",
+            "--recursive",
+            ws.to_str().unwrap(),
+            "--max-depth",
+            "2",
+            "--exclude",
+            "svc",
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let examined: Vec<Vec<&str>> = stdout
+        .lines()
+        .skip_while(|l| *l != "examined:")
+        .skip(1)
+        .take_while(|l| l.starts_with("  "))
+        .map(|l| {
+            l.split("  ")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        examined,
+        [
+            vec![".", "project (rust-analyzer)"],
+            vec!["crates/b", "member of . (rust-analyzer)"],
+            vec!["deep/er/still", "beyond --max-depth 2"],
+            vec!["svc", "dropped by --exclude"],
+        ],
+        "{stdout}"
+    );
+    assert!(stdout.contains("discovered 1 repo(s)"), "{stdout}");
+}

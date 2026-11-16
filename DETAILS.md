@@ -1938,6 +1938,19 @@ change, so a project that same-language suppression hides (a member of a
 workspace above it) cannot be included, and an ignored directory stays
 ignored.
 
+Discovery produces a report, a `DiscoveredDir` for each directory that
+explains the result, with a `DirOutcome`: a project (with the languages that
+it adds, and the languages that an ancestor project covers), a Bazel root, a
+member (with the ancestor project of each language), dropped by `--exclude`
+or not matched by `--include`, ignored, or beyond `--max-depth`. The
+recursive walk tracks, for each language, the nearest ancestor project that
+covers it, so a member names its project. A plain directory below the root,
+or a directory pruned by name, is not in the report. Plain `--workspace`
+lists every direct child, with "no manifest" for a child without one. The
+real run and `--dry-run` use the same report: `index_workspace` indexes its
+projects, and `plan_workspace` returns it (`WorkspacePlan`) for the dry-run
+output.
+
 **Cross-repo subgraph annotation.** `format_markdown` now compares the
 queried entity's `project` with each related entity's. When they
 differ, the location is prefixed with `repo:<basename>` so the user
