@@ -1623,9 +1623,8 @@ mod tests {
     /// `.gitignore` applies only inside a git repo (the `ignore` crate's
     /// `require_git` default), so the fixtures that test it need one.
     fn git_init(dir: &Path) {
-        let out = std::process::Command::new("git")
+        let out = engraph_core::utils::git_cmd(dir)
             .args(["init", "-q"])
-            .current_dir(dir)
             .output()
             .unwrap();
         assert!(out.status.success(), "git init failed: {out:?}");

@@ -91,9 +91,7 @@ fn recursive_index_covers_the_root_module_and_a_module_in_tools() {
             "init",
         ],
     ] {
-        let st = Command::new("git")
-            .arg("-C")
-            .arg(&repo)
+        let st = engraph_core::utils::git_cmd(&repo)
             .args(args)
             .status()
             .unwrap();

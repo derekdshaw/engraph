@@ -16,9 +16,7 @@ fn stdout(out: &std::process::Output) -> String {
 }
 
 fn git(repo: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let out = engraph_core::utils::git_cmd(repo)
         .args([
             "-c",
             "user.name=t",

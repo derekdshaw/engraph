@@ -1234,9 +1234,7 @@ pub(crate) fn canonical_repo_key(start: &std::path::Path) -> String {
 /// first entry is always the main worktree. `None` when `start` isn't a git
 /// working tree or git can't be run.
 fn git_main_worktree(start: &std::path::Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(start)
+    let out = engraph_core::utils::git_cmd(start)
         .args(["worktree", "list", "--porcelain"])
         .output()
         .ok()?;
@@ -1278,9 +1276,7 @@ fn git_main_worktree(start: &std::path::Path) -> Option<String> {
 /// copy, not the (possibly stale or absent) indexed checkout. `None` outside a
 /// git working tree.
 pub(crate) fn git_current_toplevel(start: &std::path::Path) -> Option<std::path::PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(start)
+    let out = engraph_core::utils::git_cmd(start)
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .ok()?;

@@ -8,6 +8,7 @@ pub mod otel;
 pub mod schema;
 pub mod telemetry;
 pub mod tokens;
+pub mod utils;
 
 pub use error::{Error, Result};
 

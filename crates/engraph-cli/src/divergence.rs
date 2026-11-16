@@ -56,9 +56,7 @@ fn slash_path(rel: &Path) -> String {
 
 /// Trimmed stdout of `git -C repo <args>`; `None` on failure or empty output.
 fn git_stdout(repo: &Path, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let out = engraph_core::utils::git_cmd(repo)
         .args(args)
         .output()
         .ok()?;
@@ -105,9 +103,7 @@ fn covering_subtree<'a>(commits: &'a [(String, String)], f: &str) -> Option<&'a 
 /// (`git ls-files --others --exclude-standard`, so ignored files are pruned).
 /// Empty when git fails.
 fn untracked_files(top: &Path, pathspecs: &[&str]) -> Vec<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(top)
+    let out = engraph_core::utils::git_cmd(top)
         .args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
         .args(pathspecs)
         .output();
@@ -190,9 +186,7 @@ fn changed_since_index(
 /// (the commit was rebased or gc'd away) every file counts as changed, since an
 /// unneeded grep costs less than a stale graph.
 fn diff_names(top: &Path, sha: &str, files: &[&str]) -> Vec<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(top)
+    let out = engraph_core::utils::git_cmd(top)
         .args(["diff", "--name-only", sha, "--"])
         .args(files)
         .output();
@@ -279,9 +273,7 @@ fn subtree_changed(
     exts: Option<&[&str]>,
 ) -> bool {
     let pathspec = if subtree.is_empty() { "." } else { subtree };
-    let status = std::process::Command::new("git")
-        .arg("-C")
-        .arg(top)
+    let status = engraph_core::utils::git_cmd(top)
         .args(["diff", "--quiet", sha, "--", pathspec])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -361,12 +353,9 @@ pub(crate) fn stale_note(conn: &db::PooledConn, cwd: &Path, n: &Neighborhood) ->
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::process::Command;
 
     fn git(repo: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(repo)
+        let out = engraph_core::utils::git_cmd(repo)
             .args([
                 "-c",
                 "user.name=t",

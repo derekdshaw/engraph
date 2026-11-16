@@ -157,9 +157,7 @@ fn empty_stdin_passes_through() {
 }
 
 fn git(repo: &std::path::Path, args: &[&str]) {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let out = engraph_core::utils::git_cmd(repo)
         .args([
             "-c",
             "user.name=t",
