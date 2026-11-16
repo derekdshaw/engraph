@@ -906,7 +906,9 @@ fn glob_set(flag: &str, pats: &[String]) -> Result<Option<GlobSet>> {
     }
     let mut set = GlobSetBuilder::new();
     for pat in pats {
-        let pat = pat.strip_prefix("./").unwrap_or(pat);
+        // A discovered path never ends in `/`; shell completion of a
+        // directory adds one.
+        let pat = pat.strip_prefix("./").unwrap_or(pat).trim_end_matches('/');
         let glob = GlobBuilder::new(pat)
             .literal_separator(true)
             .build()
@@ -925,7 +927,7 @@ fn discover(
 ) -> Result<Vec<DiscoveredDir>> {
     let mut dirs = match discovery {
         Discovery::Children => examine_children(root)?,
-        Discovery::Recursive { max_depth } => examine_recursive(root, max_depth)?,
+        Discovery::Recursive { max_depth } => examine_recursive(root, max_depth, &driver::on_path)?,
     };
     filter.apply(root, &mut dirs);
     Ok(dirs)
@@ -934,13 +936,19 @@ fn discover(
 /// Recursive project discovery for `index --recursive`, as a report. See
 /// `Walker::walk` for the per-directory rules (prune build dirs, stop at
 /// Bazel, skip the members of a project above so they aren't each indexed;
-/// `is_member` gives the rule of each language).
-fn examine_recursive(root: &Path, max_depth: usize) -> Result<Vec<DiscoveredDir>> {
+/// `is_member` gives the rule of each language). `installed` says whether a
+/// tool is on `PATH` (`driver::on_path`).
+fn examine_recursive(
+    root: &Path,
+    max_depth: usize,
+    installed: &dyn Fn(&str) -> bool,
+) -> Result<Vec<DiscoveredDir>> {
     if !root.is_dir() {
         anyhow::bail!("workspace root is not a directory: {}", root.display());
     }
     let mut walker = Walker {
         max_depth,
+        installed,
         out: Vec::new(),
     };
     walker.walk(
@@ -959,12 +967,13 @@ fn examine_recursive(root: &Path, max_depth: usize) -> Result<Vec<DiscoveredDir>
 /// Whether `dir`, which has a manifest of `lang`, is a member of `parent`, the
 /// nearest recorded project of `lang` above it: whether the parent's index run
 /// covers `dir`, so `dir` is not indexed on its own.
-fn is_member(lang: &str, parent: &Path, dir: &Path) -> bool {
+fn is_member(lang: &str, parent: &Path, dir: &Path, installed: &dyn Fn(&str) -> bool) -> bool {
     match lang {
         // rust-analyzer indexes a workspace's members from its root, and only
-        // its own crate graph from a plain package.
-        "rust-analyzer" => cargo_has_workspace(parent),
-        "scip-typescript" => typescript_workspace_lists(parent, dir),
+        // its own crate graph from a plain package. A crate that declares its
+        // own workspace (e.g. a `cargo fuzz` crate) is in no other.
+        "rust-analyzer" => cargo_has_workspace(parent) && !cargo_has_workspace(dir),
+        "scip-typescript" => typescript_workspace_lists(parent, dir, installed),
         // Go tools leave a nested module out of the module above it.
         "scip-go" => false,
         // scip-python indexes every file below its directory, so a nested
@@ -987,9 +996,12 @@ fn cargo_has_workspace(dir: &Path) -> bool {
 
 /// Whether `parent`'s workspace lists `dir`: a workspace whose packages
 /// scip-typescript indexes from the parent (`driver::TsWorkspace`). npm has no
-/// flag for that, so in an npm workspace no package is a member.
-fn typescript_workspace_lists(parent: &Path, dir: &Path) -> bool {
+/// flag for that, so in an npm workspace no package is a member. Without the
+/// package manager installed, the driver runs without the flag, so no package
+/// is a member either.
+fn typescript_workspace_lists(parent: &Path, dir: &Path, installed: &dyn Fn(&str) -> bool) -> bool {
     driver::TsWorkspace::of(parent)
+        .filter(|ws| installed(ws.tool()))
         .is_some_and(|ws| workspace_globs_match(ws.globs(), &workspace_rel(parent, dir)))
 }
 
@@ -1017,13 +1029,15 @@ fn workspace_globs_match(globs: &[String], rel: &str) -> bool {
             .any(|m| m.is_match(rel))
 }
 
-/// A recursive discovery: the depth limit, and the report so far.
-struct Walker {
+/// A recursive discovery: the depth limit, the tool check of `is_member`, and
+/// the report so far.
+struct Walker<'a> {
     max_depth: usize,
+    installed: &'a dyn Fn(&str) -> bool,
     out: Vec<DiscoveredDir>,
 }
 
-impl Walker {
+impl Walker<'_> {
     fn record(&mut self, dir: &Path, outcome: DirOutcome, own_repo: bool) {
         self.out.push(DiscoveredDir {
             path: dir.to_path_buf(),
@@ -1056,7 +1070,7 @@ impl Walker {
         let mut covered: Vec<(&'static str, PathBuf)> = Vec::new();
         for lang in detected_langs(dir) {
             match claimed.get(lang) {
-                Some(parent) if is_member(lang, parent, dir) => {
+                Some(parent) if is_member(lang, parent, dir, self.installed) => {
                     covered.push((lang, parent.clone()));
                 }
                 _ => langs.push(lang),
@@ -1111,12 +1125,18 @@ impl Walker {
             })
             .collect();
         children.sort();
+        let no_claims = HashMap::new();
         for name in children {
             let child = dir.join(&name);
             let child_rel = rel.join(&name);
+            // A nested git checkout (repo or submodule) has its own project
+            // key, so no project above it covers it: lookups from inside it
+            // would miss code indexed under the outer key.
+            let checkout = child.join(".git").exists();
+            let claims = if checkout { &no_claims } else { child_claimed };
             if !ig.matched(&child_rel, true).is_ignore() {
-                self.walk(&child, &child_rel, depth + 1, child_claimed, ig, false);
-            } else if child.join(".git").exists() {
+                self.walk(&child, &child_rel, depth + 1, claims, ig, false);
+            } else if checkout {
                 // An ignored dir that is its own git repo: its parent's rules
                 // don't govern it, so walk it under its own.
                 let mut child_ig = discovery_ignores(&child);
@@ -1124,7 +1144,7 @@ impl Walker {
                     &child,
                     Path::new(""),
                     depth + 1,
-                    child_claimed,
+                    claims,
                     &mut child_ig,
                     true,
                 );
@@ -1739,6 +1759,28 @@ mod tests {
     }
 
     #[test]
+    fn filter_globs_ignore_a_trailing_slash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        dir_with(root, "", "Cargo.toml");
+        dir_with(root, "svc/x", "go.mod");
+        let recursive = Discovery::Recursive {
+            max_depth: RECURSIVE_MAX_DEPTH,
+        };
+        let roots = |filter: DiscoveryFilter| -> Vec<String> {
+            plan_workspace(root, false, recursive, &filter)
+                .unwrap()
+                .repos
+                .iter()
+                .map(|(p, _)| workspace_rel(root, p))
+                .collect()
+        };
+        let slash = vec!["svc/x/".to_string()];
+        assert_eq!(roots(DiscoveryFilter::new(&slash, &[]).unwrap()), ["svc/x"]);
+        assert_eq!(roots(DiscoveryFilter::new(&[], &slash).unwrap()), ["."]);
+    }
+
+    #[test]
     fn report_marks_filtered_projects() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -1822,6 +1864,36 @@ mod tests {
         dir_with(tmp.path(), "crates/a", "Cargo.toml"); // member of r
         dir_with(tmp.path(), "crates/a/nested", "Cargo.toml"); // member of r too
         assert_eq!(recursive_roots(tmp.path()), vec![r]);
+
+        // A crate that declares its own workspace (the `cargo fuzz` layout)
+        // is in no other one.
+        let tmp = tempfile::tempdir().unwrap();
+        let r = write(tmp.path(), "", "Cargo.toml", "[workspace]\n");
+        let fuzz = write(
+            tmp.path(),
+            "fuzz",
+            "Cargo.toml",
+            "[package]\nname = \"f\"\n\n[workspace]\nmembers = [\".\"]\n",
+        );
+        assert_eq!(recursive_roots(tmp.path()), vec![r, fuzz]);
+    }
+
+    #[test]
+    fn recursive_nested_git_repos_are_not_members() {
+        // A nested checkout has its own project key, so the projects of the
+        // repo around it don't cover it, ignored or not, nor what's below it.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git_init(root);
+        std::fs::write(root.join(".gitignore"), "vendored/\n").unwrap();
+        let r = write(root, "", "Cargo.toml", "[workspace]\n");
+        touch(&r, "pyproject.toml");
+        let vendored = dir_with(root, "vendored", "Cargo.toml");
+        git_init(&vendored);
+        let lib = dir_with(root, "lib", "pyproject.toml");
+        git_init(&lib);
+        let inner = dir_with(root, "lib/inner", "Cargo.toml");
+        assert_eq!(recursive_roots(root), vec![r, lib, inner, vendored]);
     }
 
     #[test]
@@ -1853,6 +1925,12 @@ mod tests {
         d
     }
 
+    /// `recursive_roots`, with `installed` in place of the `PATH` check of
+    /// the package managers.
+    fn ts_roots(root: &Path, installed: &dyn Fn(&str) -> bool) -> Vec<PathBuf> {
+        projects(examine_recursive(root, RECURSIVE_MAX_DEPTH, installed).unwrap())
+    }
+
     #[test]
     fn recursive_typescript_members_follow_pnpm_workspace() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1866,7 +1944,15 @@ mod tests {
         let skip = ts(tmp.path(), "packages/skip", "{}"); // negated
         ts(tmp.path(), "libs/deep/x", "{}"); // member, `**`
         let web = ts(tmp.path(), "apps/web", "{}"); // under another key
-        assert_eq!(recursive_roots(tmp.path()), vec![root, web, skip]);
+        assert_eq!(
+            ts_roots(tmp.path(), &|_| true),
+            vec![root.clone(), web.clone(), skip.clone()]
+        );
+
+        // Without pnpm, the root's run indexes no package, so each is its own
+        // project.
+        let all = ts_roots(tmp.path(), &|tool| tool != "pnpm");
+        assert_eq!(all.len(), 5, "{all:?}");
     }
 
     #[test]
@@ -1877,7 +1963,15 @@ mod tests {
         touch(&root, "yarn.lock");
         ts(tmp.path(), "packages/a", "{}");
         let tool = ts(tmp.path(), "tools/x", "{}");
-        assert_eq!(recursive_roots(tmp.path()), vec![root, tool]);
+        assert_eq!(
+            ts_roots(tmp.path(), &|_| true),
+            vec![root.clone(), tool.clone()]
+        );
+        let a = tmp.path().join("packages/a");
+        assert_eq!(
+            ts_roots(tmp.path(), &|tool| tool != "yarn"),
+            vec![root, a, tool]
+        );
 
         // Object form.
         let tmp = tempfile::tempdir().unwrap();
@@ -1888,7 +1982,7 @@ mod tests {
         );
         touch(&root, "yarn.lock");
         ts(tmp.path(), "libs/deep/x", "{}");
-        assert_eq!(recursive_roots(tmp.path()), vec![root]);
+        assert_eq!(ts_roots(tmp.path(), &|_| true), vec![root]);
     }
 
     #[test]

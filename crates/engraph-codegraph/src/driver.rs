@@ -216,7 +216,7 @@ fn typescript_command(repo: &Path, out: &Path, on_path: &dyn Fn(&str) -> bool) -
 }
 
 /// Whether `tool` is an executable file in a directory of `PATH`.
-fn on_path(tool: &str) -> bool {
+pub(crate) fn on_path(tool: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
     };
@@ -247,7 +247,11 @@ impl TsWorkspace {
     /// scip-typescript flag lists their packages.
     pub(crate) fn of(dir: &Path) -> Option<Self> {
         if let Ok(yaml) = std::fs::read_to_string(dir.join("pnpm-workspace.yaml")) {
-            return Some(Self::Pnpm(pnpm_packages(&yaml)));
+            // No globs read (a form `pnpm_packages` doesn't parse): with the
+            // flag, the root's run would index packages that discovery also
+            // records as projects of their own.
+            let globs = pnpm_packages(&yaml);
+            return (!globs.is_empty()).then_some(Self::Pnpm(globs));
         }
         if !dir.join("yarn.lock").is_file() {
             return None;
@@ -264,7 +268,7 @@ impl TsWorkspace {
         }
     }
 
-    fn tool(&self) -> &'static str {
+    pub(crate) fn tool(&self) -> &'static str {
         match self {
             Self::Pnpm(_) => "pnpm",
             Self::Yarn(_) => "yarn",
@@ -412,5 +416,14 @@ mod tests {
         // list the workspace, so it indexes the root alone, as before.
         let pnpm = ts_repo("{}", &["pnpm-workspace.yaml"]);
         assert_eq!(ts_args(pnpm.path(), &|tool| tool != "pnpm"), plain);
+        // A packages list the line scan can't read (flow form): the flag
+        // would index packages discovery records as their own projects.
+        let flow = ts_repo("{}", &[]);
+        std::fs::write(
+            flow.path().join("pnpm-workspace.yaml"),
+            "packages: ['packages/*']\n",
+        )
+        .unwrap();
+        assert_eq!(ts_args(flow.path(), &all), plain);
     }
 }
