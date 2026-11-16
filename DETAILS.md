@@ -1938,9 +1938,23 @@ exclude glob matches is dropped; if an include glob matches it too,
 below the workspace root, with `.` for the root. The globs use `globset`
 with `literal_separator`: `*` stays within one level, `**` crosses levels,
 and a glob matches only the path that it names. Discovery itself does not
-change, so a project that same-language suppression hides (a member of a
-workspace above it) cannot be included, and an ignored directory stays
-ignored.
+change, so a member of a project above it cannot be included, and an
+ignored directory stays ignored.
+
+A directory with a manifest is a *member*, and is not indexed on its own,
+when the nearest recorded project of the same language above it (its
+parent) indexes it in the parent's run (`is_member`):
+
+| Language | Member when |
+|---|---|
+| Rust | the parent's `Cargo.toml` has a `[workspace]` or `[workspace.*]` table (a line scan; `members` and `exclude` are not read) |
+| TypeScript | the parent's `pnpm-workspace.yaml` `packages` list it, or, with a `yarn.lock`, its `package.json` `workspaces` (array or `{"packages": [...]}`) list it; `!` globs exclude. An npm workspace has no member: scip-typescript cannot index its packages from the root |
+| Go | never: Go tools leave a nested module out of the module above it |
+| Python | always: scip-python indexes every file below the parent |
+| Java | always: scip-java builds multi-module projects from the root |
+
+A member is not recorded, so a directory below a member checks the same
+parent. Workspace globs use the `--include` rules, relative to the parent.
 
 Discovery produces a report, a `DiscoveredDir` for each directory that
 explains the result, with a `DirOutcome`: a project (with the languages that

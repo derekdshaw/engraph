@@ -932,8 +932,8 @@ fn discover(
 
 /// Recursive project discovery for `index --recursive`, as a report. See
 /// `Walker::walk` for the per-directory rules (prune build dirs, stop at
-/// Bazel, suppress same-language descendants so a workspace's members aren't
-/// each indexed).
+/// Bazel, skip the members of a project above so they aren't each indexed;
+/// `is_member` gives the rule of each language).
 fn examine_recursive(root: &Path, max_depth: usize) -> Result<Vec<DiscoveredDir>> {
     if !root.is_dir() {
         anyhow::bail!("workspace root is not a directory: {}", root.display());
@@ -953,6 +953,130 @@ fn examine_recursive(root: &Path, max_depth: usize) -> Result<Vec<DiscoveredDir>
     let mut out = walker.out;
     out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
+}
+
+/// Whether `dir`, which has a manifest of `lang`, is a member of `parent`, the
+/// nearest recorded project of `lang` above it: whether the parent's index run
+/// covers `dir`, so `dir` is not indexed on its own.
+fn is_member(lang: &str, parent: &Path, dir: &Path) -> bool {
+    match lang {
+        // rust-analyzer indexes a workspace's members from its root, and only
+        // its own crate graph from a plain package.
+        "rust-analyzer" => cargo_has_workspace(parent),
+        "scip-typescript" => typescript_workspace_lists(parent, dir),
+        // Go tools leave a nested module out of the module above it.
+        "scip-go" => false,
+        // scip-python indexes every file below its directory, so a nested
+        // project is in the parent's run; scip-java builds Maven and Gradle
+        // multi-module projects from the root.
+        _ => true,
+    }
+}
+
+/// Whether the `Cargo.toml` in `dir` defines a workspace: a `[workspace]` or
+/// `[workspace.*]` table header. A line scan, not a TOML parse.
+fn cargo_has_workspace(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("Cargo.toml")).is_ok_and(|toml| {
+        toml.lines().any(|l| {
+            let l = l.trim_start();
+            l.starts_with("[workspace]") || l.starts_with("[workspace.")
+        })
+    })
+}
+
+/// Whether `parent`'s workspace lists `dir`, for a package manager whose
+/// workspaces scip-typescript can index from the parent: `pnpm-workspace.yaml`
+/// (`--pnpm-workspaces`), else `package.json` `workspaces` with a `yarn.lock`
+/// (`--yarn-workspaces`). npm has no such flag, so in an npm workspace no
+/// package is a member.
+fn typescript_workspace_lists(parent: &Path, dir: &Path) -> bool {
+    let globs = if let Ok(yaml) = std::fs::read_to_string(parent.join("pnpm-workspace.yaml")) {
+        pnpm_packages(&yaml)
+    } else if parent.join("yarn.lock").is_file() {
+        package_json_workspaces(&parent.join("package.json"))
+    } else {
+        return false;
+    };
+    workspace_globs_match(&globs, &workspace_rel(parent, dir))
+}
+
+/// The `packages` list of a `pnpm-workspace.yaml`. Reads only the common
+/// block form (`packages:` and then `- <glob>` items, quoted or not), not a
+/// YAML parse.
+fn pnpm_packages(yaml: &str) -> Vec<String> {
+    let mut in_packages = false;
+    let mut out = Vec::new();
+    for line in yaml.lines() {
+        let body = line.trim();
+        if body.is_empty() || body.starts_with('#') {
+            continue;
+        }
+        // A line at column 0 that is not a list item starts a top-level key.
+        if !line.starts_with([' ', '\t', '-']) {
+            in_packages = body
+                .split('#')
+                .next()
+                .is_some_and(|k| k.trim() == "packages:");
+            continue;
+        }
+        if let Some(item) = body.strip_prefix('-').filter(|_| in_packages) {
+            let item = item.trim();
+            let glob = match item.chars().next() {
+                Some(q @ ('\'' | '"')) => item[1..].split(q).next().unwrap_or_default(),
+                _ => item.split(" #").next().unwrap_or_default().trim(),
+            };
+            if !glob.is_empty() {
+                out.push(glob.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// The `workspaces` globs of a `package.json`: an array, or yarn's
+/// `{"packages": [...]}` object.
+fn package_json_workspaces(path: &Path) -> Vec<String> {
+    let Some(json) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    else {
+        return Vec::new();
+    };
+    let list = match &json["workspaces"] {
+        serde_json::Value::Object(o) => o.get("packages"),
+        w => Some(w),
+    };
+    list.and_then(|l| l.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|g| g.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether workspace `globs` (relative to the workspace's directory; a `!`
+/// glob excludes) list `rel`. Same glob rules as `--include`. A glob that does
+/// not compile matches nothing.
+fn workspace_globs_match(globs: &[String], rel: &str) -> bool {
+    let compiled = |g: &str| {
+        let g = g.strip_prefix("./").unwrap_or(g).trim_end_matches('/');
+        GlobBuilder::new(g)
+            .literal_separator(true)
+            .build()
+            .ok()
+            .map(|g| g.compile_matcher())
+    };
+    let (excludes, includes): (Vec<&String>, Vec<&String>) =
+        globs.iter().partition(|g| g.starts_with('!'));
+    includes
+        .iter()
+        .filter_map(|g| compiled(g))
+        .any(|m| m.is_match(rel))
+        && !excludes
+            .iter()
+            .filter_map(|g| compiled(&g[1..]))
+            .any(|m| m.is_match(rel))
 }
 
 /// A recursive discovery: the depth limit, and the report so far.
@@ -987,17 +1111,20 @@ impl Walker {
             self.record(dir, DirOutcome::BeyondMaxDepth { max_depth }, own_repo);
             return;
         }
-        let detected = detected_langs(dir);
-        let mut langs: Vec<&'static str> = detected
-            .iter()
-            .filter(|l| !claimed.contains_key(*l))
-            .copied()
-            .collect();
+        // Each detected language is new here, or covered by its parent: the
+        // nearest recorded project of that language, when its member rule
+        // says `dir` belongs to it.
+        let mut langs: Vec<&'static str> = Vec::new();
+        let mut covered: Vec<(&'static str, PathBuf)> = Vec::new();
+        for lang in detected_langs(dir) {
+            match claimed.get(lang) {
+                Some(parent) if is_member(lang, parent, dir) => {
+                    covered.push((lang, parent.clone()));
+                }
+                _ => langs.push(lang),
+            }
+        }
         langs.sort();
-        let mut covered: Vec<(&'static str, PathBuf)> = detected
-            .iter()
-            .filter_map(|l| claimed.get(l).map(|p| (*l, p.clone())))
-            .collect();
         covered.sort();
 
         // A Bazel root is one indexable unit: record it and don't descend — the
@@ -1456,6 +1583,13 @@ mod tests {
         d
     }
 
+    /// `dir_with`, but the manifest gets `content`.
+    fn write(root: &Path, rel: &str, manifest: &str, content: &str) -> PathBuf {
+        let d = dir_with(root, rel, manifest);
+        std::fs::write(d.join(manifest), content).unwrap();
+        d
+    }
+
     fn recursive_roots(root: &Path) -> Vec<PathBuf> {
         plan_workspace(
             root,
@@ -1499,10 +1633,10 @@ mod tests {
     #[test]
     fn recursive_suppresses_same_language_members() {
         let root = tempfile::tempdir().unwrap();
-        let r = dir_with(root.path(), "", "Cargo.toml");
+        let r = write(root.path(), "", "Cargo.toml", "[workspace]\n");
         dir_with(root.path(), "crates/a", "Cargo.toml");
         dir_with(root.path(), "crates/b", "Cargo.toml");
-        // Members are same-language under the recorded root → not re-recorded.
+        // Members of the root workspace → not re-recorded.
         assert_eq!(recursive_roots(root.path()), vec![r]);
     }
 
@@ -1620,7 +1754,7 @@ mod tests {
         let root = tmp.path();
         git_init(root);
         std::fs::write(root.join(".gitignore"), "build/\nvendor-repo/\n").unwrap();
-        dir_with(root, "", "Cargo.toml");
+        write(root, "", "Cargo.toml", "[workspace]\n");
         dir_with(root, "crates/b", "Cargo.toml");
         let svc = dir_with(root, "svc", "go.mod");
         touch(&svc, "Cargo.toml");
@@ -1659,13 +1793,8 @@ mod tests {
                 ),
                 ("infra".into(), DirOutcome::BazelRoot, false),
                 ("svc".into(), project(&["scip-go"], &[(rust, root)]), false),
-                (
-                    "svc/inner".into(),
-                    DirOutcome::Member {
-                        covered: vec![("scip-go", svc.clone())]
-                    },
-                    false
-                ),
+                // A Go module is never a member.
+                ("svc/inner".into(), project(&["scip-go"], &[]), false),
                 ("vendor-repo".into(), project(&["scip-python"], &[]), true),
             ]
         );
@@ -1724,6 +1853,116 @@ mod tests {
                 ("z".into(), DirOutcome::BazelRoot, false),
             ]
         );
+    }
+
+    #[test]
+    fn recursive_cargo_members_need_a_workspace_above() {
+        // No `[workspace]` in the parent: the nested crate is its own project.
+        let tmp = tempfile::tempdir().unwrap();
+        let r = write(
+            tmp.path(),
+            "",
+            "Cargo.toml",
+            "[package]\nname = \"r\"\n# [workspace]\n",
+        );
+        let sub = dir_with(tmp.path(), "tools/x", "Cargo.toml");
+        assert_eq!(recursive_roots(tmp.path()), vec![r, sub]);
+
+        // `[workspace.dependencies]` alone defines a workspace too.
+        let tmp = tempfile::tempdir().unwrap();
+        let r = write(
+            tmp.path(),
+            "",
+            "Cargo.toml",
+            "[workspace.dependencies]\nanyhow = \"1\"\n",
+        );
+        dir_with(tmp.path(), "crates/a", "Cargo.toml");
+        assert_eq!(recursive_roots(tmp.path()), vec![r]);
+
+        // The parent is the nearest *recorded* Rust project: a member is not
+        // recorded, so a crate below a member checks the workspace root.
+        let tmp = tempfile::tempdir().unwrap();
+        let r = write(tmp.path(), "", "Cargo.toml", "[workspace]\n");
+        dir_with(tmp.path(), "crates/a", "Cargo.toml"); // member of r
+        dir_with(tmp.path(), "crates/a/nested", "Cargo.toml"); // member of r too
+        assert_eq!(recursive_roots(tmp.path()), vec![r]);
+    }
+
+    #[test]
+    fn recursive_go_modules_are_never_members() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = dir_with(tmp.path(), "", "go.mod");
+        let a = dir_with(tmp.path(), "svc/a", "go.mod");
+        let b = dir_with(tmp.path(), "svc/a/b", "go.mod");
+        assert_eq!(recursive_roots(tmp.path()), vec![r, a, b]);
+    }
+
+    #[test]
+    fn recursive_python_and_java_keep_the_member_rule() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = dir_with(tmp.path(), "", "pyproject.toml");
+        dir_with(tmp.path(), "pkg/sub", "pyproject.toml");
+        assert_eq!(recursive_roots(tmp.path()), vec![r]);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let r = dir_with(tmp.path(), "", "pom.xml");
+        dir_with(tmp.path(), "module-a", "pom.xml");
+        assert_eq!(recursive_roots(tmp.path()), vec![r]);
+    }
+
+    /// A TypeScript project: `package.json` (with `content`) and `tsconfig.json`.
+    fn ts(root: &Path, rel: &str, content: &str) -> PathBuf {
+        let d = write(root, rel, "package.json", content);
+        touch(&d, "tsconfig.json");
+        d
+    }
+
+    #[test]
+    fn recursive_typescript_members_follow_pnpm_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = ts(tmp.path(), "", "{}");
+        std::fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "# comment\npackages:\n  - 'packages/*'\n  - \"!packages/skip\" # not this one\n  - libs/**\ncatalog:\n  - 'apps/*'\n",
+        )
+        .unwrap();
+        ts(tmp.path(), "packages/a", "{}"); // member
+        let skip = ts(tmp.path(), "packages/skip", "{}"); // negated
+        ts(tmp.path(), "libs/deep/x", "{}"); // member, `**`
+        let web = ts(tmp.path(), "apps/web", "{}"); // under another key
+        assert_eq!(recursive_roots(tmp.path()), vec![root, web, skip]);
+    }
+
+    #[test]
+    fn recursive_typescript_members_follow_yarn_workspaces() {
+        // Array form.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = ts(tmp.path(), "", r#"{"workspaces": ["packages/*"]}"#);
+        touch(&root, "yarn.lock");
+        ts(tmp.path(), "packages/a", "{}");
+        let tool = ts(tmp.path(), "tools/x", "{}");
+        assert_eq!(recursive_roots(tmp.path()), vec![root, tool]);
+
+        // Object form.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = ts(
+            tmp.path(),
+            "",
+            r#"{"workspaces": {"packages": ["./libs/**"]}}"#,
+        );
+        touch(&root, "yarn.lock");
+        ts(tmp.path(), "libs/deep/x", "{}");
+        assert_eq!(recursive_roots(tmp.path()), vec![root]);
+    }
+
+    #[test]
+    fn recursive_typescript_npm_workspace_packages_are_not_members() {
+        // No yarn.lock and no pnpm-workspace.yaml: scip-typescript has no flag
+        // that indexes the packages from the root, so each is its own project.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = ts(tmp.path(), "", r#"{"workspaces": ["packages/*"]}"#);
+        let a = ts(tmp.path(), "packages/a", "{}");
+        assert_eq!(recursive_roots(tmp.path()), vec![root, a]);
     }
 
     #[test]

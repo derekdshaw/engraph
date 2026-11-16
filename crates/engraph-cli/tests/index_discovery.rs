@@ -344,6 +344,7 @@ fn dry_run_lists_each_examined_dir_with_its_cause() {
     let db = dir.path().join("e.db");
     let ws = dir.path().join("ws");
     manifest(&ws, "", "Cargo.toml");
+    std::fs::write(ws.join("Cargo.toml"), "[workspace]\n").unwrap();
     manifest(&ws, "crates/b", "Cargo.toml");
     manifest(&ws, "svc", "go.mod");
     manifest(&ws, "deep/er/still", "go.mod");

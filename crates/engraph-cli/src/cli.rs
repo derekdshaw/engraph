@@ -168,7 +168,9 @@ pub(crate) enum Cmd {
         /// Recurse into subdirectories to discover every project (not just the
         /// immediate children of --workspace): prunes build/dep dirs
         /// (node_modules, target, vendor, …), stops at Bazel roots, and
-        /// suppresses same-language workspace members. Implies workspace-style
+        /// skips the members of a workspace above them (Cargo `[workspace]`,
+        /// pnpm/yarn workspaces; nested Python and Java projects; never a Go
+        /// module). Implies workspace-style
         /// indexing rooted at --workspace (or the positional repo).
         #[arg(long, conflicts_with_all = ["scip", "scip_manifest", "lang"])]
         recursive: bool,

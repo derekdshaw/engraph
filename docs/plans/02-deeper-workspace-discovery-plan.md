@@ -176,6 +176,34 @@ module above it.
       [Same-language projects that overlap](#same-language-projects-that-overlap)).
     - Java: keep the current rule. scip-java indexes Maven and Gradle
       multi-module builds from the root.
+
+    Complete:
+    - A member of the parent is not recorded, so a directory below a member
+      checks the same parent.
+    - Cargo: a line scan finds a `[workspace]` or `[workspace.*]` table
+      header. engraph has no TOML parser, and this is sufficient.
+    - TypeScript: `pnpm-workspace.yaml` is read with a line scan of the
+      block form of `packages` (no YAML parser). `package.json` `workspaces`
+      can be an array or an object with `packages`. A glob that starts with
+      `!` excludes. The globs use the rules of `--include`, relative to the
+      parent.
+    - TypeScript: the parent's workspace counts only if scip-typescript can
+      index it from the parent: with `pnpm-workspace.yaml`
+      (`--pnpm-workspaces`), or with `package.json` `workspaces` and a
+      `yarn.lock` (`--yarn-workspaces`). npm has no such flag, so in an npm
+      workspace each package is its own project. Step 11b gives the driver
+      these flags.
+11b. Make the scip-typescript driver index the workspace members of step 11.
+    At this time, the driver runs `scip-typescript index --output <file>`,
+    which indexes only the projects of the root `tsconfig.json`.
+    - If the directory has `pnpm-workspace.yaml`, add `--pnpm-workspaces`.
+      scip-typescript then runs `pnpm ls -r`.
+    - Else, if `package.json` has `workspaces` and the directory has
+      `yarn.lock`, add `--yarn-workspaces`. scip-typescript then runs
+      `yarn workspaces info` or `yarn workspaces list`.
+    - Use the same conditions as `is_member`, so that a package is a member
+      only if the run of its parent indexes it.
+    - Make a separate commit for this step.
 12. Find out if the plain `--workspace` mode must skip hidden children, as
     `--recursive` does. At this time, `--recursive` skips them
     (`is_pruned_dir`) and `--workspace` does not.
