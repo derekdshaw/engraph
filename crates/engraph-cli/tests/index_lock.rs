@@ -12,7 +12,7 @@ use std::time::Duration;
 use tempfile::tempdir;
 
 mod common;
-use common::{command, engraph};
+use common::{command, engraph, git};
 
 /// `engraph` started in the background, for a run expected to wait.
 fn spawn(db: &Path, cwd: &Path, args: &[&str]) -> Child {
@@ -29,26 +29,6 @@ fn text(out: &std::process::Output) -> String {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     )
-}
-
-fn git(repo: &Path, args: &[&str]) {
-    let out = engraph_core::utils::git_cmd(repo)
-        .args([
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 /// A committed monorepo with cargo crates `svc-a` and `svc-b`, an empty

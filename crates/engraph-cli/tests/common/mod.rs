@@ -27,3 +27,26 @@ pub fn command(db: &Path, cwd: &Path, args: &[&str]) -> Command {
 pub fn engraph(db: &Path, cwd: &Path, args: &[&str]) -> Output {
     command(db, cwd, args).output().expect("spawn engraph")
 }
+
+/// `git -C repo <args>` with a throwaway identity and no signing, so commits
+/// work on any machine. Panics on failure; returns trimmed stdout.
+pub fn git(repo: &Path, args: &[&str]) -> String {
+    let out = engraph_core::utils::git_cmd(repo)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .expect("spawn git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}

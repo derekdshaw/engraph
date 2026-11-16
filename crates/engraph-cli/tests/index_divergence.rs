@@ -11,28 +11,7 @@ use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
 mod common;
-use common::{bin, engraph};
-
-fn git(repo: &Path, args: &[&str]) -> String {
-    let out = engraph_core::utils::git_cmd(repo)
-        .args([
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
+use common::{bin, engraph, git};
 
 /// A git repo with `src/lib.rs` (holding `widget_count`) and `src/other.rs`
 /// committed, plus an empty prebuilt SCIP to index it with.

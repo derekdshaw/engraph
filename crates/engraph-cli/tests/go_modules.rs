@@ -6,6 +6,7 @@ use std::process::Command;
 use tempfile::tempdir;
 
 mod common;
+use common::git;
 
 /// `common::engraph`, with the SCIP scratch file kept out of the user's data
 /// dir.
@@ -75,28 +76,9 @@ fn recursive_index_covers_the_root_module_and_a_module_in_tools() {
         "package tools\n\nfunc ToolHandler() int { return 2 }\n",
     );
     // A git repo, so `tools/` folds into the repo's project key.
-    for args in [
-        &["init", "-q"][..],
-        &["add", "."],
-        &[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "-m",
-            "init",
-        ],
-    ] {
-        let st = engraph_core::utils::git_cmd(&repo)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(st.success(), "git {args:?}");
-    }
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
     let repo = repo.canonicalize().unwrap();
 
     let out = engraph(
