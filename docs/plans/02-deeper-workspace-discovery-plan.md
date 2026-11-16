@@ -223,7 +223,10 @@ module above it.
       `yarn` from Corepack can download yarn during the test.
 12. Find out if the plain `--workspace` mode must skip hidden children, as
     `--recursive` does. At this time, `--recursive` skips them
-    (`is_pruned_dir`) and `--workspace` does not.
+    (`is_pruned_dir`) and `--workspace` does not. Complete: the two modes now
+    use `is_pruned_dir` the same way. The old behavior examined `.git` and
+    `node_modules` for manifests and put them into the dry-run report as
+    noise, and no one had selected it.
 
 ## Tests
 

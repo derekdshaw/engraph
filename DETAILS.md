@@ -1977,7 +1977,9 @@ or not matched by `--include`, ignored, or beyond `--max-depth`. The
 recursive walk tracks, for each language, the nearest ancestor project that
 covers it, so a member names its project. A plain directory below the root,
 or a directory pruned by name, is not in the report. Plain `--workspace`
-lists every direct child, with "no manifest" for a child without one. The
+lists every direct child it examines, with "no manifest" for a child
+without one; it skips hidden and build/dependency directories by name, as
+`--recursive` does (`is_pruned_dir`). The
 real run and `--dry-run` use the same report: `index_workspace` indexes its
 projects, and `plan_workspace` returns it (`WorkspacePlan`) for the dry-run
 output.

@@ -660,7 +660,8 @@ fn examine_children(workspace_root: &Path) -> Result<Vec<DiscoveredDir>> {
     entries.sort_by_key(|e| e.path()); // deterministic ordering for tests
     for entry in entries {
         let path = entry.path();
-        if !path.is_dir() {
+        // Skip files and, as `--recursive` does, hidden and build/dep dirs.
+        if !path.is_dir() || is_pruned_dir(&entry.file_name().to_string_lossy()) {
             continue;
         }
         // An ignored child is skipped unless it is its own git repo.
@@ -1781,8 +1782,6 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                // `.git` is a hidden child, but plain `--workspace` lists it too.
-                (".git".into(), DirOutcome::NoManifest, false),
                 ("a".into(), project(&["rust-analyzer"], &[]), false),
                 ("app".into(), project(&["scip-go"], &[]), true),
                 ("b".into(), DirOutcome::NoManifest, false),
@@ -1903,12 +1902,27 @@ mod tests {
     }
 
     #[test]
-    fn workspace_keeps_hidden_children() {
-        // Plain `--workspace` does not skip hidden children (unlike
-        // `--recursive`, which prunes them in `is_pruned_dir`).
+    fn workspace_skips_hidden_and_pruned_children() {
+        // Step 12: plain `--workspace` prunes by name as `--recursive` does,
+        // and the report does not list the pruned children.
         let root = tempfile::tempdir().unwrap();
-        let hidden = dir_with(root.path(), ".hidden", "Cargo.toml");
-        assert_eq!(discover_workspace_repos(root.path()).unwrap(), vec![hidden]);
+        dir_with(root.path(), ".hidden", "Cargo.toml");
+        dir_with(root.path(), "node_modules/x", "Cargo.toml");
+        dir_with(root.path(), "node_modules", "package.json");
+        let a = dir_with(root.path(), "a", "Cargo.toml");
+        assert_eq!(
+            discover_workspace_repos(root.path()).unwrap(),
+            vec![a.clone()]
+        );
+        let got = report(
+            root.path(),
+            Discovery::Children,
+            &DiscoveryFilter::default(),
+        );
+        assert_eq!(
+            got,
+            vec![("a".into(), project(&["rust-analyzer"], &[]), false)]
+        );
     }
 
     #[test]
