@@ -404,6 +404,30 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_git_repo_has_its_own_project_key() {
+        let (_dir, repo, _head) = repo();
+        let inner = repo.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        git(&inner, &["init", "-q"]);
+        git(&inner, &["commit", "-q", "--allow-empty", "-m", "init"]);
+
+        // The nested repo scopes to itself, not to the repo around it.
+        let (key, subtree) = index_scope(&inner);
+        assert_eq!(PathBuf::from(&key), inner.canonicalize().unwrap());
+        assert_eq!(subtree, "");
+        assert!(!in_linked_worktree(&inner));
+
+        // A directory inside it scopes to the nested repo too.
+        std::fs::create_dir_all(inner.join("src")).unwrap();
+        let (sub_key, sub_subtree) = index_scope(&inner.join("src"));
+        assert_eq!(sub_key, key);
+        assert_eq!(sub_subtree, "src");
+
+        // The outer repo keeps its own key.
+        assert_eq!(PathBuf::from(index_scope(&repo).0), repo);
+    }
+
+    #[test]
     fn subtree_changed_tracks_edits_under_the_subtree_only() {
         let (_dir, repo, head) = repo();
         // Far-future index time: only tracked changes can flag the subtree.

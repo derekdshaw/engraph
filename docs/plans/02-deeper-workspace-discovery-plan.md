@@ -148,7 +148,10 @@ module above it.
    different project key. Complete: see
    [Project keys of nested git repos](#project-keys-of-nested-git-repos).
 9. Write a test for this condition. The test must examine a nested git repo
-   and a git submodule.
+   and a git submodule. Complete: `a_nested_git_repo_has_its_own_project_key`
+   (`engraph-cli/src/divergence.rs`) examines the nested repo. The submodule
+   test is part of step 10, because it shows the correct key, which the code
+   gives only after the correction of step 10.
 10. Correct the project key of a git submodule. The key is the path of the
     submodule checkout. `in_linked_worktree` is false for a submodule
     checkout. A linked worktree of a normal repo must keep the key of its
