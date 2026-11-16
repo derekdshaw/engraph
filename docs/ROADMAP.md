@@ -31,7 +31,7 @@ Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md
 
 engraph indexes all Go modules of a repo, with correct relations between the modules. This is also true in Bazel repos.
 
-Plan: [`docs/plans/03-all-go-modules-plan.md`](plans/03-all-go-modules-plan.md). Steps 1 to 5 are complete.
+Plan: [`docs/plans/03-all-go-modules-plan.md`](plans/03-all-go-modules-plan.md). Steps 1 to 8 are complete.
 
 ## 10. Separate code graphs for worktrees
 
