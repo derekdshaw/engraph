@@ -38,7 +38,7 @@ fn max_depth_limits_recursive_discovery() {
     assert!(out.status.success(), "{out:?}");
     assert!(stdout.contains("discovered 1 repo(s)"), "{stdout}");
     assert!(
-        stdout.contains(&ws.join("a/b").display().to_string()),
+        stdout.contains(&ws.join("a").join("b").display().to_string()),
         "{stdout}"
     );
 
@@ -90,10 +90,16 @@ fn discovered(db: &Path, ws: &Path, args: &[&str]) -> Vec<String> {
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| l.strip_prefix("  - "))
-        .map(|p| match Path::new(p).strip_prefix(ws) {
-            Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
-            Ok(rel) => rel.display().to_string(),
-            Err(_) => panic!("{p} is not under {}", ws.display()),
+        .map(|p| {
+            let p = Path::new(p);
+            assert!(
+                p.starts_with(ws),
+                "{} is not under {}",
+                p.display(),
+                ws.display()
+            );
+            // `/`-separated on every platform, as the globs match it.
+            engraph_codegraph::workspace_rel(ws, p)
         })
         .collect()
 }
