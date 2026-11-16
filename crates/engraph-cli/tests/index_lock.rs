@@ -11,24 +11,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::tempdir;
 
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_engraph")
-}
-
-fn command(db: &Path, cwd: &Path, args: &[&str]) -> Command {
-    let mut c = Command::new(bin());
-    c.env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", std::env::var("HOME").unwrap_or_default())
-        .env("ENGRAPH_DB_PATH", db)
-        .current_dir(cwd)
-        .args(args);
-    c
-}
-
-fn engraph(db: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
-    command(db, cwd, args).output().expect("spawn engraph")
-}
+mod common;
+use common::{command, engraph};
 
 /// `engraph` started in the background, for a run expected to wait.
 fn spawn(db: &Path, cwd: &Path, args: &[&str]) -> Child {

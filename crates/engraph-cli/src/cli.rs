@@ -117,6 +117,11 @@ pub(crate) enum Cmd {
     },
     /// Build / refresh the codegraph for a repo by running a SCIP indexer
     /// (or loading a prebuilt index.scip).
+    #[command(group(
+        clap::ArgGroup::new("discovery")
+            .args(["workspace", "recursive"])
+            .multiple(true)
+    ))]
     Index {
         /// Path to repo root
         #[arg(default_value = ".")]
@@ -163,10 +168,28 @@ pub(crate) enum Cmd {
         /// Recurse into subdirectories to discover every project (not just the
         /// immediate children of --workspace): prunes build/dep dirs
         /// (node_modules, target, vendor, …), stops at Bazel roots, and
-        /// suppresses same-language workspace members. Implies workspace-style
+        /// skips the members of a workspace above them (Cargo `[workspace]`,
+        /// pnpm/yarn workspaces; nested Python and Java projects; never a Go
+        /// module). Implies workspace-style
         /// indexing rooted at --workspace (or the positional repo).
         #[arg(long, conflicts_with_all = ["scip", "scip_manifest", "lang"])]
         recursive: bool,
+        /// With --recursive: the deepest directory level below the workspace
+        /// root that discovery examines (the root is level 0).
+        #[arg(long, requires = "recursive", default_value_t = engraph_codegraph::RECURSIVE_MAX_DEPTH)]
+        max_depth: usize,
+        /// With --workspace or --recursive: keep only the discovered projects
+        /// whose path below the workspace root matches a glob (`.` is the
+        /// root). `*` stays within one level, `**` crosses levels, and a glob
+        /// matches only the path it names. Repeat to add globs.
+        #[arg(long, value_name = "GLOB", requires = "discovery")]
+        include: Vec<String>,
+        /// With --workspace or --recursive: drop the discovered projects whose
+        /// path below the workspace root matches a glob. Same glob rules as
+        /// --include; when both match a project, --exclude wins with a
+        /// warning. Repeat to add globs.
+        #[arg(long, value_name = "GLOB", requires = "discovery")]
+        exclude: Vec<String>,
         /// Preview what would be indexed (chosen path, drivers, symbol-level
         /// languages, discovered repos) without spawning any indexer, running
         /// Bazel, or writing the codegraph. Composes with all other flags.

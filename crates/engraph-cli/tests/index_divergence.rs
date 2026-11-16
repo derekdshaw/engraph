@@ -10,21 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_engraph")
-}
-
-fn engraph(db: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(bin())
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", std::env::var("HOME").unwrap_or_default())
-        .env("ENGRAPH_DB_PATH", db)
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .expect("spawn engraph")
-}
+mod common;
+use common::{bin, engraph};
 
 fn git(repo: &Path, args: &[&str]) -> String {
     let out = Command::new("git")

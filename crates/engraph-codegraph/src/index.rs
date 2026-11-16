@@ -4,8 +4,11 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
+use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
+use ignore::{IncrementalIgnore, WalkBuilder};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -614,25 +617,42 @@ fn run_driver_into(out_dir: &Path, repo: &Path, drv: &dyn driver::Driver) -> Res
     Ok(bytes)
 }
 
-/// Discover candidate repo roots under `workspace_root` (Phase 2.2). Rules:
+/// The projects of `--workspace` discovery under `workspace_root`, without the
+/// `--include` / `--exclude` filter:
 ///
-/// - If `workspace_root` itself contains a build manifest, return `[workspace_root]`.
-///   A Cargo workspace or any single-language root is handled in one pass; the
-///   upstream indexer takes care of its internal structure.
-/// - Otherwise, enumerate direct children of `workspace_root` and return those
-///   whose `Driver::detect()` matches. Sub-recursion is intentionally left out
-///   for the MVP; deeper layouts need explicit per-repo invocations until
-///   Phase 2.3.
+/// - If `workspace_root` itself is a project (a build manifest or a Bazel
+///   root), only `[workspace_root]`: its indexer takes care of its internal
+///   structure.
+/// - Otherwise, each direct child that is a project. Hidden and build/dep
+///   children (`is_pruned_dir`) are skipped, and so is a child that the ignore
+///   rules name, unless it is its own git repo. `--recursive` goes deeper
+///   (`examine_recursive`).
 pub fn discover_workspace_repos(workspace_root: &Path) -> Result<Vec<PathBuf>> {
+    Ok(projects(examine_children(workspace_root)?))
+}
+
+/// The paths of the projects among `dirs`.
+fn projects(dirs: Vec<DiscoveredDir>) -> Vec<PathBuf> {
+    dirs.into_iter()
+        .filter(|d| d.outcome.is_project())
+        .map(|d| d.path)
+        .collect()
+}
+
+/// `--workspace` discovery, as a report: the root alone if it is a project,
+/// else every direct child.
+fn examine_children(workspace_root: &Path) -> Result<Vec<DiscoveredDir>> {
     if !workspace_root.is_dir() {
         anyhow::bail!(
             "workspace root is not a directory: {}",
             workspace_root.display()
         );
     }
-    if is_indexable_root(workspace_root) {
-        return Ok(vec![workspace_root.to_path_buf()]);
+    let root = examine_alone(workspace_root, false);
+    if root.outcome.is_project() {
+        return Ok(vec![root]);
     }
+    let mut ig = discovery_ignores(workspace_root);
     let mut out = Vec::new();
     let mut entries: Vec<_> = std::fs::read_dir(workspace_root)
         .with_context(|| format!("reading workspace root {}", workspace_root.display()))?
@@ -641,25 +661,84 @@ pub fn discover_workspace_repos(workspace_root: &Path) -> Result<Vec<PathBuf>> {
     entries.sort_by_key(|e| e.path()); // deterministic ordering for tests
     for entry in entries {
         let path = entry.path();
-        if !path.is_dir() {
+        // Skip files and, as `--recursive` does, hidden and build/dep dirs.
+        if !path.is_dir() || is_pruned_dir(&entry.file_name().to_string_lossy()) {
             continue;
         }
-        if is_indexable_root(&path) {
-            out.push(path);
-        }
+        // An ignored child is skipped unless it is its own git repo.
+        let ignored = ig.matched(entry.file_name(), true).is_ignore();
+        let own_repo = ignored && path.join(".git").exists();
+        out.push(if ignored && !own_repo {
+            DiscoveredDir {
+                path,
+                outcome: DirOutcome::Ignored,
+                own_repo: false,
+            }
+        } else {
+            examine_alone(&path, own_repo)
+        });
     }
     Ok(out)
 }
 
-fn is_indexable_root(path: &Path) -> bool {
+/// The record of `dir` examined with no ancestor project above it.
+fn examine_alone(dir: &Path, own_repo: bool) -> DiscoveredDir {
+    DiscoveredDir {
+        path: dir.to_path_buf(),
+        // With nothing claimed, no member rule (nor its tool check) runs.
+        outcome: classify(dir, &HashMap::new(), &|_| true),
+        own_repo,
+    }
+}
+
+/// What `dir` is: a Bazel root, a project, a member, or none of these.
+/// `claimed` maps each language that an ancestor project covers to that
+/// project, and `installed` is the tool check of `is_member`. Each detected
+/// language is new here, or covered by its parent, the nearest recorded
+/// project of that language, when its member rule says `dir` belongs to it.
+fn classify(
+    dir: &Path,
+    claimed: &HashMap<&'static str, PathBuf>,
+    installed: &dyn Fn(&str) -> bool,
+) -> DirOutcome {
+    let mut langs: Vec<&'static str> = Vec::new();
+    let mut covered: Vec<(&'static str, PathBuf)> = Vec::new();
+    for lang in detected_langs(dir) {
+        match claimed.get(lang) {
+            Some(parent) if is_member(lang, parent, dir, installed) => {
+                covered.push((lang, parent.clone()));
+            }
+            _ => langs.push(lang),
+        }
+    }
+    langs.sort();
+    covered.sort();
     // Bazel takes precedence: a Bazel monorepo often *also* has a Cargo.toml
     // / pyproject.toml in some subdirectory for IDE integration, but the
     // single-language SCIP driver would just thrash on the polyglot layout.
     // The target-level Bazel path is the right one for these.
-    if bazel::detect_bazel(path) {
-        return true;
+    if langs.contains(&"bazel") {
+        DirOutcome::BazelRoot
+    } else if !langs.is_empty() {
+        DirOutcome::Project { langs, covered }
+    } else if !covered.is_empty() {
+        DirOutcome::Member { covered }
+    } else {
+        DirOutcome::NoManifest
     }
-    driver::registry().iter().any(|d| d.detect(path))
+}
+
+/// The ignore rules discovery obeys below `root`: the `ignore` crate's
+/// defaults (`.gitignore` inside a git repo, `.ignore`, `.git/info/exclude`,
+/// the global git excludes), the same rules as `git ls-files
+/// --exclude-standard`. Hidden dirs are not filtered here; each caller
+/// decides about them.
+fn discovery_ignores(root: &Path) -> IncrementalIgnore {
+    WalkBuilder::new(root)
+        .hidden(false)
+        .build_matchers()
+        .pop()
+        .expect("the builder has one root, so one matcher")
 }
 
 /// Languages detected at `dir`: "bazel" if it's a Bazel root, plus each driver
@@ -713,70 +792,370 @@ fn is_pruned_dir(name: &str) -> bool {
         )
 }
 
-const RECURSIVE_MAX_DEPTH: usize = 16;
+/// Default for `index --recursive --max-depth`.
+pub const RECURSIVE_MAX_DEPTH: usize = 16;
 
-/// Recursive project discovery for `index --recursive`. Walks `root`, recording
-/// each project root found at any depth (sorted, deduped). See `walk_recursive`
-/// for the per-directory rules (prune build dirs, stop at Bazel, suppress
-/// same-language descendants so a workspace's members aren't each indexed).
-fn discover_repos_recursive(root: &Path) -> Result<Vec<PathBuf>> {
+/// How a workspace run finds its projects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Discovery {
+    /// The root if it is a project, else its direct children
+    /// (`--workspace`).
+    Children,
+    /// Every project down to `max_depth` directories below the root; the root
+    /// is depth 0 (`--recursive`).
+    Recursive { max_depth: usize },
+}
+
+/// One directory in the report of a workspace discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredDir {
+    pub path: PathBuf,
+    pub outcome: DirOutcome,
+    /// The ignore rules of its parent name it, but discovery examined it
+    /// because it is its own git repo.
+    pub own_repo: bool,
+}
+
+/// Why discovery lists a directory. The report lists every directory with a
+/// manifest and each place where discovery stopped. It does not list a plain
+/// directory below the root, or one pruned by name (`is_pruned_dir`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirOutcome {
+    /// A project. `langs`: the indexers it adds. `covered`: languages it also
+    /// has that an ancestor project covers, each with that project.
+    Project {
+        langs: Vec<&'static str>,
+        covered: Vec<(&'static str, PathBuf)>,
+    },
+    /// A Bazel root: a project whose subtree discovery does not examine.
+    BazelRoot,
+    /// Has manifests, but ancestor projects cover all of their languages.
+    Member {
+        covered: Vec<(&'static str, PathBuf)>,
+    },
+    /// A project that an `--exclude` glob drops.
+    Excluded,
+    /// A project that no `--include` glob matches.
+    NotIncluded,
+    /// No manifest: a `--workspace` child, or a directory examined as its own
+    /// repo.
+    NoManifest,
+    /// The ignore rules name it, so discovery does not examine it.
+    Ignored,
+    /// Deeper than `--max-depth`, so discovery does not examine it.
+    BeyondMaxDepth { max_depth: usize },
+}
+
+impl DirOutcome {
+    /// Whether the run indexes the directory.
+    pub fn is_project(&self) -> bool {
+        matches!(self, Self::Project { .. } | Self::BazelRoot)
+    }
+}
+
+/// What a workspace run would do (`plan_workspace`).
+#[derive(Debug)]
+pub struct WorkspacePlan {
+    /// The discovery report, sorted by path.
+    pub dirs: Vec<DiscoveredDir>,
+    /// The projects the run would index, with the plan of each.
+    pub repos: Vec<(PathBuf, IndexPlan)>,
+}
+
+/// `path` below the workspace `root`, `/`-separated, with `.` for the root
+/// itself: the form the `--include` / `--exclude` globs match.
+pub fn workspace_rel(root: &Path, path: &Path) -> String {
+    let parts: Vec<_> = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect();
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
+/// The `--include` and `--exclude` globs of a workspace run. A glob matches
+/// the path of a discovered project below the workspace root, `/`-separated,
+/// with `.` for the root itself: `*` stays within one level and `**` crosses
+/// levels. A glob matches only the path it names, not the paths below it.
+/// With include globs, only the projects they match are kept; a project an
+/// exclude glob matches is dropped, even if an include glob matches it too.
+#[derive(Debug, Default)]
+pub struct DiscoveryFilter {
+    include: Option<GlobSet>,
+    exclude: Option<GlobSet>,
+}
+
+impl DiscoveryFilter {
+    pub fn new(include: &[String], exclude: &[String]) -> Result<Self> {
+        Ok(Self {
+            include: glob_set("--include", include)?,
+            exclude: glob_set("--exclude", exclude)?,
+        })
+    }
+
+    /// Mark each project in `dirs` (discovered under `root`) that the globs
+    /// drop.
+    fn apply(&self, root: &Path, dirs: &mut [DiscoveredDir]) {
+        if self.include.is_none() && self.exclude.is_none() {
+            return;
+        }
+        for d in dirs.iter_mut().filter(|d| d.outcome.is_project()) {
+            let rel = workspace_rel(root, &d.path);
+            let included = self.include.as_ref().is_none_or(|g| g.is_match(&rel));
+            let excluded = self.exclude.as_ref().is_some_and(|g| g.is_match(&rel));
+            if excluded && included && self.include.is_some() {
+                tracing::warn!("{rel} matches both --include and --exclude; --exclude wins");
+            }
+            if excluded {
+                d.outcome = DirOutcome::Excluded;
+            } else if !included {
+                d.outcome = DirOutcome::NotIncluded;
+            }
+        }
+    }
+}
+
+/// A glob over a `/`-separated path below a directory, as `workspace_rel`
+/// gives it: `*` stays within one level. A leading `./` and a trailing `/`
+/// (shell completion of a directory adds one) are dropped, since the path has
+/// neither.
+fn path_glob(pat: &str) -> Result<Glob, globset::Error> {
+    let pat = pat.strip_prefix("./").unwrap_or(pat).trim_end_matches('/');
+    GlobBuilder::new(pat).literal_separator(true).build()
+}
+
+/// The globs of one filter flag (`flag` names it in errors), or `None` when
+/// none were given.
+fn glob_set(flag: &str, pats: &[String]) -> Result<Option<GlobSet>> {
+    if pats.is_empty() {
+        return Ok(None);
+    }
+    let mut set = GlobSetBuilder::new();
+    for pat in pats {
+        set.add(path_glob(pat).with_context(|| format!("invalid {flag} glob {pat}"))?);
+    }
+    Ok(Some(set.build()?))
+}
+
+/// The discovery report of a workspace run under `root`, with the filter
+/// applied, sorted by path.
+fn discover(
+    root: &Path,
+    discovery: Discovery,
+    filter: &DiscoveryFilter,
+) -> Result<Vec<DiscoveredDir>> {
+    let mut dirs = match discovery {
+        Discovery::Children => examine_children(root)?,
+        Discovery::Recursive { max_depth } => {
+            examine_recursive(root, max_depth, &crate::which::on_path)?
+        }
+    };
+    filter.apply(root, &mut dirs);
+    Ok(dirs)
+}
+
+/// Recursive project discovery for `index --recursive`, as a report. See
+/// `Walker::walk` for the per-directory rules (prune build dirs, stop at
+/// Bazel, skip the members of a project above so they aren't each indexed;
+/// `is_member` gives the rule of each language). `installed` says whether a
+/// tool is on `PATH` (`which::on_path`).
+fn examine_recursive(
+    root: &Path,
+    max_depth: usize,
+    installed: &dyn Fn(&str) -> bool,
+) -> Result<Vec<DiscoveredDir>> {
     if !root.is_dir() {
         anyhow::bail!("workspace root is not a directory: {}", root.display());
     }
-    let mut out = Vec::new();
-    walk_recursive(root, 0, &HashSet::new(), &mut out);
-    out.sort();
-    out.dedup();
+    let mut walker = Walker {
+        max_depth,
+        installed,
+        out: Vec::new(),
+    };
+    walker.walk(
+        root,
+        Path::new(""),
+        0,
+        &HashMap::new(),
+        &mut discovery_ignores(root),
+        false,
+    );
+    let mut out = walker.out;
+    out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
 }
 
-fn walk_recursive(
-    dir: &Path,
-    depth: usize,
-    claimed: &HashSet<&'static str>,
-    out: &mut Vec<PathBuf>,
-) {
-    if depth > RECURSIVE_MAX_DEPTH {
-        return;
+/// Whether `dir`, which has a manifest of `lang`, is a member of `parent`, the
+/// nearest recorded project of `lang` above it: whether the parent's index run
+/// covers `dir`, so `dir` is not indexed on its own.
+fn is_member(lang: &str, parent: &Path, dir: &Path, installed: &dyn Fn(&str) -> bool) -> bool {
+    match lang {
+        // rust-analyzer indexes a workspace's members from its root, and only
+        // its own crate graph from a plain package. A crate that declares its
+        // own workspace (e.g. a `cargo fuzz` crate) is in no other.
+        "rust-analyzer" => cargo_has_workspace(parent) && !cargo_has_workspace(dir),
+        "scip-typescript" => typescript_workspace_lists(parent, dir, installed),
+        // Go tools leave a nested module out of the module above it.
+        "scip-go" => false,
+        // scip-python indexes every file below its directory, so a nested
+        // project is in the parent's run; scip-java builds Maven and Gradle
+        // multi-module projects from the root.
+        _ => true,
     }
-    let detected = detected_langs(dir);
-    let new_langs: HashSet<&'static str> = detected.difference(claimed).copied().collect();
+}
 
-    // A Bazel root is one indexable unit: record it and don't descend — the
-    // target-level `bazel query` pass already covers the whole subtree.
-    if new_langs.contains("bazel") {
-        out.push(dir.to_path_buf());
-        return;
-    }
-
-    // Record this dir only if it introduces a language no ancestor already
-    // covers (else it's a workspace member / sub-package of an ancestor). Either
-    // way keep descending to catch nested modules of *other* languages.
-    let child_claimed = if new_langs.is_empty() {
-        claimed.clone()
-    } else {
-        out.push(dir.to_path_buf());
-        claimed.union(&detected).copied().collect()
-    };
-
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut children: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let ft = e.file_type().ok()?;
-            // Skip symlinks (e.g. Bazel's bazel-* convenience links), files, and
-            // pruned build/dependency dirs.
-            if ft.is_symlink() || !ft.is_dir() || is_pruned_dir(&e.file_name().to_string_lossy()) {
-                return None;
-            }
-            Some(e.path())
+/// Whether the `Cargo.toml` in `dir` defines a workspace: a `[workspace]` or
+/// `[workspace.*]` table header. A line scan, not a TOML parse.
+fn cargo_has_workspace(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("Cargo.toml")).is_ok_and(|toml| {
+        toml.lines().any(|l| {
+            let l = l.trim_start();
+            l.starts_with("[workspace]") || l.starts_with("[workspace.")
         })
-        .collect();
-    children.sort();
-    for child in children {
-        walk_recursive(&child, depth + 1, &child_claimed, out);
+    })
+}
+
+/// Whether `parent`'s workspace lists `dir`: a workspace whose packages
+/// scip-typescript indexes from the parent (`driver::TsWorkspace`). npm has no
+/// flag for that, so in an npm workspace no package is a member. Without the
+/// package manager installed, the driver runs without the flag, so no package
+/// is a member either.
+fn typescript_workspace_lists(parent: &Path, dir: &Path, installed: &dyn Fn(&str) -> bool) -> bool {
+    driver::TsWorkspace::of(parent)
+        .filter(|ws| installed(ws.tool()))
+        .is_some_and(|ws| workspace_globs_match(ws.globs(), &workspace_rel(parent, dir)))
+}
+
+/// Whether workspace `globs` (relative to the workspace's directory; a `!`
+/// glob excludes) list `rel`. Same glob rules as `--include`. A glob that does
+/// not compile matches nothing.
+fn workspace_globs_match(globs: &[String], rel: &str) -> bool {
+    let mut includes = GlobSetBuilder::new();
+    let mut excludes = GlobSetBuilder::new();
+    for g in globs {
+        let (set, pat) = match g.strip_prefix('!') {
+            Some(pat) => (&mut excludes, pat),
+            None => (&mut includes, g.as_str()),
+        };
+        if let Ok(glob) = path_glob(pat) {
+            set.add(glob);
+        }
+    }
+    let lists = |set: GlobSetBuilder| set.build().is_ok_and(|s| s.is_match(rel));
+    lists(includes) && !lists(excludes)
+}
+
+/// A recursive discovery: the depth limit, the tool check of `is_member`, and
+/// the report so far.
+struct Walker<'a> {
+    max_depth: usize,
+    installed: &'a dyn Fn(&str) -> bool,
+    out: Vec<DiscoveredDir>,
+}
+
+impl Walker<'_> {
+    fn record(&mut self, dir: &Path, outcome: DirOutcome, own_repo: bool) {
+        self.out.push(DiscoveredDir {
+            path: dir.to_path_buf(),
+            outcome,
+            own_repo,
+        });
+    }
+
+    /// Examine `dir` and its subtree. `rel` is `dir`'s path below the root of
+    /// `ig`, the ignore rules that govern `dir`. `claimed` maps each language
+    /// that an ancestor project covers to that project.
+    fn walk(
+        &mut self,
+        dir: &Path,
+        rel: &Path,
+        depth: usize,
+        claimed: &HashMap<&'static str, PathBuf>,
+        ig: &mut IncrementalIgnore,
+        own_repo: bool,
+    ) {
+        if depth > self.max_depth {
+            let max_depth = self.max_depth;
+            self.record(dir, DirOutcome::BeyondMaxDepth { max_depth }, own_repo);
+            return;
+        }
+        let outcome = classify(dir, claimed, self.installed);
+
+        // A Bazel root is one indexable unit: record it and don't descend — the
+        // target-level `bazel query` pass already covers the whole subtree.
+        if outcome == DirOutcome::BazelRoot {
+            self.record(dir, outcome, own_repo);
+            return;
+        }
+
+        // A project covers its new languages below it. A member or a plain
+        // dir covers nothing new. Either way keep descending to catch nested
+        // modules of *other* languages.
+        let extended: HashMap<&'static str, PathBuf>;
+        let child_claimed = if let DirOutcome::Project { langs, .. } = &outcome {
+            let mut map = claimed.clone();
+            map.extend(langs.iter().map(|l| (*l, dir.to_path_buf())));
+            extended = map;
+            &extended
+        } else {
+            claimed
+        };
+        // A plain dir is listed only when examined as its own repo.
+        if outcome != DirOutcome::NoManifest || own_repo {
+            self.record(dir, outcome, own_repo);
+        }
+
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut children: Vec<OsString> = entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let ft = e.file_type().ok()?;
+                // Skip symlinks (e.g. Bazel's bazel-* convenience links),
+                // files, and pruned build/dependency dirs.
+                if ft.is_symlink()
+                    || !ft.is_dir()
+                    || is_pruned_dir(&e.file_name().to_string_lossy())
+                {
+                    return None;
+                }
+                Some(e.file_name())
+            })
+            .collect();
+        children.sort();
+        let no_claims = HashMap::new();
+        for name in children {
+            let child = dir.join(&name);
+            let child_rel = rel.join(&name);
+            // A nested git checkout (repo or submodule) has its own project
+            // key, so no project above it covers it: lookups from inside it
+            // would miss code indexed under the outer key.
+            let checkout = child.join(".git").exists();
+            let claims = if checkout { &no_claims } else { child_claimed };
+            if !ig.matched(&child_rel, true).is_ignore() {
+                self.walk(&child, &child_rel, depth + 1, claims, ig, false);
+            } else if checkout {
+                // An ignored dir that is its own git repo: its parent's rules
+                // don't govern it, so walk it under its own.
+                let mut child_ig = discovery_ignores(&child);
+                self.walk(
+                    &child,
+                    Path::new(""),
+                    depth + 1,
+                    claims,
+                    &mut child_ig,
+                    true,
+                );
+            } else {
+                self.record(&child, DirOutcome::Ignored, false);
+            }
+        }
     }
 }
 
@@ -790,24 +1169,33 @@ pub fn index_workspace(
     conn: &PooledConn,
     workspace_root: &Path,
     bazel_symbols: bool,
-    recursive: bool,
+    discovery: Discovery,
+    filter: &DiscoveryFilter,
     gc: bool,
     scope_for: &dyn Fn(&Path) -> (String, String),
 ) -> Result<WorkspaceStats> {
-    let repos = if recursive {
-        discover_repos_recursive(workspace_root)?
-    } else {
-        discover_workspace_repos(workspace_root)?
-    };
+    let dirs = discover(workspace_root, discovery, filter)?;
+    let found_any = dirs.iter().any(|d| {
+        d.outcome.is_project()
+            || matches!(d.outcome, DirOutcome::Excluded | DirOutcome::NotIncluded)
+    });
+    if !found_any {
+        let below = match discovery {
+            Discovery::Children => " or an immediate child".to_string(),
+            Discovery::Recursive { max_depth } => {
+                format!(" or any descendant to depth {max_depth}")
+            }
+        };
+        anyhow::bail!(
+            "no indexable repos found under {} (expected a build manifest at the root{below})",
+            workspace_root.display(),
+        );
+    }
+    let repos = projects(dirs);
     if repos.is_empty() {
         anyhow::bail!(
-            "no indexable repos found under {} (expected a build manifest at the root{})",
-            workspace_root.display(),
-            if recursive {
-                " or any descendant"
-            } else {
-                " or an immediate child"
-            }
+            "no project discovered under {} passes the --include and --exclude globs",
+            workspace_root.display()
         );
     }
     let mut stats = WorkspaceStats::default();
@@ -906,25 +1294,26 @@ pub fn plan_repo(
 }
 
 /// Pure preview of `index_workspace`: which repos would be discovered and what
-/// each one's plan is. Reuses the same `discover_workspace_repos` the real run
-/// uses, so the discovered set matches exactly.
+/// each one's plan is. Uses the same `discover` as the real run, so the
+/// discovered set matches exactly.
 pub fn plan_workspace(
     workspace_root: &Path,
     bazel_symbols: bool,
-    recursive: bool,
-) -> Result<Vec<(PathBuf, IndexPlan)>> {
-    let repos = if recursive {
-        discover_repos_recursive(workspace_root)?
-    } else {
-        discover_workspace_repos(workspace_root)?
-    };
-    Ok(repos
-        .into_iter()
-        .map(|repo| {
-            let plan = plan_repo(&repo, None, None, bazel_symbols);
-            (repo, plan)
+    discovery: Discovery,
+    filter: &DiscoveryFilter,
+) -> Result<WorkspacePlan> {
+    let dirs = discover(workspace_root, discovery, filter)?;
+    let repos = dirs
+        .iter()
+        .filter(|d| d.outcome.is_project())
+        .map(|d| {
+            (
+                d.path.clone(),
+                plan_repo(&d.path, None, None, bazel_symbols),
+            )
         })
-        .collect())
+        .collect();
+    Ok(WorkspacePlan { dirs, repos })
 }
 
 /// Driver names are static strings declared in driver.rs; promote the runtime
@@ -1034,7 +1423,14 @@ mod tests {
         let child = root.path().join("crate-a");
         std::fs::create_dir(&child).unwrap();
         touch(&child, "Cargo.toml");
-        let plans = plan_workspace(root.path(), false, false).unwrap();
+        let plans = plan_workspace(
+            root.path(),
+            false,
+            Discovery::Children,
+            &DiscoveryFilter::default(),
+        )
+        .unwrap()
+        .repos;
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].0, child);
         assert!(matches!(plans[0].1, IndexPlan::AutoDrivers(_)));
@@ -1044,7 +1440,14 @@ mod tests {
     fn plan_workspace_bazel_root_collapses_to_root() {
         let root = tempfile::tempdir().unwrap();
         touch(root.path(), "MODULE.bazel");
-        let plans = plan_workspace(root.path(), true, false).unwrap();
+        let plans = plan_workspace(
+            root.path(),
+            true,
+            Discovery::Children,
+            &DiscoveryFilter::default(),
+        )
+        .unwrap()
+        .repos;
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].0, root.path());
         assert!(matches!(plans[0].1, IndexPlan::Bazel { .. }));
@@ -1142,12 +1545,27 @@ mod tests {
         d
     }
 
+    /// `dir_with`, but the manifest gets `content`.
+    fn write(root: &Path, rel: &str, manifest: &str, content: &str) -> PathBuf {
+        let d = dir_with(root, rel, manifest);
+        std::fs::write(d.join(manifest), content).unwrap();
+        d
+    }
+
     fn recursive_roots(root: &Path) -> Vec<PathBuf> {
-        plan_workspace(root, false, true)
-            .unwrap()
-            .into_iter()
-            .map(|(p, _)| p)
-            .collect()
+        plan_workspace(
+            root,
+            false,
+            Discovery::Recursive {
+                max_depth: RECURSIVE_MAX_DEPTH,
+            },
+            &DiscoveryFilter::default(),
+        )
+        .unwrap()
+        .repos
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect()
     }
 
     #[test]
@@ -1157,7 +1575,14 @@ mod tests {
         let go = dir_with(root.path(), "go", "go.mod");
 
         // Non-recursive: the root is itself a manifest root → just [root].
-        let nonrec = plan_workspace(root.path(), false, false).unwrap();
+        let nonrec = plan_workspace(
+            root.path(),
+            false,
+            Discovery::Children,
+            &DiscoveryFilter::default(),
+        )
+        .unwrap()
+        .repos;
         assert_eq!(nonrec.len(), 1);
         assert_eq!(nonrec[0].0, r);
 
@@ -1170,10 +1595,10 @@ mod tests {
     #[test]
     fn recursive_suppresses_same_language_members() {
         let root = tempfile::tempdir().unwrap();
-        let r = dir_with(root.path(), "", "Cargo.toml");
+        let r = write(root.path(), "", "Cargo.toml", "[workspace]\n");
         dir_with(root.path(), "crates/a", "Cargo.toml");
         dir_with(root.path(), "crates/b", "Cargo.toml");
-        // Members are same-language under the recorded root → not re-recorded.
+        // Members of the root workspace → not re-recorded.
         assert_eq!(recursive_roots(root.path()), vec![r]);
     }
 
@@ -1193,6 +1618,409 @@ mod tests {
         dir_with(root.path(), "sub", "go.mod");
         // Bazel covers the subtree → the nested go.mod is not a separate project.
         assert_eq!(recursive_roots(root.path()), vec![r]);
+    }
+
+    /// `.gitignore` applies only inside a git repo (the `ignore` crate's
+    /// `require_git` default), so the fixtures that test it need one.
+    fn git_init(dir: &Path) {
+        let out = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git init failed: {out:?}");
+    }
+
+    #[test]
+    fn recursive_obeys_gitignore() {
+        let root = tempfile::tempdir().unwrap();
+        git_init(root.path());
+        std::fs::write(root.path().join(".gitignore"), "gen-out/\n").unwrap();
+        let r = dir_with(root.path(), "", "Cargo.toml");
+        dir_with(root.path(), "gen-out/x", "go.mod");
+        let go = dir_with(root.path(), "svc", "go.mod");
+        assert_eq!(recursive_roots(root.path()), vec![r, go]);
+    }
+
+    #[test]
+    fn recursive_obeys_ignore_file() {
+        // `.ignore` applies with or without git.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".ignore"), "scratch-dir/\n").unwrap();
+        let r = dir_with(root.path(), "", "Cargo.toml");
+        dir_with(root.path(), "scratch-dir", "go.mod");
+        assert_eq!(recursive_roots(root.path()), vec![r]);
+    }
+
+    #[test]
+    fn workspace_obeys_gitignore() {
+        let root = tempfile::tempdir().unwrap();
+        git_init(root.path());
+        std::fs::write(root.path().join(".gitignore"), "gen-out/\n").unwrap();
+        let a = dir_with(root.path(), "a", "Cargo.toml");
+        dir_with(root.path(), "gen-out", "Cargo.toml");
+        assert_eq!(discover_workspace_repos(root.path()).unwrap(), vec![a]);
+    }
+
+    #[test]
+    fn recursive_rescues_ignored_nested_repo() {
+        // A repo the parent ignores is still found, and the parent's rules
+        // don't govern inside it: `gen-out/` matches at any depth in the
+        // parent's repo, but not in `app`'s.
+        let root = tempfile::tempdir().unwrap();
+        git_init(root.path());
+        std::fs::write(root.path().join(".gitignore"), "app/\ngen-out/\n").unwrap();
+        let r = dir_with(root.path(), "", "Cargo.toml");
+        let app = dir_with(root.path(), "app", "go.mod");
+        git_init(&app);
+        let py = dir_with(root.path(), "app/gen-out", "pyproject.toml");
+        assert_eq!(recursive_roots(root.path()), vec![r, app, py]);
+    }
+
+    #[test]
+    fn workspace_rescues_ignored_nested_repo() {
+        let root = tempfile::tempdir().unwrap();
+        git_init(root.path());
+        std::fs::write(root.path().join(".gitignore"), "app/\ngen-out/\n").unwrap();
+        let app = dir_with(root.path(), "app", "Cargo.toml");
+        git_init(&app);
+        dir_with(root.path(), "gen-out", "Cargo.toml");
+        assert_eq!(discover_workspace_repos(root.path()).unwrap(), vec![app]);
+    }
+
+    /// The dry-run report of `plan_workspace`: each listed directory's path
+    /// below `root`, outcome, and whether it was examined as its own repo.
+    fn report(
+        root: &Path,
+        discovery: Discovery,
+        filter: &DiscoveryFilter,
+    ) -> Vec<(String, DirOutcome, bool)> {
+        plan_workspace(root, false, discovery, filter)
+            .unwrap()
+            .dirs
+            .into_iter()
+            .map(|d| (workspace_rel(root, &d.path), d.outcome, d.own_repo))
+            .collect()
+    }
+
+    fn project(langs: &[&'static str], covered: &[(&'static str, &Path)]) -> DirOutcome {
+        DirOutcome::Project {
+            langs: langs.to_vec(),
+            covered: covered.iter().map(|(l, p)| (*l, p.to_path_buf())).collect(),
+        }
+    }
+
+    #[test]
+    fn recursive_reports_why_each_dir_is_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git_init(root);
+        std::fs::write(root.join(".gitignore"), "build/\nvendor-repo/\n").unwrap();
+        write(root, "", "Cargo.toml", "[workspace]\n");
+        dir_with(root, "crates/b", "Cargo.toml");
+        let svc = dir_with(root, "svc", "go.mod");
+        touch(&svc, "Cargo.toml");
+        dir_with(root, "svc/inner", "go.mod");
+        dir_with(root, "build", "Cargo.toml");
+        let vendor = dir_with(root, "vendor-repo", "pyproject.toml");
+        git_init(&vendor);
+        dir_with(root, "infra", "MODULE.bazel");
+        dir_with(root, "infra/sub", "go.mod"); // under Bazel: not listed
+        std::fs::create_dir_all(root.join("docs")).unwrap(); // no manifest: not listed
+        dir_with(root, "target/x", "Cargo.toml"); // pruned by name: not listed
+        dir_with(root, "a/b/c/d", "go.mod"); // depth 4
+
+        let got = report(
+            root,
+            Discovery::Recursive { max_depth: 3 },
+            &DiscoveryFilter::default(),
+        );
+        let rust = "rust-analyzer";
+        assert_eq!(
+            got,
+            vec![
+                (".".into(), project(&[rust], &[]), false),
+                (
+                    "a/b/c/d".into(),
+                    DirOutcome::BeyondMaxDepth { max_depth: 3 },
+                    false
+                ),
+                ("build".into(), DirOutcome::Ignored, false),
+                (
+                    "crates/b".into(),
+                    DirOutcome::Member {
+                        covered: vec![(rust, root.to_path_buf())]
+                    },
+                    false
+                ),
+                ("infra".into(), DirOutcome::BazelRoot, false),
+                ("svc".into(), project(&["scip-go"], &[(rust, root)]), false),
+                // A Go module is never a member.
+                ("svc/inner".into(), project(&["scip-go"], &[]), false),
+                ("vendor-repo".into(), project(&["scip-python"], &[]), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn filter_globs_ignore_a_trailing_slash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        dir_with(root, "", "Cargo.toml");
+        dir_with(root, "svc/x", "go.mod");
+        let recursive = Discovery::Recursive {
+            max_depth: RECURSIVE_MAX_DEPTH,
+        };
+        let roots = |filter: DiscoveryFilter| -> Vec<String> {
+            plan_workspace(root, false, recursive, &filter)
+                .unwrap()
+                .repos
+                .iter()
+                .map(|(p, _)| workspace_rel(root, p))
+                .collect()
+        };
+        let slash = vec!["svc/x/".to_string()];
+        assert_eq!(roots(DiscoveryFilter::new(&slash, &[]).unwrap()), ["svc/x"]);
+        assert_eq!(roots(DiscoveryFilter::new(&[], &slash).unwrap()), ["."]);
+    }
+
+    #[test]
+    fn report_marks_filtered_projects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        dir_with(root, "", "Cargo.toml");
+        dir_with(root, "svc", "go.mod");
+        dir_with(root, "infra", "MODULE.bazel");
+        let filter =
+            DiscoveryFilter::new(&["svc".into(), "infra".into()], &["infra".into()]).unwrap();
+        let got = report(
+            root,
+            Discovery::Recursive {
+                max_depth: RECURSIVE_MAX_DEPTH,
+            },
+            &filter,
+        );
+        let outcomes: Vec<(&str, &DirOutcome)> =
+            got.iter().map(|(p, o, _)| (p.as_str(), o)).collect();
+        assert_eq!(
+            outcomes,
+            vec![
+                (".", &DirOutcome::NotIncluded),
+                ("infra", &DirOutcome::Excluded),
+                ("svc", &project(&["scip-go"], &[])),
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_reports_every_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git_init(root);
+        std::fs::write(root.join(".gitignore"), "gen-out/\napp/\n").unwrap();
+        dir_with(root, "a", "Cargo.toml");
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        dir_with(root, "gen-out", "Cargo.toml");
+        let app = dir_with(root, "app", "go.mod");
+        git_init(&app);
+        dir_with(root, "z", "MODULE.bazel");
+        let got = report(root, Discovery::Children, &DiscoveryFilter::default());
+        assert_eq!(
+            got,
+            vec![
+                ("a".into(), project(&["rust-analyzer"], &[]), false),
+                ("app".into(), project(&["scip-go"], &[]), true),
+                ("b".into(), DirOutcome::NoManifest, false),
+                ("gen-out".into(), DirOutcome::Ignored, false),
+                ("z".into(), DirOutcome::BazelRoot, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn recursive_cargo_members_need_a_workspace_above() {
+        // No `[workspace]` in the parent: the nested crate is its own project.
+        let tmp = tempfile::tempdir().unwrap();
+        let r = write(
+            tmp.path(),
+            "",
+            "Cargo.toml",
+            "[package]\nname = \"r\"\n# [workspace]\n",
+        );
+        let sub = dir_with(tmp.path(), "tools/x", "Cargo.toml");
+        assert_eq!(recursive_roots(tmp.path()), vec![r, sub]);
+
+        // `[workspace.dependencies]` alone defines a workspace too.
+        let tmp = tempfile::tempdir().unwrap();
+        let r = write(
+            tmp.path(),
+            "",
+            "Cargo.toml",
+            "[workspace.dependencies]\nanyhow = \"1\"\n",
+        );
+        dir_with(tmp.path(), "crates/a", "Cargo.toml");
+        assert_eq!(recursive_roots(tmp.path()), vec![r]);
+
+        // The parent is the nearest *recorded* Rust project: a member is not
+        // recorded, so a crate below a member checks the workspace root.
+        let tmp = tempfile::tempdir().unwrap();
+        let r = write(tmp.path(), "", "Cargo.toml", "[workspace]\n");
+        dir_with(tmp.path(), "crates/a", "Cargo.toml"); // member of r
+        dir_with(tmp.path(), "crates/a/nested", "Cargo.toml"); // member of r too
+        assert_eq!(recursive_roots(tmp.path()), vec![r]);
+
+        // A crate that declares its own workspace (the `cargo fuzz` layout)
+        // is in no other one.
+        let tmp = tempfile::tempdir().unwrap();
+        let r = write(tmp.path(), "", "Cargo.toml", "[workspace]\n");
+        let fuzz = write(
+            tmp.path(),
+            "fuzz",
+            "Cargo.toml",
+            "[package]\nname = \"f\"\n\n[workspace]\nmembers = [\".\"]\n",
+        );
+        assert_eq!(recursive_roots(tmp.path()), vec![r, fuzz]);
+    }
+
+    #[test]
+    fn recursive_nested_git_repos_are_not_members() {
+        // A nested checkout has its own project key, so the projects of the
+        // repo around it don't cover it, ignored or not, nor what's below it.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git_init(root);
+        std::fs::write(root.join(".gitignore"), "vendored/\n").unwrap();
+        let r = write(root, "", "Cargo.toml", "[workspace]\n");
+        touch(&r, "pyproject.toml");
+        let vendored = dir_with(root, "vendored", "Cargo.toml");
+        git_init(&vendored);
+        let lib = dir_with(root, "lib", "pyproject.toml");
+        git_init(&lib);
+        let inner = dir_with(root, "lib/inner", "Cargo.toml");
+        assert_eq!(recursive_roots(root), vec![r, lib, inner, vendored]);
+    }
+
+    #[test]
+    fn recursive_go_modules_are_never_members() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = dir_with(tmp.path(), "", "go.mod");
+        let a = dir_with(tmp.path(), "svc/a", "go.mod");
+        let b = dir_with(tmp.path(), "svc/a/b", "go.mod");
+        assert_eq!(recursive_roots(tmp.path()), vec![r, a, b]);
+    }
+
+    #[test]
+    fn recursive_python_and_java_keep_the_member_rule() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = dir_with(tmp.path(), "", "pyproject.toml");
+        dir_with(tmp.path(), "pkg/sub", "pyproject.toml");
+        assert_eq!(recursive_roots(tmp.path()), vec![r]);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let r = dir_with(tmp.path(), "", "pom.xml");
+        dir_with(tmp.path(), "module-a", "pom.xml");
+        assert_eq!(recursive_roots(tmp.path()), vec![r]);
+    }
+
+    /// A TypeScript project: `package.json` (with `content`) and `tsconfig.json`.
+    fn ts(root: &Path, rel: &str, content: &str) -> PathBuf {
+        let d = write(root, rel, "package.json", content);
+        touch(&d, "tsconfig.json");
+        d
+    }
+
+    /// `recursive_roots`, with `installed` in place of the `PATH` check of
+    /// the package managers.
+    fn ts_roots(root: &Path, installed: &dyn Fn(&str) -> bool) -> Vec<PathBuf> {
+        projects(examine_recursive(root, RECURSIVE_MAX_DEPTH, installed).unwrap())
+    }
+
+    #[test]
+    fn recursive_typescript_members_follow_pnpm_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = ts(tmp.path(), "", "{}");
+        std::fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "# comment\npackages:\n  - 'packages/*'\n  - \"!packages/skip\" # not this one\n  - libs/**\ncatalog:\n  - 'apps/*'\n",
+        )
+        .unwrap();
+        ts(tmp.path(), "packages/a", "{}"); // member
+        let skip = ts(tmp.path(), "packages/skip", "{}"); // negated
+        ts(tmp.path(), "libs/deep/x", "{}"); // member, `**`
+        let web = ts(tmp.path(), "apps/web", "{}"); // under another key
+        assert_eq!(
+            ts_roots(tmp.path(), &|_| true),
+            vec![root.clone(), web.clone(), skip.clone()]
+        );
+
+        // Without pnpm, the root's run indexes no package, so each is its own
+        // project.
+        let all = ts_roots(tmp.path(), &|tool| tool != "pnpm");
+        assert_eq!(all.len(), 5, "{all:?}");
+    }
+
+    #[test]
+    fn recursive_typescript_members_follow_yarn_workspaces() {
+        // Array form.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = ts(tmp.path(), "", r#"{"workspaces": ["packages/*"]}"#);
+        touch(&root, "yarn.lock");
+        ts(tmp.path(), "packages/a", "{}");
+        let tool = ts(tmp.path(), "tools/x", "{}");
+        assert_eq!(
+            ts_roots(tmp.path(), &|_| true),
+            vec![root.clone(), tool.clone()]
+        );
+        let a = tmp.path().join("packages/a");
+        assert_eq!(
+            ts_roots(tmp.path(), &|tool| tool != "yarn"),
+            vec![root, a, tool]
+        );
+
+        // Object form.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = ts(
+            tmp.path(),
+            "",
+            r#"{"workspaces": {"packages": ["./libs/**"]}}"#,
+        );
+        touch(&root, "yarn.lock");
+        ts(tmp.path(), "libs/deep/x", "{}");
+        assert_eq!(ts_roots(tmp.path(), &|_| true), vec![root]);
+    }
+
+    #[test]
+    fn recursive_typescript_npm_workspace_packages_are_not_members() {
+        // No yarn.lock and no pnpm-workspace.yaml: scip-typescript has no flag
+        // that indexes the packages from the root, so each is its own project.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = ts(tmp.path(), "", r#"{"workspaces": ["packages/*"]}"#);
+        let a = ts(tmp.path(), "packages/a", "{}");
+        assert_eq!(recursive_roots(tmp.path()), vec![root, a]);
+    }
+
+    #[test]
+    fn workspace_skips_hidden_and_pruned_children() {
+        // Step 12: plain `--workspace` prunes by name as `--recursive` does,
+        // and the report does not list the pruned children.
+        let root = tempfile::tempdir().unwrap();
+        dir_with(root.path(), ".hidden", "Cargo.toml");
+        dir_with(root.path(), "node_modules/x", "Cargo.toml");
+        dir_with(root.path(), "node_modules", "package.json");
+        let a = dir_with(root.path(), "a", "Cargo.toml");
+        assert_eq!(
+            discover_workspace_repos(root.path()).unwrap(),
+            vec![a.clone()]
+        );
+        let got = report(
+            root.path(),
+            Discovery::Children,
+            &DiscoveryFilter::default(),
+        );
+        assert_eq!(
+            got,
+            vec![("a".into(), project(&["rust-analyzer"], &[]), false)]
+        );
     }
 
     #[test]

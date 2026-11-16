@@ -209,6 +209,55 @@ fn scip_typescript_indexes_tiny_package() {
 }
 
 #[test]
+fn scip_typescript_indexes_a_pnpm_workspace_and_its_root() {
+    if !binary_present("scip-typescript") || !binary_present("pnpm") {
+        eprintln!("skip: scip-typescript or pnpm not installed");
+        return;
+    }
+    isolate_scip_output();
+    let dir = tempdir().unwrap();
+    let repo = dir.path().join("ws");
+    let pkg = repo.join("packages/a");
+    std::fs::create_dir_all(&pkg).unwrap();
+    let tsconfig = "{\"compilerOptions\":{\"target\":\"es2020\"},\"include\":[\"*.ts\"]}\n";
+    for (d, name) in [(&repo, "root"), (&pkg, "a")] {
+        std::fs::write(
+            d.join("package.json"),
+            format!("{{\"name\":\"{name}\",\"version\":\"0.0.1\"}}\n"),
+        )
+        .unwrap();
+        std::fs::write(d.join("tsconfig.json"), tsconfig).unwrap();
+    }
+    std::fs::write(
+        repo.join("pnpm-workspace.yaml"),
+        "packages:\n  - 'packages/*'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("root.ts"),
+        "export function rootFn(): number { return 1; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("a.ts"),
+        "export function memberFn(): number { return 2; }\n",
+    )
+    .unwrap();
+
+    let pool = db_for_test(dir.path());
+    let conn = pool.get().unwrap();
+    match index_repo(&conn, &repo, None, None, "/proj/pnpm-ws", false, false) {
+        Ok(_) => {
+            // The member's code comes from the root's run (step 11's member
+            // rule relies on it), and the root's own code is still indexed.
+            assert_has_symbol(&conn, "rootFn");
+            assert_has_symbol(&conn, "memberFn");
+        }
+        Err(e) => eprintln!("scip-typescript failed: {e:#}"),
+    }
+}
+
+#[test]
 fn scip_java_indexes_tiny_module() {
     if !binary_present("scip-java") {
         eprintln!("skip: scip-java not installed");

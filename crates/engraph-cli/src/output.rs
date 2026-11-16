@@ -91,14 +91,70 @@ pub(crate) fn print_repo_plan(repo: &Path, plan: &engraph_codegraph::IndexPlan) 
     describe_plan(plan, "");
 }
 
-pub(crate) fn print_workspace_plan(root: &Path, plans: &[(PathBuf, engraph_codegraph::IndexPlan)]) {
+pub(crate) fn print_workspace_plan(root: &Path, plan: &engraph_codegraph::WorkspacePlan) {
     println!("DRY RUN — no indexer spawned, no Bazel run, no codegraph writes.");
     println!("workspace: {}", root.display());
-    println!("discovered {} repo(s):", plans.len());
-    for (repo, plan) in plans {
-        println!("  - {}", repo.display());
-        describe_plan(plan, "  ");
+    if !plan.dirs.is_empty() {
+        println!("examined:");
+        let rows: Vec<(String, String)> = plan
+            .dirs
+            .iter()
+            .map(|d| {
+                (
+                    engraph_codegraph::workspace_rel(root, &d.path),
+                    dir_cause(root, d),
+                )
+            })
+            .collect();
+        let width = rows
+            .iter()
+            .map(|(p, _)| p.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (path, cause) in rows {
+            println!("  {path:<width$}  {cause}");
+        }
     }
+    println!("discovered {} repo(s):", plan.repos.len());
+    for (repo, repo_plan) in &plan.repos {
+        println!("  - {}", repo.display());
+        describe_plan(repo_plan, "  ");
+    }
+}
+
+/// Why discovery listed `d`, for the dry-run report of a workspace under `root`.
+fn dir_cause(root: &Path, d: &engraph_codegraph::DiscoveredDir) -> String {
+    use engraph_codegraph::DirOutcome;
+    let members = |covered: &[(&str, PathBuf)]| {
+        covered
+            .iter()
+            .map(|(lang, p)| format!("{} ({lang})", engraph_codegraph::workspace_rel(root, p)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut cause = match &d.outcome {
+        DirOutcome::Project { langs, covered } if covered.is_empty() => {
+            format!("project ({})", langs.join(", "))
+        }
+        DirOutcome::Project { langs, covered } => {
+            format!(
+                "project ({}); member of {}",
+                langs.join(", "),
+                members(covered)
+            )
+        }
+        DirOutcome::BazelRoot => "Bazel root; subtree not examined".to_string(),
+        DirOutcome::Member { covered } => format!("member of {}", members(covered)),
+        DirOutcome::Excluded => "dropped by --exclude".to_string(),
+        DirOutcome::NotIncluded => "not matched by --include".to_string(),
+        DirOutcome::NoManifest => "no manifest".to_string(),
+        DirOutcome::Ignored => "ignored (.gitignore / .ignore / exclude rules)".to_string(),
+        DirOutcome::BeyondMaxDepth { max_depth } => format!("beyond --max-depth {max_depth}"),
+    };
+    if d.own_repo {
+        cause.push_str("; ignored, but its own git repo");
+    }
+    cause
 }
 
 pub(crate) fn print_hits(hits: &[engraph_retrieve::Hit]) {

@@ -704,7 +704,11 @@ Flow:
    stores repo-relative ones under the repo's key, so
    `divergence::indexed_location` maps an absolute path to
    `(canonical_repo_key, path relative to the git toplevel)`. A linked
-   worktree maps to its repo's key. A relative path, or one outside git,
+   worktree maps to its repo's key. A git submodule maps to its own
+   checkout, not to the gitdir (`<parent>/.git/modules/<name>`) that `git
+   worktree list` reports for it, and not to the parent repo; the
+   SessionStart refresh and `--if-changed` therefore treat the submodule's
+   checkout as a main worktree. A relative path, or one outside git,
    is matched as given against any project.
 2. `engraph_codegraph::subgraph::entities_in_file(conn, project, path, 30)`
    — `WHERE file_path = ?1 AND (?2 IS NULL OR project = ?2) ORDER BY
@@ -1536,7 +1540,7 @@ crate that does cross-file `who-calls` across Rust/Python/Go/TS/Java.
 | `RustAnalyzer` | `Cargo.toml` | `rust-analyzer scip <repo> --output <out>` (chdir into repo) |
 | `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <out> --project-name <basename> --project-version 0.0.0` |
 | `ScipGo` | `go.mod` | `scip-go --module-root <repo> --output <out>` (chdir into repo) |
-| `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index --output <out>` (chdir into repo) |
+| `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index --output <out>` (chdir into repo); in a pnpm or yarn workspace (`TsWorkspace`), also `--pnpm-workspaces` / `--yarn-workspaces <repo>` |
 | `ScipJava` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java index --output <out>` (chdir into repo) |
 
 `<out>` is `index.scip` inside a per-repo scratch directory `index.rs`
@@ -1916,9 +1920,77 @@ per-repo results plus a workspace summary. Each discovered root's
 `(project, subtree)` comes from the caller (`scope_for`; the CLI passes
 `index_scope`): separate git repos get their own key, and roots inside
 one git repo index into that repo's key as subtrees (§14). `--recursive`
-extends discovery below immediate children (to `RECURSIVE_MAX_DEPTH` = 16),
+extends discovery below immediate children (to `--max-depth`, default 16),
 pruning build/dep dirs (`node_modules`, `target`, …) and stopping at Bazel
-roots.
+roots. Both modes skip a directory that `.gitignore` (inside a git repo
+only), `.ignore`, `.git/info/exclude`, or the global git excludes name, the
+same rules as `git ls-files --exclude-standard`. Discovery keeps its own
+traversal and asks an `ignore::IncrementalIgnore` matcher about each child
+directory; the matcher loads and caches the ignore files of each directory
+on first use. An ignored directory that contains `.git` is still discovered,
+because it is a separate repo: discovery walks it with a new matcher rooted
+at it, so the parent's rules do not apply inside it.
+
+`--include <glob>` and `--exclude <glob>` filter the discovered projects
+after discovery, in both modes (`DiscoveryFilter`). A project that an
+exclude glob matches is dropped; if an include glob matches it too,
+`--exclude` wins and a `tracing` warning names it. Each glob matches a project's `/`-separated path
+below the workspace root, with `.` for the root. The globs use `globset`
+with `literal_separator`: `*` stays within one level, `**` crosses levels,
+and a glob matches only the path that it names. A leading `./` and a
+trailing `/` are dropped (`path_glob`). Discovery itself does not
+change, so a member of a project above it cannot be included, and an
+ignored directory stays ignored.
+
+A directory with a manifest is a *member*, and is not indexed on its own,
+when the nearest recorded project of the same language above it (its
+parent) indexes it in the parent's run (`is_member`):
+
+| Language | Member when |
+|---|---|
+| Rust | the parent's `Cargo.toml` has a `[workspace]` or `[workspace.*]` table (a line scan; `members` and `exclude` are not read), and the directory's own `Cargo.toml` has none (a `cargo fuzz` crate declares its own workspace) |
+| TypeScript | the parent's `pnpm-workspace.yaml` `packages` list it, or, with a `yarn.lock`, its `package.json` `workspaces` (array or `{"packages": [...]}`) list it; `!` globs exclude; and `pnpm` or `yarn` is on `PATH`. An npm workspace has no member: scip-typescript cannot index its packages from the root |
+| Go | never: Go tools leave a nested module out of the module above it |
+| Python | always: scip-python indexes every file below the parent |
+| Java | always: scip-java builds multi-module projects from the root |
+
+A member is not recorded, so a directory below a member checks the same
+parent. Workspace globs use the `--include` rules, relative to the parent.
+A directory that contains `.git` (a nested repo or a submodule, ignored or
+not) is a member of nothing above it: it has its own project key, so code
+indexed under the outer key would be missing from lookups inside it. Its
+subtree starts with no ancestor projects. `classify` gives the outcome of a
+directory for both modes; plain `--workspace` calls it with no ancestors.
+
+The TypeScript rule and the scip-typescript driver use the same checks,
+`driver::TsWorkspace::of` and `which::on_path`, so a package is a member
+only when its parent's run indexes it. A `pnpm-workspace.yaml` whose
+`packages` list the line scan cannot read (the one-line flow form) is no
+workspace. In a pnpm workspace (`pnpm-workspace.yaml`) the driver adds
+`--pnpm-workspaces`; in a yarn workspace (`package.json` `workspaces` and a
+`yarn.lock`) it adds `--yarn-workspaces`. With either flag, scip-typescript
+indexes only the packages that the tool lists, and yarn 1 does not list the
+root, so the driver also names the root (its real path: scip-typescript
+skips a project that it already indexed only when the path is the same
+string, and the tools print real paths). The flag makes scip-typescript run
+`pnpm` or `yarn`; when that tool is not on `PATH`, the driver runs without
+the flag and logs a warning, and discovery records each package as a
+project of its own.
+
+Discovery produces a report, a `DiscoveredDir` for each directory that
+explains the result, with a `DirOutcome`: a project (with the languages that
+it adds, and the languages that an ancestor project covers), a Bazel root, a
+member (with the ancestor project of each language), dropped by `--exclude`
+or not matched by `--include`, ignored, or beyond `--max-depth`. The
+recursive walk tracks, for each language, the nearest ancestor project that
+covers it, so a member names its project. A plain directory below the root,
+or a directory pruned by name, is not in the report. Plain `--workspace`
+lists every direct child it examines, with "no manifest" for a child
+without one; it skips hidden and build/dependency directories by name, as
+`--recursive` does (`is_pruned_dir`). The
+real run and `--dry-run` use the same report: `index_workspace` indexes its
+projects, and `plan_workspace` returns it (`WorkspacePlan`) for the dry-run
+output.
 
 **Cross-repo subgraph annotation.** `format_markdown` now compares the
 queried entity's `project` with each related entity's. When they

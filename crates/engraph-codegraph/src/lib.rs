@@ -7,6 +7,7 @@ pub mod lock;
 pub mod relation_kind;
 pub mod scip_loader;
 pub mod subgraph;
+mod which;
 
 pub use bazel::{BazelStats, detect_bazel, index_bazel_workspace};
 pub use bazel_symbols::{
@@ -16,10 +17,11 @@ pub use bazel_symbols::{
 pub use driver::{Driver, registry};
 pub use gc::collect_orphans;
 pub use index::{
-    IndexMode, IndexPlan, IndexScope, IndexSource, IndexStats, SymbolLangSummary,
+    DirOutcome, DiscoveredDir, Discovery, DiscoveryFilter, IndexMode, IndexPlan, IndexScope,
+    IndexSource, IndexStats, RECURSIVE_MAX_DEPTH, SymbolLangSummary, WorkspacePlan,
     WorkspaceRepoResult, WorkspaceStats, discover_workspace_repos, index_modes, index_repo,
     index_repo_in, index_scip_manifest, index_workspace, indexed_at_by_subtree, indexed_commits,
-    plan_repo, plan_workspace, record_indexed_commit, source_extensions,
+    plan_repo, plan_workspace, record_indexed_commit, source_extensions, workspace_rel,
 };
 pub use lock::{
     Acquire, IndexLock, acquire as acquire_index_lock, acquire_wait as acquire_index_lock_wait,

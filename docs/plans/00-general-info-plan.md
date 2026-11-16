@@ -67,8 +67,8 @@ not the sequence of the work. Some plans must wait for other plans:
 1. Start steps 1 to 4 of [plan 04](04-file-read-measurement-plan.md) (measurement of file reads) at the start of the
    work. These steps must collect data for two weeks. You can do other plans
    at the same time.
-2. Do [plan 02](02-deeper-workspace-discovery-plan.md) (deeper workspace discovery) before [plan 03](03-all-go-modules-plan.md) (all Go modules).
-   [Plan 03](03-all-go-modules-plan.md) uses the member rules of [plan 02](02-deeper-workspace-discovery-plan.md).
+2. Do [plan 02](completed/02-deeper-workspace-discovery-plan.md) (deeper workspace discovery) before [plan 03](03-all-go-modules-plan.md) (all Go modules).
+   [Plan 03](03-all-go-modules-plan.md) uses the member rules of [plan 02](completed/02-deeper-workspace-discovery-plan.md).
 3. In [plan 05](05-stable-symbol-ids-plan.md) (stable symbol ids), do part 1 (test suite) before part 2
    (normalization). Part 2 changes symbol ids. The test suite shows if a change
    to the ids causes problems. Step 1 of part 2 is a bug fix. You can do it

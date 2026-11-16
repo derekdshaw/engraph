@@ -38,6 +38,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 dirs = "6.0.0"
 sha2 = "0.11.0"
 regex = "1.12.4"
+ignore = "0.4.34"
+globset = "0.4.21"
 shell-words = "1"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "process", "io-util", "signal"] }
 scip = "0.7.1"
