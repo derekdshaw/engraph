@@ -2143,6 +2143,12 @@ flag is still available to opt in on a single-repo run.
   `discover_go_modules` walks for every `go.mod` (pruning symlinked /
   `vendor` / `testdata` / hidden trees); each module runs `scip-go index
   --module-root <rel> --module-version SCIP_GO_VERSION --skip-tests`;
+  the modules that a root `go.work` lists instead share one run from the
+  root, with one `./<dir>/...` pattern each (`go_work_listed`): run one at a
+  time, scip-go gives a reference into another listed module the version
+  `.` while the definition has the pinned version, so the relation pointed
+  at a placeholder (verified 2026-11-16, scip-go 0.2.7). The module count
+  still counts each listed module.
   `rebase_documents` prepends the module's repo-relative dir to its
   document paths (scip-go emits module-root-relative paths and the loader
   stores them verbatim as `file_path`, so two modules' `main.go` would

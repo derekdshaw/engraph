@@ -30,6 +30,7 @@ Last update: 2026-11-16, main at `267b7f5`
 
 ## Bugs
 
+- In the Bazel Go pass, a call from one module of a `go.work` into another pointed at a placeholder, not at the definition, because each module had its own scip-go run. The modules that the root `go.work` lists now share one run.
 - A git submodule got its gitdir (`<parent>/.git/modules/<name>`) as its project key, so engraph treated its checkout as a linked worktree: `engraph index --if-changed` and the SessionStart refresh skipped every submodule. A submodule now scopes to its own checkout.
 - `engraph run` showed no output when the shell had to expand a word of the command (`~`, `$`, a glob, or braces). The hook does not wrap these commands now.
 - When a command failed, 16 filters did not show its error text. They now add stderr when the exit code is not zero.

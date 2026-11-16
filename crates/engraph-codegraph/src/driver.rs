@@ -202,7 +202,7 @@ pub(crate) fn go_work_rel(path: &str) -> &str {
 }
 
 /// The scip-go package pattern for every package of a `use` directory.
-fn go_work_pattern(path: &str) -> String {
+pub(crate) fn go_work_pattern(path: &str) -> String {
     match go_work_rel(path) {
         "." => "./...".to_string(),
         abs if Path::new(abs).is_absolute() => format!("{abs}/..."),
