@@ -27,12 +27,6 @@ A failed driver of a multi-manifest repo is in the summary.
 
 Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Parts 1 to 15 and 17 to 19 are complete, and the plan does not have them. The numbers of the other parts do not change.
 
-## 2. Deeper workspace discovery
-
-You can select the projects that `engraph index --recursive` finds. The discovery obeys `.gitignore` files. Go modules below a different Go module are in the result, and each language has its own rule for workspace members. A git submodule has its own project key.
-
-Plan: [`docs/plans/02-deeper-workspace-discovery-plan.md`](plans/02-deeper-workspace-discovery-plan.md)
-
 ## 3. All Go modules in the code graph
 
 engraph indexes all Go modules of a repo, with correct relations between the modules. This is also true in Bazel repos.

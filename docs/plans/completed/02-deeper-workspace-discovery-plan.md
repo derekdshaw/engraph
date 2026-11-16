@@ -1,6 +1,6 @@
 # Plan 02: Deeper workspace discovery
 
-Read [the general information for all plans](00-general-info-plan.md)
+Read [the general information for all plans](../00-general-info-plan.md)
 before you use this plan. It gives the rules for the work and the sequence
 of the plans.
 
@@ -264,4 +264,4 @@ real repo before you complete step 11.
 
 ## Dependencies
 
-None. [Plan 03](03-all-go-modules-plan.md) uses the member rules of this plan.
+None. [Plan 03](../03-all-go-modules-plan.md) uses the member rules of this plan.

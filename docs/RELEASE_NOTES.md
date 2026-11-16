@@ -2,9 +2,15 @@
 
 Changes since v0.3.0.
 
-Last update: 2026-11-15, main at `06909ef`
+Last update: 2026-11-16, main at `267b7f5`
 
 ## Features
+
+- **Discovery obeys ignore files.** `engraph index --workspace` and `--recursive` skip the directories that `.gitignore` (inside a git repo), `.ignore`, `.git/info/exclude`, or the global git excludes name — the same rules as `git ls-files --exclude-standard`. An ignored directory that is its own git repo is still found, and the parent's rules do not apply inside it. Both modes also skip hidden and build/dependency directories by name.
+- **Discovery flags.** `--max-depth <n>` (default 16, with `--recursive`) limits how deep discovery goes. `--include <glob>` and `--exclude <glob>` (repeatable, with either mode) filter the discovered projects by their path below the workspace root: `*` stays within one level, `**` crosses levels, `.` is the root, and a glob matches only the path it names. When both match a project, `--exclude` wins with a warning.
+- **The dry run explains discovery.** `engraph index --dry-run` with `--workspace` or `--recursive` lists each directory that explains the result, with its cause: projects with their languages, workspace members with the project that covers them, Bazel roots, ignored directories, directories beyond `--max-depth`, and projects the filter globs dropped.
+- **Per-language workspace member rules.** A nested project is skipped only when the project above it really indexes it: a Cargo crate under a `[workspace]`, a TypeScript package that `pnpm-workspace.yaml` or yarn `workspaces` (with a `yarn.lock`) lists, and nested Python and Java projects. A Go module below another Go module is now always its own project, and so is a package of an npm-only workspace.
+- **scip-typescript indexes workspaces.** In a pnpm or yarn workspace, the driver passes `--pnpm-workspaces` / `--yarn-workspaces` plus the root, so the workspace packages and the root are indexed in one run. If pnpm or yarn is not installed, the run falls back to the root alone, with a warning.
 
 - **Background index refresh.** For a repo that you indexed before, the SessionStart hook starts `engraph index --if-changed` in the background. This run indexes again only the subtrees that changed since their last index, and it repeats how you indexed each subtree. Set `ENGRAPH_AUTO_INDEX=0` to stop it.
 - **Index lock.** One OS file lock per project prevents two index runs at the same time. An explicit run waits for the lock, and a background refresh does not run.

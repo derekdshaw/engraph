@@ -14,7 +14,7 @@ modules. This is also true in Bazel repos.
 - The Go driver finds a module only when `go.mod` is in the indexed directory.
   For a repo with more than one Go module, a `--recursive` index run is
   necessary. But that run does not include a Go module below a different Go
-  module ([plan 02](02-deeper-workspace-discovery-plan.md)).
+  module ([plan 02](completed/02-deeper-workspace-discovery-plan.md)).
 - The Go driver does not read `go.work` files.
 - scip-go indexes only one build configuration. Thus, files with build tags for
   a different platform (for example `_linux.go` or `//go:build`) are not in the
@@ -33,7 +33,7 @@ modules. This is also true in Bazel repos.
 ## Steps
 
 1. Write a test with a root Go module and a second Go module in `tools/`.
-2. Make sure that `engraph index --recursive` indexes the two modules. [Plan 02](02-deeper-workspace-discovery-plan.md),
+2. Make sure that `engraph index --recursive` indexes the two modules. [Plan 02](completed/02-deeper-workspace-discovery-plan.md),
    step 10 changes the discovery for this.
 3. Find out if scip-go can index all modules of a `go.work` file in one
    operation.
@@ -71,8 +71,8 @@ target repo.
 ## Risks
 
 An index run for each Go module can use much time in a large repo. Use the
-`--include` flag of [plan 02](02-deeper-workspace-discovery-plan.md) to select modules.
+`--include` flag of [plan 02](completed/02-deeper-workspace-discovery-plan.md) to select modules.
 
 ## Dependencies
 
-[Plan 02](02-deeper-workspace-discovery-plan.md) (the member rule for Go).
+[Plan 02](completed/02-deeper-workspace-discovery-plan.md) (the member rule for Go).
