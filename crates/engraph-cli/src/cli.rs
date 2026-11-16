@@ -117,6 +117,11 @@ pub(crate) enum Cmd {
     },
     /// Build / refresh the codegraph for a repo by running a SCIP indexer
     /// (or loading a prebuilt index.scip).
+    #[command(group(
+        clap::ArgGroup::new("discovery")
+            .args(["workspace", "recursive"])
+            .multiple(true)
+    ))]
     Index {
         /// Path to repo root
         #[arg(default_value = ".")]
@@ -171,6 +176,12 @@ pub(crate) enum Cmd {
         /// root that discovery examines (the root is level 0).
         #[arg(long, requires = "recursive", default_value_t = engraph_codegraph::RECURSIVE_MAX_DEPTH)]
         max_depth: usize,
+        /// With --workspace or --recursive: keep only the discovered projects
+        /// whose path below the workspace root matches a glob (`.` is the
+        /// root). `*` stays within one level, `**` crosses levels, and a glob
+        /// matches only the path it names. Repeat to add globs.
+        #[arg(long, value_name = "GLOB", requires = "discovery")]
+        include: Vec<String>,
         /// Preview what would be indexed (chosen path, drivers, symbol-level
         /// languages, discovered repos) without spawning any indexer, running
         /// Bazel, or writing the codegraph. Composes with all other flags.

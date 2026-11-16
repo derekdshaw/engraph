@@ -1927,6 +1927,15 @@ on first use. An ignored directory that contains `.git` is still discovered,
 because it is a separate repo: discovery walks it with a new matcher rooted
 at it, so the parent's rules do not apply inside it.
 
+`--include <glob>` filters the discovered projects after discovery, in both
+modes (`DiscoveryFilter`). Each glob matches a project's `/`-separated path
+below the workspace root, with `.` for the root. The globs use `globset`
+with `literal_separator`: `*` stays within one level, `**` crosses levels,
+and a glob matches only the path that it names. Discovery itself does not
+change, so a project that same-language suppression hides (a member of a
+workspace above it) cannot be included, and an ignored directory stays
+ignored.
+
 **Cross-repo subgraph annotation.** `format_markdown` now compares the
 queried entity's `project` with each related entity's. When they
 differ, the location is prefixed with `repo:<basename>` so the user

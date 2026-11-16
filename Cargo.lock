@@ -723,6 +723,7 @@ dependencies = [
  "chrono",
  "dirs",
  "engraph-core",
+ "globset",
  "ignore",
  "protobuf",
  "rusqlite",

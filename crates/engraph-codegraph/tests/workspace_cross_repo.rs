@@ -9,7 +9,9 @@
 //! Soft-skips when rust-analyzer isn't installed so this file is safe to run
 //! on any machine.
 
-use engraph_codegraph::{Discovery, format_markdown, index_workspace, subgraph_for};
+use engraph_codegraph::{
+    Discovery, DiscoveryFilter, format_markdown, index_workspace, subgraph_for,
+};
 use engraph_core::db::open_pool;
 use std::process::Command;
 use tempfile::tempdir;
@@ -95,12 +97,20 @@ fn workspace_links_app_b_caller_to_lib_a_foo() {
     let pool = open_pool(&dir.path().join("eg.db")).unwrap();
     let conn = pool.get().unwrap();
 
-    let stats = match index_workspace(&conn, &root, false, Discovery::Children, false, &|p| {
-        (
-            p.canonicalize().unwrap().to_string_lossy().into_owned(),
-            String::new(),
-        )
-    }) {
+    let stats = match index_workspace(
+        &conn,
+        &root,
+        false,
+        Discovery::Children,
+        &DiscoveryFilter::default(),
+        false,
+        &|p| {
+            (
+                p.canonicalize().unwrap().to_string_lossy().into_owned(),
+                String::new(),
+            )
+        },
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("skip: index_workspace failed (likely rust-analyzer env issue): {e:#}");

@@ -4,6 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use ignore::{IncrementalIgnore, WalkBuilder};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -747,6 +748,63 @@ pub enum Discovery {
     Recursive { max_depth: usize },
 }
 
+/// The `--include` globs of a workspace run. A glob matches the path of a
+/// discovered project below the workspace root, `/`-separated, with `.` for
+/// the root itself: `*` stays within one level and `**` crosses levels. A
+/// glob matches only the path it names, not the paths below it. With no glob,
+/// every project is kept.
+#[derive(Debug, Default)]
+pub struct DiscoveryFilter {
+    include: Option<GlobSet>,
+}
+
+impl DiscoveryFilter {
+    pub fn new(include: &[String]) -> Result<Self> {
+        if include.is_empty() {
+            return Ok(Self::default());
+        }
+        let mut set = GlobSetBuilder::new();
+        for pat in include {
+            let pat = pat.strip_prefix("./").unwrap_or(pat);
+            let glob = GlobBuilder::new(pat)
+                .literal_separator(true)
+                .build()
+                .with_context(|| format!("invalid --include glob {pat}"))?;
+            set.add(glob);
+        }
+        Ok(Self {
+            include: Some(set.build()?),
+        })
+    }
+
+    /// Whether `repo`, discovered under `root`, stays in the result.
+    fn keeps(&self, root: &Path, repo: &Path) -> bool {
+        let Some(include) = &self.include else {
+            return true;
+        };
+        let rel: Vec<_> = repo
+            .strip_prefix(root)
+            .unwrap_or(repo)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect();
+        let rel = if rel.is_empty() {
+            ".".to_string()
+        } else {
+            rel.join("/")
+        };
+        include.is_match(rel)
+    }
+}
+
+/// The projects a workspace run finds under `root`, before any filter.
+fn discover(root: &Path, discovery: Discovery) -> Result<Vec<PathBuf>> {
+    match discovery {
+        Discovery::Children => discover_workspace_repos(root),
+        Discovery::Recursive { max_depth } => discover_repos_recursive(root, max_depth),
+    }
+}
+
 /// Recursive project discovery for `index --recursive`. Walks `root`, recording
 /// each project root found at any depth (sorted, deduped). See `walk_recursive`
 /// for the per-directory rules (prune build dirs, stop at Bazel, suppress
@@ -861,14 +919,12 @@ pub fn index_workspace(
     workspace_root: &Path,
     bazel_symbols: bool,
     discovery: Discovery,
+    filter: &DiscoveryFilter,
     gc: bool,
     scope_for: &dyn Fn(&Path) -> (String, String),
 ) -> Result<WorkspaceStats> {
-    let repos = match discovery {
-        Discovery::Children => discover_workspace_repos(workspace_root)?,
-        Discovery::Recursive { max_depth } => discover_repos_recursive(workspace_root, max_depth)?,
-    };
-    if repos.is_empty() {
+    let found = discover(workspace_root, discovery)?;
+    if found.is_empty() {
         let below = match discovery {
             Discovery::Children => " or an immediate child".to_string(),
             Discovery::Recursive { max_depth } => {
@@ -878,6 +934,16 @@ pub fn index_workspace(
         anyhow::bail!(
             "no indexable repos found under {} (expected a build manifest at the root{below})",
             workspace_root.display(),
+        );
+    }
+    let repos: Vec<PathBuf> = found
+        .into_iter()
+        .filter(|r| filter.keeps(workspace_root, r))
+        .collect();
+    if repos.is_empty() {
+        anyhow::bail!(
+            "no project discovered under {} matches the --include globs",
+            workspace_root.display()
         );
     }
     let mut stats = WorkspaceStats::default();
@@ -982,13 +1048,11 @@ pub fn plan_workspace(
     workspace_root: &Path,
     bazel_symbols: bool,
     discovery: Discovery,
+    filter: &DiscoveryFilter,
 ) -> Result<Vec<(PathBuf, IndexPlan)>> {
-    let repos = match discovery {
-        Discovery::Children => discover_workspace_repos(workspace_root)?,
-        Discovery::Recursive { max_depth } => discover_repos_recursive(workspace_root, max_depth)?,
-    };
-    Ok(repos
+    Ok(discover(workspace_root, discovery)?
         .into_iter()
+        .filter(|r| filter.keeps(workspace_root, r))
         .map(|repo| {
             let plan = plan_repo(&repo, None, None, bazel_symbols);
             (repo, plan)
@@ -1103,7 +1167,13 @@ mod tests {
         let child = root.path().join("crate-a");
         std::fs::create_dir(&child).unwrap();
         touch(&child, "Cargo.toml");
-        let plans = plan_workspace(root.path(), false, Discovery::Children).unwrap();
+        let plans = plan_workspace(
+            root.path(),
+            false,
+            Discovery::Children,
+            &DiscoveryFilter::default(),
+        )
+        .unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].0, child);
         assert!(matches!(plans[0].1, IndexPlan::AutoDrivers(_)));
@@ -1113,7 +1183,13 @@ mod tests {
     fn plan_workspace_bazel_root_collapses_to_root() {
         let root = tempfile::tempdir().unwrap();
         touch(root.path(), "MODULE.bazel");
-        let plans = plan_workspace(root.path(), true, Discovery::Children).unwrap();
+        let plans = plan_workspace(
+            root.path(),
+            true,
+            Discovery::Children,
+            &DiscoveryFilter::default(),
+        )
+        .unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].0, root.path());
         assert!(matches!(plans[0].1, IndexPlan::Bazel { .. }));
@@ -1218,6 +1294,7 @@ mod tests {
             Discovery::Recursive {
                 max_depth: RECURSIVE_MAX_DEPTH,
             },
+            &DiscoveryFilter::default(),
         )
         .unwrap()
         .into_iter()
@@ -1232,7 +1309,13 @@ mod tests {
         let go = dir_with(root.path(), "go", "go.mod");
 
         // Non-recursive: the root is itself a manifest root → just [root].
-        let nonrec = plan_workspace(root.path(), false, Discovery::Children).unwrap();
+        let nonrec = plan_workspace(
+            root.path(),
+            false,
+            Discovery::Children,
+            &DiscoveryFilter::default(),
+        )
+        .unwrap();
         assert_eq!(nonrec.len(), 1);
         assert_eq!(nonrec[0].0, r);
 

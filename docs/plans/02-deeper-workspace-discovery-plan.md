@@ -98,8 +98,24 @@ module above it.
    place of the `recursive` flag.
 4. Add the `--include <glob>` flag. Each glob is relative to the workspace
    root. The flag operates with `--recursive` and with plain `--workspace`.
+   Complete:
+   - The flag filters the result of discovery. It does not change the walk,
+     so it does not include an ignored directory or a project that
+     same-language suppression hides.
+   - A glob matches the path of a project, `/`-separated, with `.` for the
+     root. `*` stays within one level and `**` crosses levels. A glob matches
+     only the path that it names: `services/a/**` does not include
+     `services/a`. To include a directory and all directories below it, give
+     two globs: `services/a` and `services/a/**`.
+   - The flag can be repeated. A project that one glob matches is kept. A
+     leading `./` is removed from a glob.
+   - A run with `--include` and no matching project fails. A dry run shows
+     no project.
 5. Add the `--exclude <glob>` flag. Each glob is relative to the workspace
    root. The flag operates with `--recursive` and with plain `--workspace`.
+   The glob syntax is the same as for `--include`. If `--include` and
+   `--exclude` match the same project, `--exclude` wins, and engraph shows a
+   warning that names the project.
 6. In the `--dry-run` output, show each directory that the discovery found.
    `walk_recursive` must return a record for each directory that it examined,
    not only the recorded directories.

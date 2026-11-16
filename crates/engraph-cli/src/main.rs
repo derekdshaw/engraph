@@ -264,6 +264,7 @@ async fn main() -> Result<()> {
             no_gc,
             recursive,
             max_depth,
+            include,
             dry_run,
             if_changed,
             auto,
@@ -293,6 +294,7 @@ async fn main() -> Result<()> {
             } else {
                 engraph_codegraph::Discovery::Children
             };
+            let filter = engraph_codegraph::DiscoveryFilter::new(&include)?;
             let recursive_root: Option<PathBuf> = if recursive {
                 Some(workspace.clone().unwrap_or_else(|| repo.clone()))
             } else {
@@ -462,6 +464,7 @@ async fn main() -> Result<()> {
                         root,
                         effective_bazel_symbols,
                         discovery,
+                        &filter,
                     )?;
                     print_workspace_plan(root, &plans);
                 } else if let Some(m) = &scip_manifest {
@@ -494,6 +497,7 @@ async fn main() -> Result<()> {
                     &root,
                     effective_bazel_symbols,
                     discovery,
+                    &filter,
                     effective_gc,
                     &|p| divergence::index_scope(p),
                 )?;
