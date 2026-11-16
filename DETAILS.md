@@ -1937,7 +1937,8 @@ exclude glob matches is dropped; if an include glob matches it too,
 `--exclude` wins and a `tracing` warning names it. Each glob matches a project's `/`-separated path
 below the workspace root, with `.` for the root. The globs use `globset`
 with `literal_separator`: `*` stays within one level, `**` crosses levels,
-and a glob matches only the path that it names. Discovery itself does not
+and a glob matches only the path that it names. A leading `./` and a
+trailing `/` are dropped (`path_glob`). Discovery itself does not
 change, so a member of a project above it cannot be included, and an
 ignored directory stays ignored.
 
@@ -1947,18 +1948,25 @@ parent) indexes it in the parent's run (`is_member`):
 
 | Language | Member when |
 |---|---|
-| Rust | the parent's `Cargo.toml` has a `[workspace]` or `[workspace.*]` table (a line scan; `members` and `exclude` are not read) |
-| TypeScript | the parent's `pnpm-workspace.yaml` `packages` list it, or, with a `yarn.lock`, its `package.json` `workspaces` (array or `{"packages": [...]}`) list it; `!` globs exclude. An npm workspace has no member: scip-typescript cannot index its packages from the root |
+| Rust | the parent's `Cargo.toml` has a `[workspace]` or `[workspace.*]` table (a line scan; `members` and `exclude` are not read), and the directory's own `Cargo.toml` has none (a `cargo fuzz` crate declares its own workspace) |
+| TypeScript | the parent's `pnpm-workspace.yaml` `packages` list it, or, with a `yarn.lock`, its `package.json` `workspaces` (array or `{"packages": [...]}`) list it; `!` globs exclude; and `pnpm` or `yarn` is on `PATH`. An npm workspace has no member: scip-typescript cannot index its packages from the root |
 | Go | never: Go tools leave a nested module out of the module above it |
 | Python | always: scip-python indexes every file below the parent |
 | Java | always: scip-java builds multi-module projects from the root |
 
 A member is not recorded, so a directory below a member checks the same
 parent. Workspace globs use the `--include` rules, relative to the parent.
+A directory that contains `.git` (a nested repo or a submodule, ignored or
+not) is a member of nothing above it: it has its own project key, so code
+indexed under the outer key would be missing from lookups inside it. Its
+subtree starts with no ancestor projects. `classify` gives the outcome of a
+directory for both modes; plain `--workspace` calls it with no ancestors.
 
-The TypeScript rule and the scip-typescript driver use one check,
-`driver::TsWorkspace::of`, so a package is a member only when its parent's
-run indexes it. In a pnpm workspace (`pnpm-workspace.yaml`) the driver adds
+The TypeScript rule and the scip-typescript driver use the same checks,
+`driver::TsWorkspace::of` and `which::on_path`, so a package is a member
+only when its parent's run indexes it. A `pnpm-workspace.yaml` whose
+`packages` list the line scan cannot read (the one-line flow form) is no
+workspace. In a pnpm workspace (`pnpm-workspace.yaml`) the driver adds
 `--pnpm-workspaces`; in a yarn workspace (`package.json` `workspaces` and a
 `yarn.lock`) it adds `--yarn-workspaces`. With either flag, scip-typescript
 indexes only the packages that the tool lists, and yarn 1 does not list the
@@ -1966,8 +1974,8 @@ root, so the driver also names the root (its real path: scip-typescript
 skips a project that it already indexed only when the path is the same
 string, and the tools print real paths). The flag makes scip-typescript run
 `pnpm` or `yarn`; when that tool is not on `PATH`, the driver runs without
-the flag and logs a warning, so the root is still indexed and the members
-are not.
+the flag and logs a warning, and discovery records each package as a
+project of its own.
 
 Discovery produces a report, a `DiscoveredDir` for each directory that
 explains the result, with a `DirOutcome`: a project (with the languages that

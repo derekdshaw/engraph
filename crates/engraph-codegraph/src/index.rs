@@ -617,15 +617,16 @@ fn run_driver_into(out_dir: &Path, repo: &Path, drv: &dyn driver::Driver) -> Res
     Ok(bytes)
 }
 
-/// Discover candidate repo roots under `workspace_root` (Phase 2.2). Rules:
+/// The projects of `--workspace` discovery under `workspace_root`, without the
+/// `--include` / `--exclude` filter:
 ///
-/// - If `workspace_root` itself contains a build manifest, return `[workspace_root]`.
-///   A Cargo workspace or any single-language root is handled in one pass; the
-///   upstream indexer takes care of its internal structure.
-/// - Otherwise, enumerate direct children of `workspace_root` and return those
-///   whose `Driver::detect()` matches. Sub-recursion is intentionally left out
-///   for the MVP; deeper layouts need explicit per-repo invocations until
-///   Phase 2.3.
+/// - If `workspace_root` itself is a project (a build manifest or a Bazel
+///   root), only `[workspace_root]`: its indexer takes care of its internal
+///   structure.
+/// - Otherwise, each direct child that is a project. Hidden and build/dep
+///   children (`is_pruned_dir`) are skipped, and so is a child that the ignore
+///   rules name, unless it is its own git repo. `--recursive` goes deeper
+///   (`examine_recursive`).
 pub fn discover_workspace_repos(workspace_root: &Path) -> Result<Vec<PathBuf>> {
     Ok(projects(examine_children(workspace_root)?))
 }
@@ -1293,8 +1294,8 @@ pub fn plan_repo(
 }
 
 /// Pure preview of `index_workspace`: which repos would be discovered and what
-/// each one's plan is. Reuses the same `discover_workspace_repos` the real run
-/// uses, so the discovered set matches exactly.
+/// each one's plan is. Uses the same `discover` as the real run, so the
+/// discovered set matches exactly.
 pub fn plan_workspace(
     workspace_root: &Path,
     bazel_symbols: bool,

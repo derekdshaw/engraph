@@ -181,14 +181,15 @@ name.
 
 ### Condition at this time (2026-11-15)
 
-`walk_recursive` (`crates/engraph-codegraph/src/index.rs:773`) calls
-`detected_langs` for each directory that it examines:
+`Walker::walk` (`crates/engraph-codegraph/src/index.rs:1073`) calls
+`classify`, and `classify` (`index.rs:706`) calls `detected_langs` for each
+directory that discovery examines:
 
 ```rust
-let detected = detected_langs(dir);
+for lang in detected_langs(dir) {
 ```
 
-`detected_langs` (`index.rs:687`) calls `bazel::detect_bazel` and the
+`detected_langs` (`index.rs:746`) calls `bazel::detect_bazel` and the
 `detect` of each driver. Each probe is an `is_file` call, thus one `stat`
 (`crates/engraph-codegraph/src/bazel.rs:38`):
 
@@ -203,8 +204,8 @@ for Cargo, 2 for Python, 1 for Go, 1 for TypeScript, and 5 for Java. Also,
 `driver::registry()` (`crates/engraph-codegraph/src/driver.rs:21`) allocates
 5 boxed drivers for each directory.
 
-Then `walk_recursive` reads the same directory with `std::fs::read_dir` to
-find its children. The listing has the names of the manifests, but the walk
+Then `Walker::walk` reads the same directory with `std::fs::read_dir`
+(`index.rs:1113`) to find its children. The listing has the names of the manifests, but the walk
 does not use them.
 
 Measurements (2026-11-15, WSL2, release build, `plan_workspace` with
@@ -222,7 +223,7 @@ adds 8 to 15 percent to this time.
 
 1. Measure `plan_workspace` with `recursive` on a large tree: 5 runs, median.
    Record the result in the pull request.
-2. In `walk_recursive`, read the directory one time. Find the manifests in
+2. In `Walker::walk`, read the directory one time. Find the manifests in
    the file names of the listing, and the children in the directory names.
 3. Use the same manifest names as `detect_bazel` and each `Driver::detect`.
    Keep one list of the names, so that detection and discovery do not differ.
@@ -233,7 +234,7 @@ adds 8 to 15 percent to this time.
 
 ### Tests
 
-- The tests of `walk_recursive` and `plan_workspace` pass without a change.
+- The tests of recursive discovery and `plan_workspace` pass without a change.
 - A manifest that is a symbolic link to a file is found.
 
 ### Risks
@@ -256,9 +257,9 @@ one thread.
 
 ### Condition at this time (2026-11-15)
 
-`walk_recursive` examines one directory at a time. The subtrees are
+`Walker::walk` examines one directory at a time. The subtrees are
 independent: each call gets the languages of its ancestors as a value
-(`claimed`) and adds roots to `out`. Only the ignore matcher is shared,
+(`claimed`) and adds records to `out`. Only the ignore matcher is shared,
 because `IncrementalIgnore::matched` takes `&mut self` to fill its cache.
 
 Discovery is a small part of an index run: each indexer takes seconds to
@@ -271,8 +272,8 @@ minutes. Thus this item is useful only for very large trees, after item 3.
    workspace. If it is not, remove this item.
 3. Give each thread its own `IncrementalIgnore`, or examine the top-level
    children on a pool of threads, with one matcher for each child.
-4. Collect the roots through a channel, and sort them at the end, as
-   `discover_repos_recursive` does at this time.
+4. Collect the records through a channel, and sort them at the end, as
+   `examine_recursive` does at this time.
 
 ### Tests
 
