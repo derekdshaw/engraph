@@ -12,4 +12,4 @@ pub mod utils;
 
 pub use error::{Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 17;

@@ -347,6 +347,14 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE index_state ADD COLUMN go_tests INTEGER NOT NULL DEFAULT 0;
     "#,
+    // v17 — `events.path_hash`: the SHA-256 of the file path of a `read`
+    // event, so a report can find reads of a file that the session read
+    // before without storing the path. NULL for all other events.
+    r#"
+    ALTER TABLE events ADD COLUMN path_hash TEXT;
+    CREATE INDEX IF NOT EXISTS idx_events_session_path ON events(session_id, path_hash)
+        WHERE path_hash IS NOT NULL;
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
@@ -753,6 +761,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, ("abc".into(), false));
+    }
+
+    #[test]
+    fn migrates_through_v17_events_path_hash() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations_to(&mut conn, 16).unwrap();
+        conn.execute_batch("INSERT INTO events (id, kind, feature) VALUES ('e1', 'hook', 'x');")
+            .unwrap();
+        run_migrations_to(&mut conn, 17).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 17);
+        let hash: Option<String> = conn
+            .query_row("SELECT path_hash FROM events WHERE id = 'e1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(hash, None);
     }
 
     #[test]

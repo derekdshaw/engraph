@@ -301,6 +301,11 @@ pub(crate) enum HookCmd {
     /// append a listing of symbols in the file (name, line range, signature)
     /// as additionalContext so a follow-up subgraph call is often unneeded.
     PostRead,
+    /// Internal: the telemetry of one `post-read`, in a detached child so the
+    /// hook does not wait for the tokenizer. Reads `{"read": <hook payload>,
+    /// "augment": <context or null>}` from stdin.
+    #[command(hide = true)]
+    RecordRead,
     /// SessionStart hook: emit a terse brief of prior context for the current
     /// project in the output shape expected by the target client.
     SessionStart {

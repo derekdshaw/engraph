@@ -220,11 +220,21 @@ fn spawn_detached_index(cwd: &Path) {
         .stdin(Stdio::null())
         .stdout(out)
         .stderr(err);
+    detach(&mut cmd);
+    match cmd.spawn() {
+        // Dropping the handle without waiting is the point: the child is
+        // reparented when the hook exits.
+        Ok(child) => tracing::info!(pid = child.id(), cwd = %cwd.display(), "auto-index started"),
+        Err(e) => tracing::warn!(error = %e, "auto-index: spawn failed"),
+    }
+}
+
+/// Put `cmd` in its own process group (session on Windows), so a
+/// SIGINT/SIGHUP aimed at the hook's group doesn't take the child with it.
+fn detach(cmd: &mut std::process::Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // New process group: a SIGINT/SIGHUP aimed at the hook's group
-        // doesn't take the refresh with it.
         cmd.process_group(0);
     }
     #[cfg(windows)]
@@ -233,12 +243,6 @@ fn spawn_detached_index(cwd: &Path) {
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
-    match cmd.spawn() {
-        // Dropping the handle without waiting is the point: the child is
-        // reparented when the hook exits.
-        Ok(child) => tracing::info!(pid = child.id(), cwd = %cwd.display(), "auto-index started"),
-        Err(e) => tracing::warn!(error = %e, "auto-index: spawn failed"),
     }
 }
 
@@ -617,33 +621,141 @@ pub(crate) fn run_post_read_hook(conn: &db::PooledConn) -> Result<()> {
         None => (None, file_path.to_string()),
     };
     let entities =
-        engraph_codegraph::subgraph::entities_in_file(conn, project.as_deref(), &indexed_path, 30)?;
-    if entities.is_empty() {
-        return Ok(());
+        engraph_codegraph::subgraph::entities_in_file(conn, project.as_deref(), &indexed_path, 30);
+    let context = match &entities {
+        Ok(e) if !e.is_empty() => Some(truncate_to_bytes(
+            &build_read_context(file_path, e),
+            MAX_BRIEF_BYTES,
+        )),
+        _ => None,
+    };
+    if let Some(context) = &context {
+        let decision = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": context
+            }
+        });
+        println!("{decision}");
     }
-    let context = truncate_to_bytes(&build_read_context(file_path, &entities), MAX_BRIEF_BYTES);
-    let decision = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "additionalContext": context
+    // The tokenizer takes ~70 ms to start in each process; count in a
+    // detached child so Claude does not wait for it.
+    spawn_record_read(&serde_json::json!({ "read": v, "augment": context }));
+    entities.map(|_| ())
+}
+
+/// Start `engraph hook record-read` detached, give it `payload` on stdin, and
+/// return without waiting. stdout/stderr are null so no inherited pipe keeps
+/// the hook "running". Failures are logged and ignored: telemetry is
+/// best-effort.
+fn spawn_record_read(payload: &serde_json::Value) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let Ok(exe) = std::env::current_exe() else {
+        tracing::warn!("record-read: can't locate the engraph binary");
+        return;
+    };
+    let mut cmd = Command::new(exe);
+    cmd.args(["hook", "record-read"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    detach(&mut cmd);
+    match cmd.spawn() {
+        // The child reads all of stdin before it starts the tokenizer, so a
+        // payload larger than the pipe buffer blocks only briefly. Dropping
+        // `stdin` closes the pipe; the child is reparented when the hook exits.
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take()
+                && let Err(e) = stdin.write_all(payload.to_string().as_bytes())
+            {
+                tracing::warn!(error = %e, "record-read: write failed");
+            }
         }
+        Err(e) => tracing::warn!(error = %e, "record-read: spawn failed"),
+    }
+}
+
+/// `engraph hook record-read`: the telemetry of one `post-read`, from the
+/// payload that `spawn_record_read` writes. The augment event is written
+/// before the read event, so a reader that sees the read sees both.
+pub(crate) fn run_record_read(conn: &db::PooledConn) -> Result<()> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf)?;
+    let w: serde_json::Value = serde_json::from_str(&buf)?;
+    if let Some(context) = w.pointer("/augment").and_then(|s| s.as_str()) {
+        let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
+        telemetry::record_event(
+            conn,
+            EventInput {
+                session_id: session_id.as_deref(),
+                kind: EventKind::Hook,
+                feature: "read_augment",
+                filter_id: Some("read-augment"),
+                input_tokens: 0,
+                output_tokens: tokens::count(context) as i64,
+                latency_ms: 0,
+            },
+        )
+        .ok();
+    }
+    let read = &w["read"];
+    let file_path = read
+        .pointer("/tool_input/file_path")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .trim();
+    if !file_path.is_empty() {
+        record_read(conn, read, file_path);
+    }
+    Ok(())
+}
+
+/// Record the read in telemetry, with the token count of what Claude received.
+/// `tool_response` carries the read: `file.content` for text (only the lines
+/// that `offset`/`limit` selected, without the line-number prefixes Claude
+/// sees), `file.cells` for a notebook. Images and PDFs are base64 that the
+/// tokenizer cannot measure, so they count 0 tokens; their `filter_id` keeps
+/// them apart in reports.
+fn record_read(conn: &db::PooledConn, v: &serde_json::Value, file_path: &str) {
+    let start = Instant::now();
+    let read_type = v
+        .pointer("/tool_response/type")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown");
+    let tokens: u32 = match read_type {
+        "text" => v
+            .pointer("/tool_response/file/content")
+            .and_then(|s| s.as_str())
+            .map_or(0, tokens::count),
+        "notebook" => v
+            .pointer("/tool_response/file/cells")
+            .and_then(|c| c.as_array())
+            .map_or(0, |cells| {
+                cells
+                    .iter()
+                    .filter_map(|c| c.get("source").and_then(|s| s.as_str()))
+                    .map(tokens::count)
+                    .sum()
+            }),
+        _ => 0,
+    };
+    // Claude Code sends the id in the payload; the env var is the older path.
+    let session_id = std::env::var("CLAUDE_SESSION_ID").ok().or_else(|| {
+        v.pointer("/session_id")
+            .and_then(|s| s.as_str())
+            .map(str::to_string)
     });
-    println!("{decision}");
-    let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
-    telemetry::record_event(
+    telemetry::record_read(
         conn,
-        EventInput {
-            session_id: session_id.as_deref(),
-            kind: EventKind::Hook,
-            feature: "read_augment",
-            filter_id: Some("read-augment"),
-            input_tokens: 0,
-            output_tokens: tokens::count(&context) as i64,
-            latency_ms: 0,
-        },
+        session_id.as_deref(),
+        read_type,
+        file_path,
+        tokens as i64,
+        start.elapsed().as_millis() as i64,
     )
     .ok();
-    Ok(())
 }
 
 /// SessionEnd hook: Claude Code (SessionEnd) and Codex (Stop) both emit a JSON

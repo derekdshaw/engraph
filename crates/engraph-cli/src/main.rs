@@ -24,8 +24,8 @@ mod redirect;
 mod rewrite;
 use cli::{BudgetCmd, Cli, Cmd, GainFormat, HookCmd};
 use hooks::{
-    run_post_read_hook, run_pre_bash_hook, run_pre_grep_hook, run_session_end_hook,
-    run_session_start_hook,
+    run_post_read_hook, run_pre_bash_hook, run_pre_grep_hook, run_record_read,
+    run_session_end_hook, run_session_start_hook,
 };
 use output::{
     csv_line, print_filter_gain_table, print_gain_summary, print_gain_table, print_graph,
@@ -177,6 +177,11 @@ async fn main() -> Result<()> {
             HookCmd::PostRead => {
                 if let Err(e) = run_post_read_hook(&conn) {
                     tracing::warn!(?e, "post-read hook failed; emitting empty");
+                }
+            }
+            HookCmd::RecordRead => {
+                if let Err(e) = run_record_read(&conn) {
+                    tracing::warn!(?e, "record-read failed; read not recorded");
                 }
             }
             HookCmd::SessionStart { client } => {

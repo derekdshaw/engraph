@@ -32,6 +32,52 @@ pub fn record_event(conn: &PooledConn, ev: EventInput<'_>) -> Result<String> {
     Ok(id)
 }
 
+/// Record one file read (a `hook` / `read` event). `input_tokens` is the token
+/// count of the read; `filter_id` is the read type (`text`, `image`, `pdf`,
+/// `notebook`). The path is stored only as its SHA-256, which is enough to
+/// find reads of a file that the session read before.
+pub fn record_read(
+    conn: &PooledConn,
+    session_id: Option<&str>,
+    read_type: &str,
+    file_path: &str,
+    tokens: i64,
+    latency_ms: i64,
+) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let ev = EventInput {
+        session_id,
+        kind: EventKind::Hook,
+        feature: "read",
+        filter_id: Some(read_type),
+        input_tokens: tokens,
+        output_tokens: 0,
+        latency_ms,
+    };
+    let path_hash: String = Sha256::digest(file_path.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let id = Uuid::now_v7().to_string();
+    conn.execute(
+        "INSERT INTO events (id, session_id, kind, feature, filter_id, input_tokens, output_tokens, latency_ms, path_hash) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![
+            id,
+            ev.session_id,
+            ev.kind.as_str(),
+            ev.feature,
+            ev.filter_id,
+            ev.input_tokens,
+            ev.output_tokens,
+            ev.latency_ms,
+            path_hash,
+        ],
+    )?;
+    emit_metrics(&ev);
+    Ok(id)
+}
+
 /// Mirror the event into OpenTelemetry counters/histograms. No-op unless built
 /// with `--features otel` AND `ENGRAPH_OTEL` enabled the global meter provider
 /// (otherwise this records against the default no-op meter, which is cheap).

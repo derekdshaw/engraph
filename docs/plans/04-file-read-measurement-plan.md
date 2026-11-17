@@ -41,6 +41,18 @@ total. `engraph gain --by-filter` does not show them, because each report uses
 `SAVINGS_WHERE` does not include `kind = 'index'`. Thus, the user cannot see
 how frequently the automatic refresh operates, or its time.
 
+Condition of the read telemetry (2026-11-16): steps 1 and 2 are complete.
+The input of the PostToolUse(Read) hook includes the read in
+`tool_response`. For a text file, `tool_response.file.content` has only the
+lines that `offset` and `limit` selected. Thus, the hook does not read the
+file again. The hook records one `hook` / `read` event for each read, with
+the token count in `input_tokens`, the read type (`text`, `notebook`,
+`image`, `pdf`) in `filter_id`, and the SHA-256 of the path in
+`events.path_hash` (schema v17). Images and PDFs record 0 tokens. The
+tokenizer starts in approximately 70 ms, thus a detached child process
+(`engraph hook record-read`) counts the tokens and records the events. The
+hook does not wait for the child.
+
 ## Steps
 
 The index runs step (step 8) does not depend on the other steps. You can do it

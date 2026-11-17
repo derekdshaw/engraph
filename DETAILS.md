@@ -734,7 +734,30 @@ Flow:
    Read's tool-result block.
 
 Telemetry charges the augment its output token count so
-`engraph gain` shows the cost, not just the savings.
+`engraph gain` shows the cost, not just the savings (counted in the
+`record-read` child, below).
+
+Each Read with a `file_path` also records one `read` event
+(`telemetry::record_read`), also for files that are not indexed. `tool_response` carries what the read returned (Claude
+Code 2.1.3xx): `{type: "text", file: {filePath, content, numLines,
+startLine, totalLines}}`, where `content` holds only the lines that
+`offset`/`limit` selected; `{type: "notebook", file: {cells: [{source, …}]}}`;
+and `{type: "image" | "pdf", file: {base64, …}}`. `input_tokens` is the token
+count of `content` (text) or the sum over the cell sources (notebook), and
+0 for images and PDFs, which the tokenizer cannot measure. `filter_id` is
+the `type`, so reports can keep these apart. The count leaves out the
+`N\t` line-number prefixes that Claude sees, so it is a little low. The
+path is stored only as `path_hash` (hex SHA-256 of `tool_input.file_path`),
+which is enough to find reads of a file that the session read before.
+A failed read gives no PostToolUse event and is not recorded.
+
+The `cl100k_base` tokenizer takes ~70 ms to start (release build), in
+each process. So the hook does not count: after it prints the augment, it
+starts `engraph hook record-read` (hidden) detached, with stdout/stderr
+null, writes `{"read": <hook payload>, "augment": <context or null>}` to
+its stdin, and exits (~10 ms). The child counts and writes the
+`read_augment` event, then the `read` event. Its `latency_ms` is the
+child's count time, not time that Claude waited.
 
 Tests in `crates/engraph-cli/tests/pre_bash_hook.rs`,
 `pre_grep_hook.rs`, and `post_read_hook.rs` pin each hook's branches
@@ -1268,15 +1291,16 @@ report.
 
 ```
 events(seq INT PK, id UUIDv7, session_id, kind, feature, filter_id,
-       input_tokens, output_tokens, latency_ms, ts)
+       input_tokens, output_tokens, latency_ms, ts, path_hash)
 kind ∈ {compress, retrieve, hook, wrapped_cmd, index}
 ```
 
 UUIDv7 IDs are time-ordered for natural chronological indexing without
 needing a separate `created_at` column.
 
-`record_event` (`engraph-core::telemetry`) is the single insert
-point. Every feature that compresses, retrieves, hooks, or runs a
+`record_event` (`engraph-core::telemetry`) is the insert point for all
+events but `read`; `record_read` writes `read` events with their
+`path_hash` (§5.6), which is NULL in all other rows. Every feature that compresses, retrieves, hooks, or runs a
 wrapped command writes a row.
 
 ### 10.2 Savings semantics
@@ -1379,8 +1403,9 @@ but logs a warning if it ever happens.
 | 14 | `relations.line`: the line of the occurrence (call or reference) an edge comes from, NULL for relationship edges, Bazel dependencies, and sources defined in more than one document (a Go package) (§14.4). Clears the commit of every driver run, as v12 does, so the next refresh writes the lines. |
 | 15 | `index_state.go_tags`: the `--go-tags` of the run, so `index --if-changed` gives scip-go the same build tags (§8.0.1). NULL for older rows, which had none; no commit is cleared. |
 | 16 | `index_state.go_tests`: whether the run had `--go-tests`, so `index --if-changed` lets the Bazel Go pass index `_test.go` files again (§8.0.1). Older rows default to 0; no commit is cleared. |
+| 17 | `events.path_hash` + partial index `idx_events_session_path (session_id, path_hash)`: the SHA-256 of the file path of a `read` event (§5.6), so a report can find reads of a file that the session read before. NULL for all other events. |
 
-(`SCHEMA_VERSION = 16`; the `MIGRATIONS` array has 16 entries.)
+(`SCHEMA_VERSION = 17`; the `MIGRATIONS` array has 17 entries.)
 
 ---
 
