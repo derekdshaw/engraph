@@ -43,6 +43,10 @@ pub(crate) enum Cmd {
         /// read before. Reads are not savings; the totals do not change.
         #[arg(long)]
         reads: bool,
+        /// Index runs per type (`auto`, `if_changed`, `workspace`, driver):
+        /// runs, total and mean time, SCIP bytes. Not savings.
+        #[arg(long)]
+        index: bool,
         /// Show the summary plus every breakdown at once.
         #[arg(long)]
         all: bool,

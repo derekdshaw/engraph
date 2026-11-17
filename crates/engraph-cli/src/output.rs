@@ -316,6 +316,25 @@ pub(crate) fn print_reads(r: &telemetry::ReadsReport) {
     );
 }
 
+/// Index runs per `filter_id` (`--index`). Not savings.
+pub(crate) fn print_index_table(rows: &[telemetry::IndexRow]) {
+    println!("\nindex runs");
+    if rows.is_empty() {
+        println!("(no index runs)");
+        return;
+    }
+    println!(
+        "{:<16} {:>6} {:>10} {:>9} {:>12}",
+        "type", "runs", "total_ms", "mean_ms", "scip_bytes"
+    );
+    for r in rows {
+        println!(
+            "{:<16} {:>6} {:>10} {:>9.0} {:>12}",
+            r.filter_id, r.runs, r.total_ms, r.mean_ms, r.scip_bytes
+        );
+    }
+}
+
 pub(crate) fn print_time_table(rows: &[telemetry::TimeRow], label: &str) {
     println!("\n{label} breakdown ({} bucket(s))", rows.len());
     if rows.is_empty() {

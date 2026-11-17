@@ -1332,6 +1332,18 @@ session id is never a repeat. The text table gives the repeat tokens as a
 share of all read tokens. Reads are not in `SAVINGS_WHERE`, so the savings
 totals do not change.
 
+### 10.4 Index runs (`--index`)
+
+`engraph gain --index` (also in `--all`, `--json` as `index`) gives one
+row for each `filter_id` of the `index` events (§14.5): `auto` (the
+SessionStart refresh), `if_changed` (`--if-changed` by hand), `workspace`,
+or the driver name. Each row has the runs, the total and mean
+`latency_ms`, and the SCIP bytes (the sum of `input_tokens`), from
+`telemetry::gain_index`. The CSV rows (`index,<filter_id>,…`) give the
+runs and the SCIP bytes in `input_tk`, but not the time: the CSV has no
+time column. Index runs are not in `SAVINGS_WHERE`, so the savings totals
+do not change.
+
 ---
 
 ## 11. Cross-platform

@@ -29,8 +29,8 @@ use hooks::{
 };
 use output::{
     csv_line, print_filter_gain_table, print_gain_summary, print_gain_table, print_graph,
-    print_history, print_hits, print_reads, print_repo_plan, print_scope_table, print_source_table,
-    print_symbol_langs, print_time_table, print_workspace_plan, scope_label,
+    print_history, print_hits, print_index_table, print_reads, print_repo_plan, print_scope_table,
+    print_source_table, print_symbol_langs, print_time_table, print_workspace_plan, scope_label,
 };
 
 // `main` is async because the OTLP/gRPC metrics exporter (the `otel` feature)
@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
             weekly,
             monthly,
             reads,
+            index,
             all,
             graph,
             history,
@@ -94,6 +95,7 @@ async fn main() -> Result<()> {
                     weekly: weekly || all,
                     monthly: monthly || all,
                     reads: reads || all,
+                    index: index || all,
                     graph,
                     history,
                 },
@@ -915,6 +917,7 @@ struct GainOpts {
     weekly: bool,
     monthly: bool,
     reads: bool,
+    index: bool,
     graph: bool,
     history: Option<usize>,
 }
@@ -929,6 +932,7 @@ impl GainOpts {
             && !self.weekly
             && !self.monthly
             && !self.reads
+            && !self.index
             && !self.graph
             && self.history.is_none()
     }
@@ -974,6 +978,10 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
         .reads
         .then(|| telemetry::gain_reads(conn))
         .transpose()?;
+    let index = opts
+        .index
+        .then(|| telemetry::gain_index(conn))
+        .transpose()?;
     let history = opts
         .history
         .map(|n| telemetry::gain_history(conn, n.max(1)))
@@ -1011,6 +1019,9 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
             }
             if let Some(r) = &reads {
                 obj.insert("reads".into(), serde_json::to_value(r)?);
+            }
+            if let Some(r) = &index {
+                obj.insert("index".into(), serde_json::to_value(r)?);
             }
             if let Some(r) = &history {
                 obj.insert("history".into(), serde_json::to_value(r)?);
@@ -1137,6 +1148,22 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
                     );
                 }
             }
+            // Index runs are not savings: runs and SCIP bytes (in `input_tk`).
+            // The CSV has no time column; time is in text and JSON.
+            for r in index.iter().flatten() {
+                println!(
+                    "{}",
+                    csv_line(&[
+                        "index",
+                        &r.filter_id,
+                        &n(r.runs),
+                        &n(r.scip_bytes),
+                        "",
+                        "",
+                        ""
+                    ])
+                );
+            }
         }
         GainFormat::Text => {
             print_gain_summary(&summary);
@@ -1165,6 +1192,9 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
             }
             if let Some(r) = &reads {
                 print_reads(r);
+            }
+            if let Some(rows) = &index {
+                print_index_table(rows);
             }
             if let Some(rows) = &graph {
                 print_graph(rows, GRAPH_DAYS);

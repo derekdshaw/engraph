@@ -353,6 +353,40 @@ pub fn gain_reads(conn: &PooledConn) -> Result<ReadsReport> {
     Ok(r)
 }
 
+/// Index runs (`index` events) of one `filter_id`: `auto` (the SessionStart
+/// refresh), `if_changed` (`--if-changed` by hand), `workspace`, or the
+/// driver name. Index runs save no tokens, so they are outside
+/// `SAVINGS_WHERE`; `scip_bytes` is the sum of `input_tokens`, which holds
+/// the SCIP bytes of a run.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IndexRow {
+    pub filter_id: String,
+    pub runs: i64,
+    pub total_ms: i64,
+    pub mean_ms: f64,
+    pub scip_bytes: i64,
+}
+
+pub fn gain_index(conn: &PooledConn) -> Result<Vec<IndexRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(filter_id,'?') AS f, COUNT(*), COALESCE(SUM(latency_ms),0), \
+                COALESCE(AVG(latency_ms),0), COALESCE(SUM(input_tokens),0) \
+         FROM events WHERE kind = 'index' GROUP BY f ORDER BY COUNT(*) DESC, f",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(IndexRow {
+                filter_id: r.get(0)?,
+                runs: r.get(1)?,
+                total_ms: r.get(2)?,
+                mean_ms: r.get(3)?,
+                scip_bytes: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// Calendar granularity for `gain_by_time`.
 #[derive(Debug, Clone, Copy)]
 pub enum TimeBucket {
@@ -685,6 +719,52 @@ mod tests {
         assert_eq!(r.repeat_tokens, 100);
         // Reads have no savings semantic.
         assert_eq!(gain_summary(&conn).unwrap().commands, 0);
+    }
+
+    #[test]
+    fn index_report_has_one_row_per_filter_id() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let index = |filter_id, bytes, ms| EventInput {
+            session_id: None,
+            kind: EventKind::Index,
+            feature: "codegraph_index",
+            filter_id: Some(filter_id),
+            input_tokens: bytes,
+            output_tokens: 0,
+            latency_ms: ms,
+        };
+        record_event(&conn, index("auto", 1000, 100)).unwrap();
+        record_event(&conn, index("auto", 3000, 300)).unwrap();
+        record_event(&conn, index("if_changed", 500, 50)).unwrap();
+        record_event(&conn, index("rust-analyzer", 9000, 2000)).unwrap();
+        record_event(&conn, ev(EventKind::Compress, "compress", 1000, 400)).unwrap();
+        let before = gain_summary(&conn).unwrap();
+
+        let rows = gain_index(&conn).unwrap();
+        let row = |f: &str| rows.iter().find(|r| r.filter_id == f).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            (
+                row("auto").runs,
+                row("auto").total_ms,
+                row("auto").scip_bytes
+            ),
+            (2, 400, 4000)
+        );
+        assert_eq!(row("auto").mean_ms, 200.0);
+        assert_eq!(
+            (row("if_changed").runs, row("if_changed").total_ms),
+            (1, 50)
+        );
+        assert_eq!(
+            (row("rust-analyzer").runs, row("rust-analyzer").scip_bytes),
+            (1, 9000)
+        );
+        // Index runs save no tokens: the summary counts only the compress row.
+        assert_eq!(before.commands, 1);
+        assert_eq!(before.input_tokens, 1000);
     }
 
     #[test]
