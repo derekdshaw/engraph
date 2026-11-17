@@ -13,7 +13,7 @@ mod common;
 
 use common::snapshot::{Snapshot, SymbolRecord};
 use common::{FIXTURES, db_for_test, indexer_version, isolate_scip_output, normalized_scip};
-use engraph_codegraph::{index_repo, scip_output_dir};
+use engraph_codegraph::{index_repo, load, scip_output_dir};
 use tempfile::tempdir;
 
 /// A fixture defines at least this many symbols (plan 05, part 1, step 3).
@@ -210,6 +210,53 @@ fn snapshot_diff_marks_an_order_only_change() {
             "~ a",
             "    callers: order changed",
         ]
+    );
+}
+
+/// Step 16: load each prebuilt `testdata/scip/<lang>.scip` blob and compare
+/// the result with the snapshot file. No indexer runs — the blob is the
+/// indexer's output, committed — so this operates in every CI job and a
+/// difference can only come from a change to the loader (or a blob committed
+/// without its snapshot). The indexer name and version come from the snapshot
+/// itself, so only the symbols can differ.
+#[test]
+fn prebuilt_scip_blobs_load_to_the_snapshots() {
+    let mut failures = Vec::new();
+    for fixture in &FIXTURES {
+        let dir = tempdir().unwrap();
+        let pool = db_for_test(dir.path());
+        let conn = pool.get().unwrap();
+        let blob = std::fs::read(fixture.scip_path())
+            .unwrap_or_else(|e| panic!("reading {}: {e}", fixture.scip_path().display()));
+        load(&conn, &fixture.project(), &blob)
+            .unwrap_or_else(|e| panic!("loading {}: {e:#}", fixture.scip_path().display()));
+        let want = Snapshot::read(&fixture.snapshot_path());
+        let snap = Snapshot::from_db(
+            &conn,
+            &fixture.project(),
+            &want.indexer,
+            &want.indexer_version,
+        );
+        let diff = want.diff(&snap);
+        if diff.is_empty() {
+            eprintln!(
+                "ok: {} blob loads to its snapshot ({} symbols)",
+                fixture.lang,
+                snap.symbols.len()
+            );
+        } else {
+            failures.push(format!(
+                "{} blob vs {}:\n{}",
+                fixture.lang,
+                fixture.snapshot_path().display(),
+                diff.join("\n")
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the loader no longer turns the prebuilt SCIP blobs into the snapshots:\n\n{}",
+        failures.join("\n\n")
     );
 }
 
