@@ -10,6 +10,8 @@ of the plans.
   reason.
 - The code graph has no symbols from documents outside the indexed repo,
   for example the Go build cache.
+- A refresh of a subtree keeps the symbols of the projects below it that
+  `--recursive` indexed on their own.
 
 ## Condition at this time (2026-11-03)
 
@@ -24,6 +26,7 @@ at the end).
 |---|---|
 | 16. A failed driver of a multi-manifest repo is not in the summary | `indexed … driver=scip-typescript`, as if the repo had no Python; the reason only in a `WARN` line |
 | 20. Go test runs put symbols of the Go build cache in the code graph | `main`, `init`, `tests`, `benchmarks`, … with a `file_path` of `../../../../../../home/<user>/.cache/go-build/…` |
+| 21. A refresh of a subtree removes the symbols of a nested project | after `index --recursive`, `index --if-changed` re-indexes only `""`, prints `5 pruned`, and the symbols of the nested Go module are gone |
 
 ### Bug 16: a failed driver of a multi-manifest repo is not in the summary
 
@@ -89,6 +92,56 @@ m            ../../../../../../home/derekdshaw/.cache/go-build/16/16cea69f…-d
 The repo has two `main` symbols in `print_fortune.go` and two more at the
 cache path. The cache path is not in the repo, and it contains the home
 directory of the user and a hash of the build.
+
+### Bug 21: a refresh of a subtree removes the symbols of a nested project
+
+**Found on 2026-11-16**, in the review of the plan 03 commits. The bug is
+older than plan 03.
+
+`index --recursive` records a nested project as its own subtree because the
+run of the project above it does not index it (for example a nested Go
+module). `index --if-changed` does not run a changed subtree that is below
+another changed subtree (`crates/engraph-cli/src/divergence.rs:241-243`):
+
+```rust
+/// `subtrees` without those nested under another entry (`""` covers all):
+/// re-indexing a parent re-indexes its children, so running both is wasted
+/// work. Order is preserved.
+pub(crate) fn outermost_subtrees(subtrees: Vec<String>) -> Vec<String> {
+```
+
+That is not true for a nested project. The run of the parent then removes
+the rows of the nested project, because the prune scope of a load is all
+the files below the subtree (`crates/engraph-codegraph/src/scip_loader.rs:60-64`):
+
+```rust
+const IN_SCOPE: &str = "project = ?1
+    AND (instr(id, ' ') = 0
+         OR substr(id, 1, instr(id, ' ') - 1) IN (SELECT s FROM current_scip_schemes)
+         OR (id LIKE 'local %' AND scheme IN (SELECT s FROM current_scip_schemes)))
+    AND (?2 = '' OR substr(file_path, 1, length(?2)) = ?2)";
+```
+
+Repro: a git repo with `go.mod` (`func R()`) at the root and `svc/go.mod`
+(`func S()`) in `svc/`.
+
+1. `engraph index --recursive .` indexes `""` and `svc`. The graph has
+   `R`, `root`, `S`, and `svc`.
+2. Add `func S2()` to `svc/s.go` and commit it.
+3. `engraph index --if-changed .` prints
+   `indexed <repo> (2 entities, …), 5 pruned`. The graph has only `R` and
+   `root`. `S` and `svc` are gone, and `S2` was not indexed.
+
+A full `index --recursive` gets the correct graph only because it runs the
+parent before the nested project, so the nested project adds its rows again.
+
+The same cause stops a correction of this case: a root `go.work` lists
+`svc/api`, and `svc` is a Go module that the `go.work` does not list. The
+root run indexes `svc/api` (its pattern `./svc/api/...`), and `svc/api` is
+also its own project, thus scip-go indexes it two times. If `svc/api` is a
+member of the root, the run of `svc` (subtree `svc`) prunes the symbols of
+`svc/api`, because they are below `svc/`. This was tested on 2026-11-16: the
+symbols of `svc/api` were gone after `index --recursive`.
 
 ## Steps
 
@@ -176,17 +229,44 @@ Validation of part 20:
 4. Do `engraph index --bazel-symbols --go-tests .` with the binary of the
    part. The number is 0.
 
+### Part 21: the prune scope of a subtree (bug 21)
+
+1. Find out which file paths a subtree run owns: the files below the
+   subtree, without the files below a recorded subtree that is below it.
+   Decide if `index_state` must also record the directories that a run
+   covers from above (the `go.work` members), so that a member below a
+   nested project is in the scope of the run that indexes it.
+2. Change `IN_SCOPE` and the scope of `gc_pass` to that set of files.
+3. Change `outermost_subtrees` so that it keeps a changed nested project,
+   or remove it if the scope of step 2 makes it unnecessary.
+4. Make the `go.work` member rule use the nearest project with a `go.work`,
+   not the nearest Go project, so that `svc/api` above is a member of the
+   root (`Walker::walk`, the `claimed` map).
+5. Write an integration test with the repro of bug 21: after the
+   `--if-changed` run, `S` and `S2` are in the graph.
+6. Write an integration test for the `go.work` case: `svc/api` is not its
+   own project, and its symbols are in the graph after `index --recursive`.
+
+Validation of part 21:
+
+1. Do the repro of bug 21 with the `main` binary: `S` is gone.
+2. Do it with the binary of the part: `S` and `S2` are in the graph.
+
 ## Tests
 
 - A failed driver of a multi-manifest repo is named in the summary with its
   reason (part 16).
 - The loader does not load a document whose path goes out of the repo, and a
   load removes the rows of such a document from an earlier load (part 20).
+- A refresh of a subtree keeps the rows of a nested project, and a
+  `go.work` member below an unlisted module is indexed once (part 21).
 
 ## Risks
 
-None. The parts that had a risk are complete, and their risks are recorded
-in their pull requests.
+Part 21 changes the prune scope, which deletes rows. A scope that is too
+large removes the symbols of another subtree; a scope that is too small keeps
+stale symbols. The tests of part 21 must check both. The other parts that had
+a risk are complete, and their risks are recorded in their pull requests.
 
 ## Dependencies
 
@@ -198,6 +278,10 @@ Part 16 adds a field to
 `IndexStats`, one printer, and an integration test.
 
 Part 20 adds one filter in the loader and two tests.
+
+Part 21 changes the prune scope of a load and of `gc_pass`, the subtree
+selection of `--if-changed`, and the `go.work` member rule, with two
+integration tests. It is the largest part of this plan.
 
 ## Plan management
 
