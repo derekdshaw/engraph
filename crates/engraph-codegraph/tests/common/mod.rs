@@ -66,6 +66,9 @@ impl Fixture {
         if self.indexer == "scip-java" && java_build_tool().is_none() {
             return Some("scip-java needs `mvn` or `gradle` on PATH; none found".into());
         }
+        if self.indexer == "scip-go" && !go_toolchain_present() {
+            return Some("scip-go needs the `go` toolchain on PATH; `go version` failed".into());
+        }
         None
     }
 
@@ -107,6 +110,17 @@ pub fn binary_present(bin: &str) -> bool {
 /// SemanticDB, so without one an index run fails on an otherwise fine repo.
 pub fn java_build_tool() -> Option<&'static str> {
     ["mvn", "gradle"].into_iter().find(|t| binary_present(t))
+}
+
+/// Whether the Go toolchain is on PATH. `go` rejects `--version` (it prints
+/// its help text and exits 2 even when installed), so `binary_present` would
+/// call it absent; the probe is the `go version` subcommand, which exits 0.
+pub fn go_toolchain_present() -> bool {
+    Command::new("go")
+        .arg("version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// The first line `bin --version` prints (stdout, else stderr), or `None`

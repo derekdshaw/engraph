@@ -149,10 +149,37 @@ fn snapshot_diff_lists_changed_versions_and_symbols() {
     assert!(snapshot.diff(&snapshot).is_empty());
 }
 
-/// Steps 10 to 12: index each fixture repo and compare the result with its
-/// snapshot file, skipping a fixture whose indexer (or, for scip-java, build
-/// tool) is not installed, and showing the differences of every fixture that
-/// changed; `ENGRAPH_UPDATE_SNAPSHOTS=1` writes the snapshots instead.
+#[test]
+fn snapshot_diff_marks_an_order_only_change() {
+    // The same ids in a different order: the record differs, but no id went
+    // or came, so the set-style caller lines would say nothing at all.
+    let rec = |callers: &[&str]| Snapshot {
+        indexer: "x".into(),
+        indexer_version: "1".into(),
+        symbols: vec![SymbolRecord {
+            id: "a".into(),
+            name: "a".into(),
+            file_path: "a.rs".into(),
+            line_range: "1:1".into(),
+            callers: callers.iter().map(|c| c.to_string()).collect(),
+            callees: vec![],
+        }],
+    };
+    assert_eq!(
+        rec(&["c", "d"]).diff(&rec(&["d", "c"])),
+        [
+            "only in the snapshot: 0, only in the index run: 0, changed: 1",
+            "~ a",
+            "    callers: order changed",
+        ]
+    );
+}
+
+/// Steps 10 to 13: index each fixture repo and compare the result with its
+/// snapshot file, skipping a fixture whose indexer (or its build tool /
+/// toolchain) is not installed, and showing the differences of every fixture
+/// that changed, with both indexer versions when they are not the same;
+/// `ENGRAPH_UPDATE_SNAPSHOTS=1` writes the snapshots instead.
 #[test]
 fn fixture_ids_match_the_snapshots() {
     let update = std::env::var("ENGRAPH_UPDATE_SNAPSHOTS").as_deref() == Ok("1");
@@ -192,7 +219,17 @@ fn fixture_ids_match_the_snapshots() {
                 fixture.indexer
             );
         } else {
-            let diff = Snapshot::read(&fixture.snapshot_path()).diff(&snap);
+            let want = Snapshot::read(&fixture.snapshot_path());
+            let mut diff = want.diff(&snap);
+            if !diff.is_empty() && want.indexer_version != version {
+                diff.push(format!(
+                    "note: this machine runs {} {version}; the snapshot was made with \
+                     {}. The differences can be correct changes of the indexer \
+                     version: examine them, then regenerate with \
+                     ENGRAPH_UPDATE_SNAPSHOTS=1.",
+                    fixture.indexer, want.indexer_version
+                ));
+            }
             if diff.is_empty() {
                 eprintln!(
                     "ok: {} matches its snapshot ({} symbols, {} {version})",

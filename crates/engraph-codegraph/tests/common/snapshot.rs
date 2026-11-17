@@ -148,10 +148,21 @@ impl Snapshot {
                 ("callers", &w.callers, &g.callers),
                 ("callees", &w.callees, &g.callees),
             ] {
-                for x in a.iter().filter(|x| !b.contains(x)) {
+                let went: Vec<&String> = a.iter().filter(|x| !b.contains(x)).collect();
+                let came: Vec<&String> = b.iter().filter(|x| !a.contains(x)).collect();
+                if went.is_empty() && came.is_empty() {
+                    // The same ids in a different order still differ as
+                    // records; without this line the symbol would show as
+                    // changed with nothing below it.
+                    if a != b {
+                        changed.push(format!("    {name}: order changed"));
+                    }
+                    continue;
+                }
+                for x in went {
                     changed.push(format!("    {name}: - {x}"));
                 }
-                for x in b.iter().filter(|x| !a.contains(x)) {
+                for x in came {
                     changed.push(format!("    {name}: + {x}"));
                 }
             }
