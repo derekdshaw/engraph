@@ -6,19 +6,7 @@ use std::process::Command;
 use tempfile::tempdir;
 
 mod common;
-use common::git;
-
-/// `common::engraph`, with the SCIP scratch file kept out of the user's data
-/// dir.
-fn engraph(db: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
-    common::command(db, cwd, args)
-        .env(
-            "ENGRAPH_SCIP_OUTPUT_DIR",
-            std::env::temp_dir().join("engraph-test-scip"),
-        )
-        .output()
-        .expect("spawn engraph")
-}
+use common::{engraph_temp_scip as engraph, git};
 
 fn go_tools_present() -> bool {
     let ok = ["scip-go", "go"].iter().all(|t| {
@@ -402,6 +390,78 @@ fn go_tags_select_the_files_scip_go_indexes() {
     git(&repo, &["commit", "-q", "-am", "change"]);
     index_ok(&tagged, &repo, &["index", "--if-changed"]);
     assert_eq!(entity_count(&tagged, "Tagged"), 1);
+}
+
+/// `--go-tags` keeps the GOFLAGS that `go env -w` saved: a GOFLAGS variable
+/// replaces them, so the saved ones go into it. A stand-in scip-go records the
+/// GOFLAGS it gets.
+#[cfg(unix)]
+#[test]
+fn go_tags_keep_the_goflags_saved_with_go_env() {
+    use std::os::unix::fs::PermissionsExt;
+    if !go_tools_present() {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let repo = tagged_module(dir.path());
+    let goenv = dir.path().join("goenv");
+    let saved = Command::new("go")
+        .args(["env", "-w", "GOFLAGS=-mod=mod"])
+        .env("GOENV", &goenv)
+        .status()
+        .unwrap();
+    assert!(saved.success());
+    let bin = dir.path().join("bin");
+    let seen = dir.path().join("goflags.txt");
+    write(
+        &bin,
+        "scip-go",
+        &format!(
+            "#!/bin/sh\nprintf '%s' \"$GOFLAGS\" > '{}'\nexit 1\n",
+            seen.display()
+        ),
+    );
+    std::fs::set_permissions(bin.join("scip-go"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let db = dir.path().join("e.db");
+    // The stand-in fails the run; only the GOFLAGS it saw matter.
+    let _ = common::command(
+        &db,
+        dir.path(),
+        &["index", "--go-tags", "integration", repo.to_str().unwrap()],
+    )
+    .env("PATH", path)
+    .env("GOENV", &goenv)
+    .env("ENGRAPH_SCIP_OUTPUT_DIR", dir.path().join("scip"))
+    .output()
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&seen).unwrap(),
+        "-mod=mod -tags=integration"
+    );
+}
+
+/// A module that the root go.work lists by absolute path is in the root's
+/// run, also when discovery starts at `.` and sees relative paths.
+#[test]
+fn a_go_work_member_listed_by_absolute_path_is_not_its_own_project() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path().canonicalize().unwrap().join("repo");
+    write(
+        &repo,
+        "tools/go.mod",
+        "module example.com/tools\n\ngo 1.21\n",
+    );
+    write(
+        &repo,
+        "go.work",
+        &format!("go 1.21\n\nuse {}\n", repo.join("tools").display()),
+    );
+    let db = dir.path().join("e.db");
+    let out = engraph(&db, &repo, &["index", "--recursive", "--dry-run", "."]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("tools  member of ."), "{text}");
 }
 
 #[test]

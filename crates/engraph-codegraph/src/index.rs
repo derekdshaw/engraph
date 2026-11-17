@@ -620,9 +620,7 @@ fn run_driver_into(
         .with_context(|| format!("creating SCIP output dir {}", out_dir.display()))?;
     let scip_path = out_dir.join("index.scip");
     let mut cmd = drv.command(repo, &scip_path);
-    if drv.name() == "scip-go" {
-        driver::apply_go_tags(&mut cmd, go_tags);
-    }
+    drv.set_go_tags(&mut cmd, go_tags);
     tracing::info!(driver = drv.name(), ?cmd, "running SCIP indexer");
     // Capture rather than inherit: rust-analyzer is noisy on stderr (load
     // progress, known SCIP-emitter warnings, duplicate-symbol reports) yet
@@ -1036,7 +1034,7 @@ fn is_member(lang: &str, parent: &Path, dir: &Path, installed: &dyn Fn(&str) -> 
         "scip-typescript" => typescript_workspace_lists(parent, dir, installed),
         // Go tools leave a nested module out of the module above it, unless
         // the parent's go.work lists it.
-        "scip-go" => go_work_lists(parent, dir),
+        "scip-go" => driver::go_work_lists(parent, dir),
         // scip-python indexes every file below its directory, so a nested
         // project is in the parent's run; scip-java builds Maven and Gradle
         // multi-module projects from the root.
@@ -1053,14 +1051,6 @@ fn cargo_has_workspace(dir: &Path) -> bool {
             l.starts_with("[workspace]") || l.starts_with("[workspace.")
         })
     })
-}
-
-/// Whether the `go.work` in `parent` lists `dir` as a `use` directory: then
-/// scip-go indexes `dir` from `parent` (`driver::go_work_uses`).
-fn go_work_lists(parent: &Path, dir: &Path) -> bool {
-    let rel = workspace_rel(parent, dir);
-    driver::go_work_uses(parent)
-        .is_some_and(|uses| uses.iter().any(|u| driver::go_work_rel(u) == rel))
 }
 
 /// Whether `parent`'s workspace lists `dir`: a workspace whose packages
@@ -1959,6 +1949,21 @@ mod tests {
         dir_with(tmp.path(), "svc/api", "go.mod");
         let other = dir_with(tmp.path(), "svc/other", "go.mod");
         assert_eq!(recursive_roots(tmp.path()), vec![r, other]);
+    }
+
+    #[test]
+    fn recursive_go_work_members_listed_by_absolute_path_are_covered() {
+        // scip-go gets the absolute `use` as a pattern too, so the module is
+        // in the root's run and must not also be its own project.
+        let tmp = tempfile::tempdir().unwrap();
+        let r = dir_with(tmp.path(), "", "go.work");
+        let tools = dir_with(tmp.path(), "tools", "go.mod");
+        std::fs::write(
+            r.join("go.work"),
+            format!("go 1.21\n\nuse {}\n", tools.display()),
+        )
+        .unwrap();
+        assert_eq!(recursive_roots(tmp.path()), vec![r]);
     }
 
     #[test]

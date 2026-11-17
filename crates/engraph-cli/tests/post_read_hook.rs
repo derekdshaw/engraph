@@ -8,12 +8,8 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 mod common;
-use common::git;
+use common::{bin, git};
 use tempfile::tempdir;
-
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_engraph")
-}
 
 fn run_hook(db_path: &std::path::Path, file_path: &str) -> String {
     let payload = serde_json::json!({

@@ -28,6 +28,17 @@ pub fn engraph(db: &Path, cwd: &Path, args: &[&str]) -> Output {
     command(db, cwd, args).output().expect("spawn engraph")
 }
 
+/// `engraph`, with the SCIP scratch file kept out of the user's data dir.
+pub fn engraph_temp_scip(db: &Path, cwd: &Path, args: &[&str]) -> Output {
+    command(db, cwd, args)
+        .env(
+            "ENGRAPH_SCIP_OUTPUT_DIR",
+            std::env::temp_dir().join("engraph-test-scip"),
+        )
+        .output()
+        .expect("spawn engraph")
+}
+
 /// `git -C repo <args>` with a throwaway identity and no signing, so commits
 /// work on any machine. Panics on failure; returns trimmed stdout.
 pub fn git(repo: &Path, args: &[&str]) -> String {

@@ -588,26 +588,14 @@ fn run_go_modules(
         let out_path = scip_dir.join(format!("index-go-{n}.scip"));
         let _ = std::fs::remove_file(&out_path); // ignore-if-absent
 
-        let mut cmd = Command::new(spec.binary);
-        cmd.arg("index")
-            .arg("--module-root")
-            .arg(module_root)
-            .arg("--module-version")
-            .arg(crate::driver::SCIP_GO_VERSION);
+        let mut cmd = crate::driver::scip_go_command(repo, module_root, &out_path);
         if !go.tests {
             // Skip test compilation: a module whose test-only deps don't
             // resolve would otherwise fail wholesale, losing its library
             // symbols too. `--go-tests` takes that risk for the test symbols.
             cmd.arg("--skip-tests");
         }
-        cmd.arg("--output")
-            .arg(&out_path)
-            .current_dir(repo)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if crate::driver::outside_its_go_work(&repo.join(rel)) {
-            cmd.env("GOWORK", "off");
-        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         crate::driver::apply_go_tags(&mut cmd, go.tags);
         tracing::info!(driver = spec.binary, module = %module_root.display(), "running scip-go for module");
         let output = cmd
