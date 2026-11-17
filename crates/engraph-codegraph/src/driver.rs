@@ -154,6 +154,25 @@ impl Driver for ScipGo {
     }
 }
 
+/// `GOFLAGS` for a scip-go run with the build `tags` (comma-separated): the
+/// user's `existing` flags, then `-tags=<tags>`. Go takes the last `-tags`,
+/// so these win over a `-tags` the user set, and the other flags stay.
+pub(crate) fn go_flags_with_tags(existing: Option<&str>, tags: &str) -> String {
+    match existing.map(str::trim).filter(|e| !e.is_empty()) {
+        Some(e) => format!("{e} -tags={tags}"),
+        None => format!("-tags={tags}"),
+    }
+}
+
+/// Give the build `tags` to the scip-go `cmd`. scip-go has no tags flag, but
+/// its package loader reads `GOFLAGS` (verified 2026-11-16, scip-go 0.2.7).
+pub(crate) fn apply_go_tags(cmd: &mut Command, tags: Option<&str>) {
+    if let Some(tags) = tags {
+        let existing = std::env::var("GOFLAGS").ok();
+        cmd.env("GOFLAGS", go_flags_with_tags(existing.as_deref(), tags));
+    }
+}
+
 /// Whether the nearest `go.work` above `dir` does not list it. Go then
 /// builds nothing in `dir`, and scip-go exits 0 with an empty index, so the
 /// run needs `GOWORK=off`. A `go.work` in `dir` itself is the one its run
@@ -500,6 +519,17 @@ mod tests {
             args(dir.path()),
             [&base[..], &["./...", "./tools/...", "./svc/..."]].concat()
         );
+    }
+
+    #[test]
+    fn go_tags_append_to_the_goflags_of_the_user() {
+        // The last `-tags` in GOFLAGS wins, so the appended one does.
+        assert_eq!(go_flags_with_tags(None, "a,b"), "-tags=a,b");
+        assert_eq!(
+            go_flags_with_tags(Some("-mod=mod -tags=x"), "a"),
+            "-mod=mod -tags=x -tags=a"
+        );
+        assert_eq!(go_flags_with_tags(Some("  "), "a"), "-tags=a");
     }
 
     #[test]

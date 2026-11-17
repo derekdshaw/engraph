@@ -6,6 +6,7 @@ Last update: 2026-11-16, main at `267b7f5`
 
 ## Features
 
+- **Go build tags.** `engraph index --go-tags <a,b>` gives scip-go build tags, so the files behind `//go:build` lines that need them are in the code graph. It works for the Go driver and the Bazel Go pass, keeps the other flags in your `GOFLAGS`, and `--if-changed` repeats the tags of the recorded run. Schema v15 records them.
 - **Go workspaces.** A directory with a `go.work` file is a Go project, with or without its own `go.mod`. One scip-go run indexes every module that the `go.work` lists, so `engraph index` and `--recursive` do not index them one at a time. A Go module that the `go.work` does not list is still its own project.
 - **Discovery obeys ignore files.** `engraph index --workspace` and `--recursive` skip the directories that `.gitignore` (inside a git repo), `.ignore`, `.git/info/exclude`, or the global git excludes name — the same rules as `git ls-files --exclude-standard`. An ignored directory that is its own git repo is still found, and the parent's rules do not apply inside it. Both modes also skip hidden and build/dependency directories by name.
 - **Discovery flags.** `--max-depth <n>` (default 16, with `--recursive`) limits how deep discovery goes. `--include <glob>` and `--exclude <glob>` (repeatable, with either mode) filter the discovered projects by their path below the workspace root: `*` stays within one level, `**` crosses levels, `.` is the root, and a glob matches only the path it names. When both match a project, `--exclude` wins with a warning.

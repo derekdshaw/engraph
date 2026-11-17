@@ -29,7 +29,8 @@ modules. This is also true in Bazel repos.
   packages.
 - scip-go indexes only one build configuration. Thus, files with build tags for
   a different platform (for example `_linux.go` or `//go:build`) are not in the
-  code graph.
+  code graph. The `--go-tags` flag gives build tags to scip-go, and `GOOS` and
+  `GOARCH` in the environment select a different platform.
 - The standard Go driver indexes `_test.go` files, because scip-go indexes
   tests by default (`Tests: !opts.SkipTests` in scip-go v0.2.7). The Bazel Go
   pass gives `--skip-tests` to scip-go. Thus, the Bazel Go pass does not index
@@ -43,7 +44,7 @@ modules. This is also true in Bazel repos.
 
 ## Steps
 
-Steps 1 to 8 are complete. Step 3 found that scip-go 0.2.7 indexes all
+Steps 1 to 10 are complete. Step 3 found that scip-go 0.2.7 indexes all
 modules of a `go.work` file in one operation when it gets one `./<dir>/...`
 package pattern for each `use` directory. Its default pattern `./...`
 indexes only the module of the current directory. Thus step 4 applies, and
@@ -61,10 +62,15 @@ Step 7 found two bugs:
 - A module below a `go.work` that does not list it got no symbols, in the Go
   driver and in the Bazel Go pass. Its run now sets `GOWORK=off`.
 
-9. Find out if scip-go accepts build tags or the `GOOS` and `GOARCH`
-   environment variables.
-10. If scip-go accepts them, add the `--go-tags` flag to the `engraph index`
-    command.
+Step 9 found that scip-go 0.2.7 has no flag for build tags, but its package
+loader reads the `GOFLAGS`, `GOOS`, and `GOARCH` environment variables.
+`GOFLAGS=-tags=<tags>` adds the files that need the tags, and `GOOS` selects
+the files of a different platform. When `GOFLAGS` has two `-tags` flags, the
+last one applies. Thus step 10 applies. The `--go-tags` flag adds
+`-tags=<tags>` after the `GOFLAGS` of the user, in the Go driver and in the
+Bazel Go pass. The tags are in `index_state.go_tags` (schema v15), thus
+`--if-changed` gives the same tags.
+
 11. Write the limit of one build configuration in `DETAILS.md`.
 12. Add the `--go-tests` flag. With this flag, the Bazel Go pass does not give
     `--skip-tests` to scip-go.
@@ -88,6 +94,8 @@ target repo.
   `go.work`.
 - A module below a `go.work` that does not list it gets its symbols.
 - A vendored copy of a module does not add a second symbol.
+- With `--go-tags`, a function in a file with a `//go:build` tag is in the
+  code graph. Without `--go-tags`, it is not. `--if-changed` keeps the tags.
 - In the Bazel Go pass with `--go-tests`, a function in a `_test.go` file is in
   the code graph. Without `--go-tests`, it is not in the code graph.
 

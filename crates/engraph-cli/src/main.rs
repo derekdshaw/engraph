@@ -260,6 +260,7 @@ async fn main() -> Result<()> {
             workspace,
             bazel_symbols,
             no_bazel_symbols,
+            go_tags,
             gc,
             no_gc,
             recursive,
@@ -399,6 +400,8 @@ async fn main() -> Result<()> {
                             } else {
                                 mode.bazel_symbols
                             };
+                            // Likewise an explicit --go-tags.
+                            let tags = go_tags.as_deref().or(mode.go_tags.as_deref());
                             if dry_run {
                                 let mut how = Vec::new();
                                 if let Some(l) = &mode.lang {
@@ -406,6 +409,9 @@ async fn main() -> Result<()> {
                                 }
                                 if bazel {
                                     how.push("--bazel-symbols".to_string());
+                                }
+                                if let Some(t) = tags {
+                                    how.push(format!("--go-tags {t}"));
                                 }
                                 let how = if how.is_empty() {
                                     String::new()
@@ -429,6 +435,7 @@ async fn main() -> Result<()> {
                                 &project_key,
                                 subtree,
                                 bazel,
+                                tags,
                                 effective_gc,
                             );
                             match outcome {
@@ -497,6 +504,7 @@ async fn main() -> Result<()> {
                     &conn,
                     &root,
                     effective_bazel_symbols,
+                    go_tags.as_deref(),
                     discovery,
                     &filter,
                     effective_gc,
@@ -519,6 +527,7 @@ async fn main() -> Result<()> {
                                 &r.repo,
                                 &engraph_codegraph::IndexMode {
                                     bazel_symbols: effective_bazel_symbols,
+                                    go_tags: go_tags.clone(),
                                     ..Default::default()
                                 },
                             )?;
@@ -637,6 +646,7 @@ async fn main() -> Result<()> {
                     &project_key,
                     &subtree,
                     effective_bazel_symbols,
+                    go_tags.as_deref(),
                     effective_gc,
                 )?;
                 telemetry::record_event(
@@ -1177,13 +1187,23 @@ fn index_single(
     project_key: &str,
     subtree: &str,
     bazel_symbols: bool,
+    go_tags: Option<&str>,
     gc: bool,
 ) -> Result<engraph_codegraph::IndexStats> {
     let scope = engraph_codegraph::IndexScope {
         project: project_key,
         subtree,
     };
-    let stats = engraph_codegraph::index_repo_in(conn, repo, scip, lang, scope, bazel_symbols, gc)?;
+    let stats = engraph_codegraph::index_repo_in(
+        conn,
+        repo,
+        scip,
+        lang,
+        scope,
+        bazel_symbols,
+        go_tags,
+        gc,
+    )?;
     let mode = engraph_codegraph::IndexMode {
         source: if scip.is_some() {
             engraph_codegraph::IndexSource::Scip
@@ -1192,6 +1212,7 @@ fn index_single(
         },
         lang: lang.map(str::to_string),
         bazel_symbols,
+        go_tags: go_tags.map(str::to_string),
     };
     divergence::record_index_commit(conn, project_key, subtree, repo, &mode)?;
     let pruned_note = if stats.entities_pruned > 0 {

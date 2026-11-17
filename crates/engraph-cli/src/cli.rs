@@ -157,6 +157,11 @@ pub(crate) enum Cmd {
         /// is on by default. No effect outside `--workspace`.
         #[arg(long, conflicts_with = "bazel_symbols")]
         no_bazel_symbols: bool,
+        /// Go build tags for scip-go, comma-separated (`integration,e2e`):
+        /// files behind `//go:build` lines that need them get indexed.
+        /// `--if-changed` repeats the tags of the recorded run.
+        #[arg(long, conflicts_with_all = ["scip", "scip_manifest"], value_parser = parse_go_tags)]
+        go_tags: Option<String>,
         /// Prune orphan entities before indexing and stale SCIP symbols after
         /// loading, limited to the indexers that ran and the indexed
         /// directory. On by default; use --no-gc to disable.
@@ -372,4 +377,17 @@ pub(crate) enum BudgetCmd {
         #[arg(long, default_value_t = budget::DEFAULT_HARD_LIMIT)]
         hard: i64,
     },
+}
+
+/// A `--go-tags` value: comma-separated tags, as `go build -tags` takes them.
+/// scip-go gets them through `GOFLAGS`, which splits at whitespace, so a
+/// space would split the value into two flags.
+fn parse_go_tags(s: &str) -> Result<String, String> {
+    if s.trim().is_empty() {
+        return Err("expected at least one tag".into());
+    }
+    if s.chars().any(char::is_whitespace) {
+        return Err("separate the tags with commas, not spaces".into());
+    }
+    Ok(s.to_string())
 }

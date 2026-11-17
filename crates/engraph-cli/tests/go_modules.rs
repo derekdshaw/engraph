@@ -351,3 +351,68 @@ fn a_go_work_member_indexed_alone_points_at_its_sibling() {
         [Some("b/b.go".into())]
     );
 }
+
+/// A git repo with one module whose `Tagged` builds only with the
+/// `integration` tag.
+fn tagged_module(dir: &Path) -> std::path::PathBuf {
+    let repo = dir.join("repo");
+    write(&repo, "go.mod", "module example.com/t\n\ngo 1.21\n");
+    write(
+        &repo,
+        "t.go",
+        "package t\n\nfunc Plain() int { return 0 }\n",
+    );
+    write(
+        &repo,
+        "tag.go",
+        "//go:build integration\n\npackage t\n\nfunc Tagged() int { return 1 }\n",
+    );
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    repo.canonicalize().unwrap()
+}
+
+#[test]
+fn go_tags_select_the_files_scip_go_indexes() {
+    if !go_tools_present() {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let repo = tagged_module(dir.path());
+    let plain = dir.path().join("plain.db");
+    index_ok(&plain, dir.path(), &["index", repo.to_str().unwrap()]);
+    assert_eq!(entity_count(&plain, "Plain"), 1);
+    assert_eq!(entity_count(&plain, "Tagged"), 0);
+
+    let tagged = dir.path().join("tagged.db");
+    index_ok(
+        &tagged,
+        dir.path(),
+        &["index", "--go-tags", "integration", repo.to_str().unwrap()],
+    );
+    assert_eq!(entity_count(&tagged, "Tagged"), 1);
+
+    // A refresh repeats the tags of the recorded run.
+    write(
+        &repo,
+        "t.go",
+        "package t\n\nfunc Plain() int { return 2 }\n",
+    );
+    git(&repo, &["commit", "-q", "-am", "change"]);
+    index_ok(&tagged, &repo, &["index", "--if-changed"]);
+    assert_eq!(entity_count(&tagged, "Tagged"), 1);
+}
+
+#[test]
+fn go_tags_reject_whitespace() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("e.db");
+    let out = engraph(&db, dir.path(), &["index", "--go-tags", "a b", "--dry-run"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("comma"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

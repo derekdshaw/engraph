@@ -1120,9 +1120,10 @@ driver) counts every untracked file — drops subtrees
 nested under another changed one (`outermost_subtrees`), and re-indexes each
 at `<toplevel>/<subtree>` with `index_single`, which re-records that subtree's
 commit. It repeats how the subtree was indexed (`index_state.source`, `lang`,
-`bazel_symbols`, §12.1 v11): a `--lang` pin and the symbol-level Bazel pass
-are run again (an explicit `--bazel-symbols` / `--no-bazel-symbols` on the
-refresh wins), and a subtree indexed from prebuilt SCIP (`--scip`,
+`bazel_symbols`, §12.1 v11, and `go_tags`, v15): a `--lang` pin, the
+symbol-level Bazel pass, and the Go build tags are used again (an explicit
+`--bazel-symbols` / `--no-bazel-symbols` or `--go-tags` on the refresh wins),
+and a subtree indexed from prebuilt SCIP (`--scip`,
 `--scip-manifest`) is skipped with a note, since only its producer can rebuild
 it. So is a changed subtree that covers such a prebuilt sub-project: re-indexing
 the parent would rebuild the sub-project with local indexers and record over
@@ -1376,8 +1377,9 @@ but logs a warning if it ever happens.
 
 | 13 | SCIP local symbols per project and document (§14.3). `entities.scheme`: the SCIP scheme of the indexer that wrote a symbol (the first word of a global id; for a local, the scheme of its document; NULL for Bazel targets), filled for existing global symbols. The old `local <n>` rows, one row for the locals of all documents and projects, are deleted with their edges. Like v12, v13 clears the commit of every driver run, so the next refresh writes the local edges again. |
 | 14 | `relations.line`: the line of the occurrence (call or reference) an edge comes from, NULL for relationship edges, Bazel dependencies, and sources defined in more than one document (a Go package) (§14.4). Clears the commit of every driver run, as v12 does, so the next refresh writes the lines. |
+| 15 | `index_state.go_tags`: the `--go-tags` of the run, so `index --if-changed` gives scip-go the same build tags (§8.0.1). NULL for older rows, which had none; no commit is cleared. |
 
-(`SCHEMA_VERSION = 14`; the `MIGRATIONS` array has 14 entries.)
+(`SCHEMA_VERSION = 15`; the `MIGRATIONS` array has 15 entries.)
 
 ---
 
@@ -1539,7 +1541,7 @@ crate that does cross-file `who-calls` across Rust/Python/Go/TS/Java.
 |---|---|---|
 | `RustAnalyzer` | `Cargo.toml` | `rust-analyzer scip <repo> --output <out>` (chdir into repo) |
 | `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <out> --project-name <basename> --project-version 0.0.0` |
-| `ScipGo` | `go.mod` or `go.work` | `scip-go --module-root <repo> --module-version 0.0.0 --output <out>` (chdir into repo); with a `go.work`, also one `./<dir>/...` package pattern per `use` directory, since scip-go's default `./...` covers only the root module; `GOWORK=off` when the nearest `go.work` above the repo does not list it (`outside_its_go_work`), since Go then builds nothing there |
+| `ScipGo` | `go.mod` or `go.work` | `scip-go --module-root <repo> --module-version 0.0.0 --output <out>` (chdir into repo); with a `go.work`, also one `./<dir>/...` package pattern per `use` directory, since scip-go's default `./...` covers only the root module; `GOWORK=off` when the nearest `go.work` above the repo does not list it (`outside_its_go_work`), since Go then builds nothing there; with `--go-tags <a,b>`, `GOFLAGS="$GOFLAGS -tags=a,b"` (`apply_go_tags`; scip-go has no tags flag, but its package loader reads `GOFLAGS`, and the last `-tags` wins) |
 | `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index --output <out>` (chdir into repo); in a pnpm or yarn workspace (`TsWorkspace`), also `--pnpm-workspaces` / `--yarn-workspaces <repo>` |
 | `ScipJava` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java index --output <out>` (chdir into repo) |
 
@@ -2148,7 +2150,8 @@ flag is still available to opt in on a single-repo run.
   the repo that scip-go cannot tie to the run (no `replace`, and the run
   does not start at the go.work root) gets the version `.`; the loader
   pins it to `0.0.0` (`pin_go_module_versions`), so it matches the
-  definition (verified 2026-11-16, scip-go 0.2.7).
+  definition (verified 2026-11-16, scip-go 0.2.7). `--go-tags` reaches
+  each module's run the same way as in the driver (`apply_go_tags`).
   `rebase_documents` prepends the module's repo-relative dir to its
   document paths (scip-go emits module-root-relative paths and the loader
   stores them verbatim as `file_path`, so two modules' `main.go` would

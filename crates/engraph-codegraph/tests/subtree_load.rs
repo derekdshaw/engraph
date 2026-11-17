@@ -128,8 +128,28 @@ fn subtree_loads_merge_into_one_project_with_rebased_paths() {
         )]),
     );
 
-    index_repo_in(&conn, dir.path(), Some(&a), None, sub("svc-a"), false, true).unwrap();
-    index_repo_in(&conn, dir.path(), Some(&b), None, sub("svc-b"), false, true).unwrap();
+    index_repo_in(
+        &conn,
+        dir.path(),
+        Some(&a),
+        None,
+        sub("svc-a"),
+        false,
+        None,
+        true,
+    )
+    .unwrap();
+    index_repo_in(
+        &conn,
+        dir.path(),
+        Some(&b),
+        None,
+        sub("svc-b"),
+        false,
+        None,
+        true,
+    )
+    .unwrap();
 
     // svc-b's run (GC + prune on) must leave svc-a alone, edgeless a3 included.
     assert_eq!(names(&conn), ["a1", "a2", "a3", "b1", "b2", "b3"]);
@@ -162,8 +182,28 @@ fn subtree_reindex_prunes_only_its_own_subtree() {
             ["b1", "b2", "b3"],
         )]),
     );
-    index_repo_in(&conn, dir.path(), Some(&a), None, sub("svc-a"), false, true).unwrap();
-    index_repo_in(&conn, dir.path(), Some(&b), None, sub("svc-b"), false, true).unwrap();
+    index_repo_in(
+        &conn,
+        dir.path(),
+        Some(&a),
+        None,
+        sub("svc-a"),
+        false,
+        None,
+        true,
+    )
+    .unwrap();
+    index_repo_in(
+        &conn,
+        dir.path(),
+        Some(&b),
+        None,
+        sub("svc-b"),
+        false,
+        None,
+        true,
+    )
+    .unwrap();
 
     // a3 deleted from svc-a's source.
     let mut d = doc("src/lib.rs", "rust-analyzer", "svc-a", ["a1", "a2", "a3"]);
@@ -177,6 +217,7 @@ fn subtree_reindex_prunes_only_its_own_subtree() {
         None,
         sub("svc-a"),
         false,
+        None,
         true,
     )
     .unwrap();
@@ -251,7 +292,17 @@ fn root_and_subtree_runs_over_the_same_code_converge() {
     );
     index_repo(&conn, dir.path(), Some(&root), None, "/repo", false, true).unwrap();
     let (n, r) = (names(&conn), relation_count(&conn));
-    index_repo_in(&conn, dir.path(), Some(&a), None, sub("svc-a"), false, true).unwrap();
+    index_repo_in(
+        &conn,
+        dir.path(),
+        Some(&a),
+        None,
+        sub("svc-a"),
+        false,
+        None,
+        true,
+    )
+    .unwrap();
     assert_eq!((names(&conn), relation_count(&conn)), (n.clone(), r));
     index_repo(&conn, dir.path(), Some(&root), None, "/repo", false, true).unwrap();
     assert_eq!((names(&conn), relation_count(&conn)), (n, r));

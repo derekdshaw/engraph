@@ -101,6 +101,7 @@ fn workspace_links_app_b_caller_to_lib_a_foo() {
         &conn,
         &root,
         false,
+        None,
         Discovery::Children,
         &DiscoveryFilter::default(),
         false,
