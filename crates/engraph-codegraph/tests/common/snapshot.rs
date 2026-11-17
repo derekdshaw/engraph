@@ -10,6 +10,7 @@
 
 use engraph_core::db::PooledConn;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +91,82 @@ impl Snapshot {
             indexer_version: indexer_version.to_string(),
             symbols,
         }
+    }
+
+    /// The differences between `self`, the snapshot, and `actual`, an index
+    /// run, one line each; empty when they are equal. A changed indexer or
+    /// version comes first, then a count line, then the symbols: `-` only in
+    /// the snapshot, `+` only in the index run, `~` changed, with the changed
+    /// fields indented below it (`callers`/`callees` as the ids that went or
+    /// came).
+    pub fn diff(&self, actual: &Snapshot) -> Vec<String> {
+        let mut lines = Vec::new();
+        for (name, want, got) in [
+            ("indexer", &self.indexer, &actual.indexer),
+            (
+                "indexer_version",
+                &self.indexer_version,
+                &actual.indexer_version,
+            ),
+        ] {
+            if want != got {
+                lines.push(format!("{name}: {want} (snapshot) -> {got} (index run)"));
+            }
+        }
+        let want: BTreeMap<&str, &SymbolRecord> =
+            self.symbols.iter().map(|s| (s.id.as_str(), s)).collect();
+        let got: BTreeMap<&str, &SymbolRecord> =
+            actual.symbols.iter().map(|s| (s.id.as_str(), s)).collect();
+        let removed: Vec<String> = want
+            .keys()
+            .filter(|id| !got.contains_key(*id))
+            .map(|id| format!("- {id}"))
+            .collect();
+        let added: Vec<String> = got
+            .keys()
+            .filter(|id| !want.contains_key(*id))
+            .map(|id| format!("+ {id}"))
+            .collect();
+        let mut changed = Vec::new();
+        let mut n_changed = 0;
+        for (id, w) in &want {
+            let Some(g) = got.get(id).filter(|g| *g != w) else {
+                continue;
+            };
+            n_changed += 1;
+            changed.push(format!("~ {id}"));
+            for (name, a, b) in [
+                ("name", &w.name, &g.name),
+                ("file_path", &w.file_path, &g.file_path),
+                ("line_range", &w.line_range, &g.line_range),
+            ] {
+                if a != b {
+                    changed.push(format!("    {name}: {a} -> {b}"));
+                }
+            }
+            for (name, a, b) in [
+                ("callers", &w.callers, &g.callers),
+                ("callees", &w.callees, &g.callees),
+            ] {
+                for x in a.iter().filter(|x| !b.contains(x)) {
+                    changed.push(format!("    {name}: - {x}"));
+                }
+                for x in b.iter().filter(|x| !a.contains(x)) {
+                    changed.push(format!("    {name}: + {x}"));
+                }
+            }
+        }
+        if !(removed.is_empty() && added.is_empty() && changed.is_empty()) {
+            lines.push(format!(
+                "only in the snapshot: {}, only in the index run: {}, changed: {n_changed}",
+                removed.len(),
+                added.len()
+            ));
+        }
+        lines.extend(removed);
+        lines.extend(added);
+        lines.extend(changed);
+        lines
     }
 
     pub fn read(path: &Path) -> Snapshot {

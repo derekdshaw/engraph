@@ -105,12 +105,59 @@ fn snapshot_records_defined_symbols_with_callers_and_callees() {
     assert!(std::fs::read_to_string(&path).unwrap().ends_with("}\n"));
 }
 
-/// Step 10: index each fixture repo and compare the result with its snapshot
-/// file; `ENGRAPH_UPDATE_SNAPSHOTS=1` writes the snapshots instead.
+#[test]
+fn snapshot_diff_lists_changed_versions_and_symbols() {
+    let rec = |id: &str, path: &str, callers: &[&str]| SymbolRecord {
+        id: id.into(),
+        name: id.into(),
+        file_path: path.into(),
+        line_range: "1:1".into(),
+        callers: callers.iter().map(|c| c.to_string()).collect(),
+        callees: vec![],
+    };
+    let snapshot = Snapshot {
+        indexer: "x".into(),
+        indexer_version: "1".into(),
+        symbols: vec![
+            rec("a", "a.rs", &["c"]),
+            rec("b", "b.rs", &[]),
+            rec("c", "c.rs", &[]),
+        ],
+    };
+    let run = Snapshot {
+        indexer: "x".into(),
+        indexer_version: "2".into(),
+        symbols: vec![
+            rec("a", "a2.rs", &["d"]),
+            rec("c", "c.rs", &[]),
+            rec("d", "d.rs", &[]),
+        ],
+    };
+    assert_eq!(
+        snapshot.diff(&run),
+        [
+            "indexer_version: 1 (snapshot) -> 2 (index run)",
+            "only in the snapshot: 1, only in the index run: 1, changed: 1",
+            "- b",
+            "+ d",
+            "~ a",
+            "    file_path: a.rs -> a2.rs",
+            "    callers: - c",
+            "    callers: + d",
+        ]
+    );
+    assert!(snapshot.diff(&snapshot).is_empty());
+}
+
+/// Steps 10 to 12: index each fixture repo and compare the result with its
+/// snapshot file, skipping a fixture whose indexer (or, for scip-java, build
+/// tool) is not installed, and showing the differences of every fixture that
+/// changed; `ENGRAPH_UPDATE_SNAPSHOTS=1` writes the snapshots instead.
 #[test]
 fn fixture_ids_match_the_snapshots() {
     let update = std::env::var("ENGRAPH_UPDATE_SNAPSHOTS").as_deref() == Ok("1");
     isolate_scip_output();
+    let mut failures = Vec::new();
     for fixture in &FIXTURES {
         if let Some(why) = fixture.missing_tool() {
             eprintln!("skip: {why}");
@@ -145,20 +192,27 @@ fn fixture_ids_match_the_snapshots() {
                 fixture.indexer
             );
         } else {
-            let want = Snapshot::read(&fixture.snapshot_path());
-            assert_eq!(
-                snap,
-                want,
-                "the {} fixture no longer matches {}",
-                fixture.lang,
-                fixture.snapshot_path().display()
-            );
-            eprintln!(
-                "ok: {} matches its snapshot ({} symbols, {} {version})",
-                fixture.lang,
-                snap.symbols.len(),
-                fixture.indexer
-            );
+            let diff = Snapshot::read(&fixture.snapshot_path()).diff(&snap);
+            if diff.is_empty() {
+                eprintln!(
+                    "ok: {} matches its snapshot ({} symbols, {} {version})",
+                    fixture.lang,
+                    snap.symbols.len(),
+                    fixture.indexer
+                );
+            } else {
+                failures.push(format!(
+                    "{} fixture vs {}:\n{}",
+                    fixture.lang,
+                    fixture.snapshot_path().display(),
+                    diff.join("\n")
+                ));
+            }
         }
     }
+    assert!(
+        failures.is_empty(),
+        "fixture symbol ids changed:\n\n{}",
+        failures.join("\n\n")
+    );
 }
