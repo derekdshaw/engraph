@@ -5,10 +5,15 @@ with the same shape: a `models` module (types with methods), an `ops` module
 that uses `models` across the module boundary, and a `text` module of string
 helpers both use. Each defines 50+ symbols (functions, types, methods).
 
-The symbol ids these repos produce are recorded in snapshot files; the snapshot
-tests compare a fresh index run against them. Any rename or move here changes
-the recorded ids on purpose, so edit these fixtures only together with their
-snapshots (`ENGRAPH_UPDATE_SNAPSHOTS=1`).
+The symbol ids these repos produce are recorded in `../snapshots/<lang>.json`
+(`tests/common/snapshot.rs` gives the format): every defined non-local symbol
+with its name, file path, line range, callers and callees, plus the indexer
+version. Any rename or move here changes the recorded ids on purpose, so edit
+these fixtures only together with their snapshots:
+
+```
+ENGRAPH_UPDATE_SNAPSHOTS=1 cargo test -p engraph-codegraph --test symbol_snapshots
+```
 
 None of the fixtures has an external dependency, so there is nothing to
 install before indexing and no network access in CI.

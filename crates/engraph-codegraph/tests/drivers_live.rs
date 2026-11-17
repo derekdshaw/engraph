@@ -9,45 +9,11 @@
 //! 3. Runs `engraph_codegraph::index_repo` end-to-end.
 //! 4. Asserts a known symbol landed in the codegraph.
 
+mod common;
+
+use common::{binary_present, db_for_test, isolate_scip_output};
 use engraph_codegraph::index_repo;
-use engraph_core::db::open_pool;
-use std::path::Path;
-use std::process::Command;
 use tempfile::tempdir;
-
-fn binary_present(bin: &str) -> bool {
-    Command::new(bin)
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Redirect the SCIP scratch file off the user's real data dir
-/// (`~/.local/share/engraph/scip`) and into OS temp, so running this suite
-/// doesn't accumulate `index.scip` files there. Set exactly once via `Once`:
-/// these tests run in parallel and `index_repo` reads the env var with
-/// `getenv`, which is not safe against a concurrent `set_var` — so the write
-/// must complete before any test proceeds. All tests share one base; the
-/// per-repo hash subdir inside it keeps each test's output separate.
-fn isolate_scip_output() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        // SAFETY: `Once` serializes this write and runs it before any test
-        // body reaches `index_repo`, so no concurrent `getenv` overlaps it.
-        unsafe {
-            std::env::set_var(
-                "ENGRAPH_SCIP_OUTPUT_DIR",
-                std::env::temp_dir().join("engraph-test-scip"),
-            );
-        }
-    });
-}
-
-fn db_for_test(dir: &Path) -> engraph_core::db::Pool {
-    open_pool(&dir.join("eg.db")).unwrap()
-}
 
 fn assert_has_symbol(conn: &engraph_core::db::PooledConn, name: &str) {
     let n: i64 = conn
@@ -267,19 +233,12 @@ fn scip_java_indexes_tiny_module() {
     // `gradle`, or `bazel` to do the build that produces SemanticDB output.
     // Construct a fixture matching whichever tool is available so we
     // actually exercise the driver instead of soft-skipping the assertions.
-    fn tool_present(t: &str) -> bool {
-        std::process::Command::new(t)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }
     // scip-java's index command supports {Maven, Gradle, sbt, mill}. Bazel
     // is NOT auto-driven by scip-java (its --bazel-* flags are for a manual
     // aspect workflow). Skip if none of the supported tools are present.
-    let build_tool = if tool_present("mvn") {
+    let build_tool = if binary_present("mvn") {
         "mvn"
-    } else if tool_present("gradle") {
+    } else if binary_present("gradle") {
         "gradle"
     } else {
         eprintln!("skip: scip-java needs `mvn` or `gradle` on PATH; none found");

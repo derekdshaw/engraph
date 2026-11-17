@@ -1,0 +1,620 @@
+{
+  "indexer": "scip-go",
+  "indexer_version": "0.2.7",
+  "symbols": [
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/",
+      "name": "models",
+      "file_path": "models/models.go",
+      "line_range": "4:4",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Book#",
+      "name": "Book",
+      "file_path": "models/models.go",
+      "line_range": "16:16",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Book#Author.",
+      "name": "Author",
+      "file_path": "models/models.go",
+      "line_range": "18:18",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Book#Describe().",
+      "name": "Describe",
+      "file_path": "models/models.go",
+      "line_range": "39:39",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/DescribeAll()."
+      ],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Book#Label()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Book#Genre.",
+      "name": "Genre",
+      "file_path": "models/models.go",
+      "line_range": "20:20",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Book#IsLong().",
+      "name": "IsLong",
+      "file_path": "models/models.go",
+      "line_range": "27:27",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Book#Label().",
+      "name": "Label",
+      "file_path": "models/models.go",
+      "line_range": "31:31",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Book#Describe().",
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/LongestTitle()."
+      ],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/text`/TitleCase()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Book#Matches().",
+      "name": "Matches",
+      "file_path": "models/models.go",
+      "line_range": "35:35",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#ByGenre()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Book#Pages.",
+      "name": "Pages",
+      "file_path": "models/models.go",
+      "line_range": "19:19",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Book#Title.",
+      "name": "Title",
+      "file_path": "models/models.go",
+      "line_range": "17:17",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Describer#",
+      "name": "Describer",
+      "file_path": "models/models.go",
+      "line_range": "123:123",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Describer#Describe.",
+      "name": "Describe",
+      "file_path": "models/models.go",
+      "line_range": "124:124",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Fiction.",
+      "name": "Fiction",
+      "file_path": "models/models.go",
+      "line_range": "11:11",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Genre#",
+      "name": "Genre",
+      "file_path": "models/models.go",
+      "line_range": "8:8",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/History.",
+      "name": "History",
+      "file_path": "models/models.go",
+      "line_range": "13:13",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Loan#",
+      "name": "Loan",
+      "file_path": "models/models.go",
+      "line_range": "105:105",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Loan#BookTitle.",
+      "name": "BookTitle",
+      "file_path": "models/models.go",
+      "line_range": "106:106",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Loan#DaysOut.",
+      "name": "DaysOut",
+      "file_path": "models/models.go",
+      "line_range": "108:108",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Loan#IsOverdue().",
+      "name": "IsOverdue",
+      "file_path": "models/models.go",
+      "line_range": "115:115",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Library#Overdue()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Loan#MemberID.",
+      "name": "MemberID",
+      "file_path": "models/models.go",
+      "line_range": "107:107",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Loan#Renew().",
+      "name": "Renew",
+      "file_path": "models/models.go",
+      "line_range": "119:119",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Member#",
+      "name": "Member",
+      "file_path": "models/models.go",
+      "line_range": "92:92",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Member#DisplayName().",
+      "name": "DisplayName",
+      "file_path": "models/models.go",
+      "line_range": "101:101",
+      "callers": [],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/text`/Initials()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Member#ID.",
+      "name": "ID",
+      "file_path": "models/models.go",
+      "line_range": "93:93",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Member#Name.",
+      "name": "Name",
+      "file_path": "models/models.go",
+      "line_range": "94:94",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/NewBook().",
+      "name": "NewBook",
+      "file_path": "models/models.go",
+      "line_range": "23:23",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/StarterLibrary()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/NewLoan().",
+      "name": "NewLoan",
+      "file_path": "models/models.go",
+      "line_range": "111:111",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Library#Checkout()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/NewMember().",
+      "name": "NewMember",
+      "file_path": "models/models.go",
+      "line_range": "97:97",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/StarterLibrary()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/NewShelf().",
+      "name": "NewShelf",
+      "file_path": "models/models.go",
+      "line_range": "48:48",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/StarterLibrary()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Science.",
+      "name": "Science",
+      "file_path": "models/models.go",
+      "line_range": "12:12",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#",
+      "name": "Shelf",
+      "file_path": "models/models.go",
+      "line_range": "43:43",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#Add().",
+      "name": "Add",
+      "file_path": "models/models.go",
+      "line_range": "52:52",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Merge().",
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/StarterLibrary()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#Books.",
+      "name": "Books",
+      "file_path": "models/models.go",
+      "line_range": "45:45",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#ByGenre().",
+      "name": "ByGenre",
+      "file_path": "models/models.go",
+      "line_range": "78:78",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/ScienceBooks()."
+      ],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Book#Matches()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#Count().",
+      "name": "Count",
+      "file_path": "models/models.go",
+      "line_range": "56:56",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#Describe().",
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/AveragePages().",
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Library#BookCount()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#Describe().",
+      "name": "Describe",
+      "file_path": "models/models.go",
+      "line_range": "88:88",
+      "callers": [],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#Count().",
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/text`/Pluralize()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#Longest().",
+      "name": "Longest",
+      "file_path": "models/models.go",
+      "line_range": "68:68",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/LongestTitle()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#Name.",
+      "name": "Name",
+      "file_path": "models/models.go",
+      "line_range": "44:44",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#TotalPages().",
+      "name": "TotalPages",
+      "file_path": "models/models.go",
+      "line_range": "60:60",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/AveragePages()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/",
+      "name": "ops",
+      "file_path": "ops/ops.go",
+      "line_range": "2:2",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/AveragePages().",
+      "name": "AveragePages",
+      "file_path": "ops/ops.go",
+      "line_range": "56:56",
+      "callers": [],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#Count().",
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#TotalPages()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/DescribeAll().",
+      "name": "DescribeAll",
+      "file_path": "ops/ops.go",
+      "line_range": "75:75",
+      "callers": [],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Book#Describe()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Library#",
+      "name": "Library",
+      "file_path": "ops/ops.go",
+      "line_range": "9:9",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Library#AddShelf().",
+      "name": "AddShelf",
+      "file_path": "ops/ops.go",
+      "line_range": "19:19",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/StarterLibrary()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Library#BookCount().",
+      "name": "BookCount",
+      "file_path": "ops/ops.go",
+      "line_range": "41:41",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Summary()."
+      ],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#Count()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Library#Checkout().",
+      "name": "Checkout",
+      "file_path": "ops/ops.go",
+      "line_range": "27:27",
+      "callers": [],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/NewLoan()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Library#Loans.",
+      "name": "Loans",
+      "file_path": "ops/ops.go",
+      "line_range": "12:12",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Library#Members.",
+      "name": "Members",
+      "file_path": "ops/ops.go",
+      "line_range": "11:11",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Library#Overdue().",
+      "name": "Overdue",
+      "file_path": "ops/ops.go",
+      "line_range": "31:31",
+      "callers": [],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Loan#IsOverdue()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Library#Register().",
+      "name": "Register",
+      "file_path": "ops/ops.go",
+      "line_range": "23:23",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/StarterLibrary()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Library#Shelves.",
+      "name": "Shelves",
+      "file_path": "ops/ops.go",
+      "line_range": "10:10",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/LongestTitle().",
+      "name": "LongestTitle",
+      "file_path": "ops/ops.go",
+      "line_range": "63:63",
+      "callers": [],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Book#Label().",
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#Longest()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Merge().",
+      "name": "Merge",
+      "file_path": "ops/ops.go",
+      "line_range": "49:49",
+      "callers": [],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#Add()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/NewLibrary().",
+      "name": "NewLibrary",
+      "file_path": "ops/ops.go",
+      "line_range": "15:15",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/StarterLibrary()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/ScienceBooks().",
+      "name": "ScienceBooks",
+      "file_path": "ops/ops.go",
+      "line_range": "71:71",
+      "callers": [],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#ByGenre()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/StarterLibrary().",
+      "name": "StarterLibrary",
+      "file_path": "ops/ops.go",
+      "line_range": "87:87",
+      "callers": [],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/NewBook().",
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/NewMember().",
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/NewShelf().",
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#Add().",
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Library#AddShelf().",
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Library#Register().",
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/NewLibrary()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Summary().",
+      "name": "Summary",
+      "file_path": "ops/ops.go",
+      "line_range": "83:83",
+      "callers": [],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Library#BookCount().",
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/text`/Pluralize()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/text`/",
+      "name": "text",
+      "file_path": "text/text.go",
+      "line_range": "2:2",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/text`/Capitalize().",
+      "name": "Capitalize",
+      "file_path": "text/text.go",
+      "line_range": "17:17",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/text`/TitleCase()."
+      ],
+      "callees": [
+        "scip-go gomod github.com/golang/go/src go1.21 strings/ToUpper()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/text`/Initials().",
+      "name": "Initials",
+      "file_path": "text/text.go",
+      "line_range": "24:24",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Member#DisplayName()."
+      ],
+      "callees": [
+        "scip-go gomod github.com/golang/go/src go1.21 strings/Builder#String().",
+        "scip-go gomod github.com/golang/go/src go1.21 strings/Builder#WriteString().",
+        "scip-go gomod github.com/golang/go/src go1.21 strings/Fields()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/text`/Pluralize().",
+      "name": "Pluralize",
+      "file_path": "text/text.go",
+      "line_range": "32:32",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Shelf#Describe().",
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/ops`/Summary()."
+      ],
+      "callees": [
+        "scip-go gomod github.com/golang/go/src go1.21 strconv/Itoa()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/text`/Slug().",
+      "name": "Slug",
+      "file_path": "text/text.go",
+      "line_range": "46:46",
+      "callers": [],
+      "callees": [
+        "scip-go gomod github.com/golang/go/src go1.21 strings/ReplaceAll().",
+        "scip-go gomod github.com/golang/go/src go1.21 strings/ToLower()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/text`/TitleCase().",
+      "name": "TitleCase",
+      "file_path": "text/text.go",
+      "line_range": "9:9",
+      "callers": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Book#Label()."
+      ],
+      "callees": [
+        "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/text`/Capitalize().",
+        "scip-go gomod github.com/golang/go/src go1.21 strings/Fields().",
+        "scip-go gomod github.com/golang/go/src go1.21 strings/Join()."
+      ]
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/text`/Truncate().",
+      "name": "Truncate",
+      "file_path": "text/text.go",
+      "line_range": "39:39",
+      "callers": [],
+      "callees": []
+    }
+  ]
+}

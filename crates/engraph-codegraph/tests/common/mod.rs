@@ -1,0 +1,144 @@
+//! Helpers shared by the codegraph integration tests. Each test binary that
+//! declares `mod common;` compiles the whole module and uses a subset of it,
+//! hence the `dead_code` allowance.
+#![allow(dead_code)]
+
+pub mod snapshot;
+
+use engraph_core::db::{Pool, open_pool};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// One stable-symbol-id fixture repo (`testdata/fixtures/<lang>`) and the
+/// indexer that drives it.
+pub struct Fixture {
+    pub lang: &'static str,
+    pub indexer: &'static str,
+}
+
+pub const FIXTURES: [Fixture; 5] = [
+    Fixture {
+        lang: "rust",
+        indexer: "rust-analyzer",
+    },
+    Fixture {
+        lang: "python",
+        indexer: "scip-python",
+    },
+    Fixture {
+        lang: "go",
+        indexer: "scip-go",
+    },
+    Fixture {
+        lang: "typescript",
+        indexer: "scip-typescript",
+    },
+    Fixture {
+        lang: "java",
+        indexer: "scip-java",
+    },
+];
+
+impl Fixture {
+    /// The fixture's source tree in the repo.
+    pub fn dir(&self) -> PathBuf {
+        testdata().join("fixtures").join(self.lang)
+    }
+
+    /// The snapshot file of the fixture's symbol ids.
+    pub fn snapshot_path(&self) -> PathBuf {
+        testdata()
+            .join("snapshots")
+            .join(format!("{}.json", self.lang))
+    }
+
+    /// The project key the fixture is indexed under in a test database.
+    pub fn project(&self) -> String {
+        format!("/fixtures/{}", self.lang)
+    }
+
+    /// Copy the fixture into `into/<lang>` and return that path. The basename
+    /// is kept on purpose: scip-python writes the indexed directory's name
+    /// into every first-party symbol id (`--project-name`).
+    pub fn copy_into(&self, into: &Path) -> PathBuf {
+        let dst = into.join(self.lang);
+        copy_dir_all(&self.dir(), &dst);
+        dst
+    }
+}
+
+/// `crates/engraph-codegraph/testdata`.
+pub fn testdata() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata")
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let target = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir_all(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// Whether `bin` is on PATH and answers `--version`.
+pub fn binary_present(bin: &str) -> bool {
+    version_output(bin).is_some()
+}
+
+/// The first line `bin --version` prints (stdout, else stderr), or `None`
+/// when the binary is absent or the probe fails.
+pub fn indexer_version(bin: &str) -> Option<String> {
+    let out = version_output(bin)?;
+    let text = if out.stdout.is_empty() {
+        out.stderr
+    } else {
+        out.stdout
+    };
+    let line = String::from_utf8_lossy(&text)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    Some(line)
+}
+
+fn version_output(bin: &str) -> Option<std::process::Output> {
+    Command::new(bin)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+}
+
+/// Redirect the SCIP scratch file off the user's real data dir
+/// (`~/.local/share/engraph/scip`) and into OS temp, so running the suites
+/// doesn't accumulate `index.scip` files there. Set exactly once via `Once`:
+/// tests run in parallel and `index_repo` reads the env var with `getenv`,
+/// which is not safe against a concurrent `set_var` — so the write must
+/// complete before any test proceeds. All tests share one base; the per-repo
+/// hash subdir inside it keeps each test's output separate.
+pub fn isolate_scip_output() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // SAFETY: `Once` serializes this write and runs it before any test
+        // body reaches `index_repo`, so no concurrent `getenv` overlaps it.
+        unsafe {
+            std::env::set_var(
+                "ENGRAPH_SCIP_OUTPUT_DIR",
+                std::env::temp_dir().join("engraph-test-scip"),
+            );
+        }
+    });
+}
+
+/// A fresh database at `dir/eg.db`.
+pub fn db_for_test(dir: &Path) -> Pool {
+    open_pool(&dir.join("eg.db")).unwrap()
+}

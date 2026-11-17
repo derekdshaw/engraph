@@ -1,0 +1,1038 @@
+{
+  "indexer": "scip-python",
+  "indexer_version": "0.6.8",
+  "symbols": [
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#",
+      "name": "Book",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "16:16",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#__init__().",
+      "name": "__init__",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "17:17",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#__init__().(author)",
+      "name": "author",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "17:17",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#__init__().(genre)",
+      "name": "genre",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "17:17",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#__init__().(pages)",
+      "name": "pages",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "17:17",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#__init__().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "17:17",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#__init__().(title)",
+      "name": "title",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "17:17",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#author.",
+      "name": "author",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "19:19",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#describe().",
+      "name": "describe",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "32:32",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/describe_all()."
+      ],
+      "callees": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Book#label()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#describe().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "32:32",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#genre.",
+      "name": "genre",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "21:21",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#is_long().",
+      "name": "is_long",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "23:23",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#is_long().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "23:23",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#label().",
+      "name": "label",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "26:26",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Book#describe().",
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/longest_title()."
+      ],
+      "callees": [
+        "scip-python python python 0.0.0 `engraph_fixture.text`/title_case()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#label().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "26:26",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#matches().",
+      "name": "matches",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "29:29",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#by_genre()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#matches().(genre)",
+      "name": "genre",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "29:29",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#matches().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "29:29",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#pages.",
+      "name": "pages",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "20:20",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#title.",
+      "name": "title",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "18:18",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Genre#",
+      "name": "Genre",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "10:10",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Genre#FICTION.",
+      "name": "FICTION",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "11:11",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Genre#HISTORY.",
+      "name": "HISTORY",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "13:13",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Genre#SCIENCE.",
+      "name": "SCIENCE",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "12:12",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Loan#",
+      "name": "Loan",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "71:71",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Loan#__init__().",
+      "name": "__init__",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "72:72",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Loan#__init__().(book_title)",
+      "name": "book_title",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "72:72",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Loan#__init__().(member_id)",
+      "name": "member_id",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "72:72",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Loan#__init__().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "72:72",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Loan#book_title.",
+      "name": "book_title",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "73:73",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Loan#days_out.",
+      "name": "days_out",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "75:75",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Loan#is_overdue().",
+      "name": "is_overdue",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "77:77",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#overdue()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Loan#is_overdue().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "77:77",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Loan#member_id.",
+      "name": "member_id",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "74:74",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Loan#renew().",
+      "name": "renew",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "80:80",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Loan#renew().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "80:80",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Member#",
+      "name": "Member",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "62:62",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Member#__init__().",
+      "name": "__init__",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "63:63",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Member#__init__().(member_id)",
+      "name": "member_id",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "63:63",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Member#__init__().(name)",
+      "name": "name",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "63:63",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Member#__init__().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "63:63",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Member#display_name().",
+      "name": "display_name",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "67:67",
+      "callers": [],
+      "callees": [
+        "scip-python python python 0.0.0 `engraph_fixture.text`/initials()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Member#display_name().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "67:67",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Member#member_id.",
+      "name": "member_id",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "64:64",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Member#name.",
+      "name": "name",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "65:65",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#",
+      "name": "Shelf",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "36:36",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#__init__().",
+      "name": "__init__",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "37:37",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#__init__().(name)",
+      "name": "name",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "37:37",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#__init__().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "37:37",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#add().",
+      "name": "add",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "41:41",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/merge().",
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/starter_library()."
+      ],
+      "callees": [
+        "scip-python python python-stdlib 3.11 builtins/list#append()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#add().(book)",
+      "name": "book",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "41:41",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#add().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "41:41",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#books.",
+      "name": "books",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "39:39",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#by_genre().",
+      "name": "by_genre",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "55:55",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/science_books()."
+      ],
+      "callees": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Book#matches()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#by_genre().(genre)",
+      "name": "genre",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "55:55",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#by_genre().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "55:55",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#count().",
+      "name": "count",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "44:44",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#describe().",
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#book_count().",
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/average_pages()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#count().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "44:44",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#describe().",
+      "name": "describe",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "58:58",
+      "callers": [],
+      "callees": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#count().",
+        "scip-python python python 0.0.0 `engraph_fixture.text`/pluralize()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#describe().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "58:58",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#longest().",
+      "name": "longest",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "50:50",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/longest_title()."
+      ],
+      "callees": [
+        "scip-python python python-stdlib 3.11 builtins/max()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#longest().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "50:50",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#name.",
+      "name": "name",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "38:38",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#total_pages().",
+      "name": "total_pages",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "47:47",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/average_pages()."
+      ],
+      "callees": [
+        "scip-python python python-stdlib 3.11 builtins/sum()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#total_pages().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "47:47",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.models`/__init__:",
+      "name": "__init__",
+      "file_path": "engraph_fixture/models.py",
+      "line_range": "1:1",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#",
+      "name": "Library",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "9:9",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#__init__().",
+      "name": "__init__",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "10:10",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#__init__().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "10:10",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#add_shelf().",
+      "name": "add_shelf",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "15:15",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/starter_library()."
+      ],
+      "callees": [
+        "scip-python python python-stdlib 3.11 builtins/list#append()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#add_shelf().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "15:15",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#add_shelf().(shelf)",
+      "name": "shelf",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "15:15",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#book_count().",
+      "name": "book_count",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "27:27",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/summary()."
+      ],
+      "callees": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#count().",
+        "scip-python python python-stdlib 3.11 builtins/sum()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#book_count().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "27:27",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#checkout().",
+      "name": "checkout",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "21:21",
+      "callers": [],
+      "callees": [
+        "scip-python python python-stdlib 3.11 builtins/list#append()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#checkout().(book)",
+      "name": "book",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "21:21",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#checkout().(member)",
+      "name": "member",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "21:21",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#checkout().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "21:21",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#loans.",
+      "name": "loans",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "13:13",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#members.",
+      "name": "members",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "12:12",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#overdue().",
+      "name": "overdue",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "24:24",
+      "callers": [],
+      "callees": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Loan#is_overdue()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#overdue().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "24:24",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#register().",
+      "name": "register",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "18:18",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/starter_library()."
+      ],
+      "callees": [
+        "scip-python python python-stdlib 3.11 builtins/list#append()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#register().(member)",
+      "name": "member",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "18:18",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#register().(self)",
+      "name": "self",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "18:18",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#shelves.",
+      "name": "shelves",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "11:11",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/__init__:",
+      "name": "__init__",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "1:1",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/average_pages().",
+      "name": "average_pages",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "37:37",
+      "callers": [],
+      "callees": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#count().",
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#total_pages()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/average_pages().(shelf)",
+      "name": "shelf",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "37:37",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/describe_all().",
+      "name": "describe_all",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "54:54",
+      "callers": [],
+      "callees": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Book#describe()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/describe_all().(shelf)",
+      "name": "shelf",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "54:54",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/longest_title().",
+      "name": "longest_title",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "43:43",
+      "callers": [],
+      "callees": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Book#label().",
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#longest()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/longest_title().(shelf)",
+      "name": "shelf",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "43:43",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/merge().",
+      "name": "merge",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "31:31",
+      "callers": [],
+      "callees": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#add()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/merge().(a)",
+      "name": "a",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "31:31",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/merge().(b)",
+      "name": "b",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "31:31",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/science_books().",
+      "name": "science_books",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "50:50",
+      "callers": [],
+      "callees": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#by_genre()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/science_books().(shelf)",
+      "name": "shelf",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "50:50",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/starter_library().",
+      "name": "starter_library",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "64:64",
+      "callers": [],
+      "callees": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#add().",
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#add_shelf().",
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#register()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/summary().",
+      "name": "summary",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "58:58",
+      "callers": [],
+      "callees": [
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/Library#book_count().",
+        "scip-python python python 0.0.0 `engraph_fixture.text`/pluralize()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.ops`/summary().(library)",
+      "name": "library",
+      "file_path": "engraph_fixture/ops.py",
+      "line_range": "58:58",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.text`/__init__:",
+      "name": "__init__",
+      "file_path": "engraph_fixture/text.py",
+      "line_range": "1:1",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.text`/capitalize().",
+      "name": "capitalize",
+      "file_path": "engraph_fixture/text.py",
+      "line_range": "10:10",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.text`/title_case()."
+      ],
+      "callees": [
+        "scip-python python python-stdlib 3.11 builtins/str#upper()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.text`/capitalize().(word)",
+      "name": "word",
+      "file_path": "engraph_fixture/text.py",
+      "line_range": "10:10",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.text`/initials().",
+      "name": "initials",
+      "file_path": "engraph_fixture/text.py",
+      "line_range": "16:16",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Member#display_name()."
+      ],
+      "callees": [
+        "scip-python python python-stdlib 3.11 builtins/str#join().",
+        "scip-python python python-stdlib 3.11 builtins/str#split()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.text`/initials().(name)",
+      "name": "name",
+      "file_path": "engraph_fixture/text.py",
+      "line_range": "16:16",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.text`/pluralize().",
+      "name": "pluralize",
+      "file_path": "engraph_fixture/text.py",
+      "line_range": "20:20",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Shelf#describe().",
+        "scip-python python python 0.0.0 `engraph_fixture.ops`/summary()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.text`/pluralize().(n)",
+      "name": "n",
+      "file_path": "engraph_fixture/text.py",
+      "line_range": "20:20",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.text`/pluralize().(word)",
+      "name": "word",
+      "file_path": "engraph_fixture/text.py",
+      "line_range": "20:20",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.text`/slug().",
+      "name": "slug",
+      "file_path": "engraph_fixture/text.py",
+      "line_range": "30:30",
+      "callers": [],
+      "callees": [
+        "scip-python python python-stdlib 3.11 builtins/str#lower().",
+        "scip-python python python-stdlib 3.11 builtins/str#replace()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.text`/slug().(s)",
+      "name": "s",
+      "file_path": "engraph_fixture/text.py",
+      "line_range": "30:30",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.text`/title_case().",
+      "name": "title_case",
+      "file_path": "engraph_fixture/text.py",
+      "line_range": "6:6",
+      "callers": [
+        "scip-python python python 0.0.0 `engraph_fixture.models`/Book#label()."
+      ],
+      "callees": [
+        "scip-python python python 0.0.0 `engraph_fixture.text`/capitalize().",
+        "scip-python python python-stdlib 3.11 builtins/str#join().",
+        "scip-python python python-stdlib 3.11 builtins/str#split()."
+      ]
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.text`/title_case().(s)",
+      "name": "s",
+      "file_path": "engraph_fixture/text.py",
+      "line_range": "6:6",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.text`/truncate().",
+      "name": "truncate",
+      "file_path": "engraph_fixture/text.py",
+      "line_range": "26:26",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.text`/truncate().(max_len)",
+      "name": "max_len",
+      "file_path": "engraph_fixture/text.py",
+      "line_range": "26:26",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 `engraph_fixture.text`/truncate().(s)",
+      "name": "s",
+      "file_path": "engraph_fixture/text.py",
+      "line_range": "26:26",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-python python python 0.0.0 engraph_fixture/__init__:",
+      "name": "__init__",
+      "file_path": "engraph_fixture/__init__.py",
+      "line_range": "1:1",
+      "callers": [],
+      "callees": []
+    }
+  ]
+}
