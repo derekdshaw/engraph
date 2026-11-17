@@ -11,7 +11,7 @@
 
 mod common;
 
-use common::{binary_present, db_for_test, isolate_scip_output};
+use common::{binary_present, db_for_test, isolate_scip_output, java_build_tool};
 use engraph_codegraph::index_repo;
 use tempfile::tempdir;
 
@@ -236,11 +236,7 @@ fn scip_java_indexes_tiny_module() {
     // scip-java's index command supports {Maven, Gradle, sbt, mill}. Bazel
     // is NOT auto-driven by scip-java (its --bazel-* flags are for a manual
     // aspect workflow). Skip if none of the supported tools are present.
-    let build_tool = if binary_present("mvn") {
-        "mvn"
-    } else if binary_present("gradle") {
-        "gradle"
-    } else {
+    let Some(build_tool) = java_build_tool() else {
         eprintln!("skip: scip-java needs `mvn` or `gradle` on PATH; none found");
         return;
     };

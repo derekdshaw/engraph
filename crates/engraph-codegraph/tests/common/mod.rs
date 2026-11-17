@@ -57,6 +57,18 @@ impl Fixture {
         format!("/fixtures/{}", self.lang)
     }
 
+    /// Why this machine cannot index the fixture, or `None` when it can:
+    /// the indexer is absent, or scip-java has no build tool to drive.
+    pub fn missing_tool(&self) -> Option<String> {
+        if !binary_present(self.indexer) {
+            return Some(format!("{} not installed", self.indexer));
+        }
+        if self.indexer == "scip-java" && java_build_tool().is_none() {
+            return Some("scip-java needs `mvn` or `gradle` on PATH; none found".into());
+        }
+        None
+    }
+
     /// Copy the fixture into `into/<lang>` and return that path. The basename
     /// is kept on purpose: scip-python writes the indexed directory's name
     /// into every first-party symbol id (`--project-name`).
@@ -88,6 +100,13 @@ fn copy_dir_all(src: &Path, dst: &Path) {
 /// Whether `bin` is on PATH and answers `--version`.
 pub fn binary_present(bin: &str) -> bool {
     version_output(bin).is_some()
+}
+
+/// The build tool scip-java can drive on this machine. scip-java is a
+/// frontend: it shells out to `mvn` or `gradle` for the build that produces
+/// SemanticDB, so without one an index run fails on an otherwise fine repo.
+pub fn java_build_tool() -> Option<&'static str> {
+    ["mvn", "gradle"].into_iter().find(|t| binary_present(t))
 }
 
 /// The first line `bin --version` prints (stdout, else stderr), or `None`

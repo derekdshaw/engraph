@@ -64,6 +64,16 @@ indexer changes the ids or the relations of known symbols.
 17. Add the first test to the "Codegraph live drivers" CI job.
 18. In the CI job, install specified versions of the indexers.
 
+Note for steps 17 and 18 (2026-11-17): the snapshot files record the indexer
+versions of the computer that made them (rust-analyzer 1.100.0, scip-python
+0.6.8, scip-go 0.2.7, scip-typescript 0.6.0, scip-java 0.12.3), and the
+comparison of step 10 includes the version. The CI job installs the indexers
+without a version (`npm install -g …`, `go install …@latest`), and its
+rust-analyzer is the one of the `stable` toolchain. Thus the test of step 10
+fails in CI until step 18 installs the versions in the snapshot files, or
+until the snapshot files are made again with the versions that CI installs.
+Steps 17 and 18 must do one of these two.
+
 ## Steps, part 2: normalization of symbol ids
 
 Step 1 is complete (plan 03, step 7).

@@ -11,7 +11,7 @@
 mod common;
 
 use common::snapshot::{Snapshot, SymbolRecord};
-use common::{FIXTURES, binary_present, db_for_test, indexer_version, isolate_scip_output};
+use common::{FIXTURES, db_for_test, indexer_version, isolate_scip_output};
 use engraph_codegraph::index_repo;
 use tempfile::tempdir;
 
@@ -112,8 +112,8 @@ fn fixture_ids_match_the_snapshots() {
     let update = std::env::var("ENGRAPH_UPDATE_SNAPSHOTS").as_deref() == Ok("1");
     isolate_scip_output();
     for fixture in &FIXTURES {
-        if !binary_present(fixture.indexer) {
-            eprintln!("skip: {} not installed", fixture.indexer);
+        if let Some(why) = fixture.missing_tool() {
+            eprintln!("skip: {why}");
             continue;
         }
         let dir = tempdir().unwrap();
