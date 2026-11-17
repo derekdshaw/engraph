@@ -416,3 +416,37 @@ fn go_tags_reject_whitespace() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn a_refresh_repeats_go_tests_and_go_tags() {
+    if !go_tools_present() {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("e.db");
+    let repo = tagged_module(dir.path());
+    index_ok(
+        &db,
+        dir.path(),
+        &[
+            "index",
+            "--go-tags",
+            "integration",
+            "--go-tests",
+            repo.to_str().unwrap(),
+        ],
+    );
+    write(
+        &repo,
+        "t.go",
+        "package t\n\nfunc Plain() int { return 2 }\n",
+    );
+    git(&repo, &["commit", "-q", "-am", "change"]);
+    let out = engraph(&db, &repo, &["index", "--if-changed", "--dry-run"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("--go-tags integration --go-tests"),
+        "{stdout}"
+    );
+}

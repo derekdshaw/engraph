@@ -341,6 +341,12 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE index_state ADD COLUMN go_tags TEXT;
     "#,
+    // v16 — `index_state.go_tests`: whether the run had `--go-tests`, so
+    // `index --if-changed` lets the Bazel Go pass index `_test.go` files
+    // again. Older rows had not.
+    r#"
+    ALTER TABLE index_state ADD COLUMN go_tests INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
@@ -726,6 +732,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, ("abc".into(), None));
+    }
+
+    #[test]
+    fn migrates_through_v16_index_state_go_tests() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations_to(&mut conn, 15).unwrap();
+        conn.execute_batch(
+            "INSERT INTO index_state (project, subtree, commit_sha, source) VALUES
+                ('/p', '', 'abc', 'drivers');",
+        )
+        .unwrap();
+        run_migrations_to(&mut conn, 16).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 16);
+        let row: (String, bool) = conn
+            .query_row(
+                "SELECT commit_sha, go_tests FROM index_state WHERE project = '/p'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("abc".into(), false));
     }
 
     #[test]

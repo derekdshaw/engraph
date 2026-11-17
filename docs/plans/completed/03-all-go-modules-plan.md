@@ -1,6 +1,6 @@
 # Plan 03: All Go modules in the code graph
 
-Read [the general information for all plans](00-general-info-plan.md)
+Read [the general information for all plans](../00-general-info-plan.md)
 before you use this plan. It gives the rules for the work and the sequence
 of the plans.
 
@@ -14,7 +14,7 @@ modules. This is also true in Bazel repos.
 - The Go driver finds a module when `go.mod` or `go.work` is in the indexed
   directory. For a repo with more than one Go module and no `go.work`, a
   `--recursive` index run is necessary. That run includes a Go module below a
-  different Go module ([plan 02](completed/02-deeper-workspace-discovery-plan.md), step 10).
+  different Go module ([plan 02](02-deeper-workspace-discovery-plan.md), step 10).
 - With a `go.work`, the Go driver gives scip-go one package pattern for each
   `use` directory. One scip-go run indexes all the modules of the `go.work`.
   A module that the `go.work` lists is a member of the `go.work` project in
@@ -33,8 +33,8 @@ modules. This is also true in Bazel repos.
   `GOARCH` in the environment select a different platform.
 - The standard Go driver indexes `_test.go` files, because scip-go indexes
   tests by default (`Tests: !opts.SkipTests` in scip-go v0.2.7). The Bazel Go
-  pass gives `--skip-tests` to scip-go. Thus, the Bazel Go pass does not index
-  `_test.go` files.
+  pass gives `--skip-tests` to scip-go, unless the run has `--go-tests`.
+  `DETAILS.md` gives the limit of one build configuration.
 - In Bazel repos, the native Go pass (`run_go_modules`) indexes only the
   modules that have a `go.mod` file. A large gazelle repo can have thousands of
   `go_library` targets, but only a small number of `go.mod` files.
@@ -44,7 +44,7 @@ modules. This is also true in Bazel repos.
 
 ## Steps
 
-Steps 1 to 10 are complete. Step 3 found that scip-go 0.2.7 indexes all
+All steps are complete. The optional step at the end was not done. Step 3 found that scip-go 0.2.7 indexes all
 modules of a `go.work` file in one operation when it gets one `./<dir>/...`
 package pattern for each `use` directory. Its default pattern `./...`
 indexes only the module of the current directory. Thus step 4 applies, and
@@ -58,7 +58,7 @@ Step 7 found two bugs:
   The definition had a different version, thus the relation pointed to a
   placeholder. The loader now changes the version `.` to `0.0.0`, and the Go
   driver gives `--module-version 0.0.0` to scip-go. This is also step 1 of
-  part 2 of [plan 05](05-stable-symbol-ids-plan.md).
+  part 2 of [plan 05](../05-stable-symbol-ids-plan.md).
 - A module below a `go.work` that does not list it got no symbols, in the Go
   driver and in the Bazel Go pass. Its run now sets `GOWORK=off`.
 
@@ -71,9 +71,10 @@ last one applies. Thus step 10 applies. The `--go-tags` flag adds
 Bazel Go pass. The tags are in `index_state.go_tags` (schema v15), thus
 `--if-changed` gives the same tags.
 
-11. Write the limit of one build configuration in `DETAILS.md`.
-12. Add the `--go-tests` flag. With this flag, the Bazel Go pass does not give
-    `--skip-tests` to scip-go.
+Step 11 wrote the limit of one build configuration in `DETAILS.md`, with
+the driver table. Step 12 added the `--go-tests` flag. With this flag, the
+Bazel Go pass does not give `--skip-tests` to scip-go. `index_state.go_tests`
+(schema v16) records it, thus `--if-changed` repeats it.
 
 Optional step for Bazel repos: engraph can make a temporary `go.mod` file for
 each gazelle prefix from the import paths of the `go_library` targets. Then it
@@ -102,8 +103,8 @@ target repo.
 ## Risks
 
 An index run for each Go module can use much time in a large repo. Use the
-`--include` flag of [plan 02](completed/02-deeper-workspace-discovery-plan.md) to select modules.
+`--include` flag of [plan 02](02-deeper-workspace-discovery-plan.md) to select modules.
 
 ## Dependencies
 
-[Plan 02](completed/02-deeper-workspace-discovery-plan.md) (the member rule for Go).
+[Plan 02](02-deeper-workspace-discovery-plan.md) (the member rule for Go).

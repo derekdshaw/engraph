@@ -264,4 +264,4 @@ real repo before you complete step 11.
 
 ## Dependencies
 
-None. [Plan 03](../03-all-go-modules-plan.md) uses the member rules of this plan.
+None. [Plan 03](03-all-go-modules-plan.md) uses the member rules of this plan.

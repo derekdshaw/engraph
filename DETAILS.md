@@ -1120,10 +1120,10 @@ driver) counts every untracked file — drops subtrees
 nested under another changed one (`outermost_subtrees`), and re-indexes each
 at `<toplevel>/<subtree>` with `index_single`, which re-records that subtree's
 commit. It repeats how the subtree was indexed (`index_state.source`, `lang`,
-`bazel_symbols`, §12.1 v11, and `go_tags`, v15): a `--lang` pin, the
-symbol-level Bazel pass, and the Go build tags are used again (an explicit
-`--bazel-symbols` / `--no-bazel-symbols` or `--go-tags` on the refresh wins),
-and a subtree indexed from prebuilt SCIP (`--scip`,
+`bazel_symbols`, §12.1 v11, `go_tags`, v15, and `go_tests`, v16): a `--lang`
+pin, the symbol-level Bazel pass, the Go build tags, and `--go-tests` are used
+again (an explicit `--bazel-symbols` / `--no-bazel-symbols`, `--go-tags`, or
+`--go-tests` on the refresh wins), and a subtree indexed from prebuilt SCIP (`--scip`,
 `--scip-manifest`) is skipped with a note, since only its producer can rebuild
 it. So is a changed subtree that covers such a prebuilt sub-project: re-indexing
 the parent would rebuild the sub-project with local indexers and record over
@@ -1378,8 +1378,9 @@ but logs a warning if it ever happens.
 | 13 | SCIP local symbols per project and document (§14.3). `entities.scheme`: the SCIP scheme of the indexer that wrote a symbol (the first word of a global id; for a local, the scheme of its document; NULL for Bazel targets), filled for existing global symbols. The old `local <n>` rows, one row for the locals of all documents and projects, are deleted with their edges. Like v12, v13 clears the commit of every driver run, so the next refresh writes the local edges again. |
 | 14 | `relations.line`: the line of the occurrence (call or reference) an edge comes from, NULL for relationship edges, Bazel dependencies, and sources defined in more than one document (a Go package) (§14.4). Clears the commit of every driver run, as v12 does, so the next refresh writes the lines. |
 | 15 | `index_state.go_tags`: the `--go-tags` of the run, so `index --if-changed` gives scip-go the same build tags (§8.0.1). NULL for older rows, which had none; no commit is cleared. |
+| 16 | `index_state.go_tests`: whether the run had `--go-tests`, so `index --if-changed` lets the Bazel Go pass index `_test.go` files again (§8.0.1). Older rows default to 0; no commit is cleared. |
 
-(`SCHEMA_VERSION = 15`; the `MIGRATIONS` array has 15 entries.)
+(`SCHEMA_VERSION = 16`; the `MIGRATIONS` array has 16 entries.)
 
 ---
 
@@ -1553,6 +1554,22 @@ the DB); `ENGRAPH_SCIP_OUTPUT_DIR` overrides the base. Either way a
 indexes of different repos don't clobber each other. The file is read back
 into memory immediately after the indexer exits and never reused — it is
 pure scratch, kept only as a re-index cache.
+
+**One Go build configuration.** scip-go indexes the packages as Go would
+build them on the machine that runs it: one `GOOS`, one `GOARCH`, one set of
+build tags. A file that the build leaves out is not in the code graph, and
+neither are its symbols or the calls into them: `//go:build` lines that the
+configuration does not satisfy, `_<goos>.go` / `_<goarch>.go` suffixes of
+other platforms, and (in the Bazel Go pass without `--go-tests`) `_test.go`
+files. `engraph index --go-tags <a,b>` adds the files behind those tags, and
+`GOOS` / `GOARCH` in the environment of the run select another platform,
+but one run still covers one configuration. Indexing the same module under
+two configurations is not merged: with the default GC, the later run's
+prune removes the symbols that only the earlier configuration saw. The
+same limit applies to every indexer (rust-analyzer, scip-typescript,
+scip-java index one `cfg` / `tsconfig` / build), but Go repos meet it most,
+because many services keep per-platform files. A missing symbol in a
+`_windows.go` file on Linux is this limit, not a loader bug.
 
 scip-java's `index` subcommand auto-detects `{Maven, Gradle, sbt, mill}`
 when invoked standalone (the path covered by `drivers_live.rs`).
@@ -2144,7 +2161,9 @@ flag is still available to opt in on a single-repo run.
   and Bazel-go repos rarely have one at the workspace root.
   `discover_go_modules` walks for every `go.mod` (pruning symlinked /
   `vendor` / `testdata` / hidden trees); each module runs `scip-go index
-  --module-root <rel> --module-version SCIP_GO_VERSION --skip-tests`;
+  --module-root <rel> --module-version SCIP_GO_VERSION --skip-tests`
+  (`--skip-tests` is left out with `--go-tests`, so `_test.go` files are
+  indexed; the standalone driver always indexes them);
   a module run alone gets `GOWORK=off` when the nearest `go.work` above it
   does not list it, as in the driver. A reference into another module of
   the repo that scip-go cannot tie to the run (no `replace`, and the run
@@ -2277,8 +2296,9 @@ workload trips them):
 - **Go gazelle bulk**: `go_library` targets without a `go.mod` are
   unreachable by scip-go; the `IndexedModules` `targets` count makes the
   gap visible. The shipped `ENGRAPH_BAZEL_SCIP_GO_CMD` delegate reaches
-  them per repo; `docs/plans/03-all-go-modules-plan.md` scopes the in-engraph
-  alternative (synthesized go.mod).
+  them per repo; `docs/plans/completed/03-all-go-modules-plan.md` describes
+  the in-engraph alternative (synthesized go.mod) as an optional step that
+  was not done.
 - **scip-typescript + rules_ts node_modules**: cold runs may fail until a
   prior `bazel build //...` populates the package-local `node_modules`
   symlinks; likely delegated like Java.
@@ -2295,6 +2315,6 @@ workload trips them):
 
 The roadmap (`docs/ROADMAP.md`, one plan per item in `docs/plans/`)
 tracks features that aren't built, ranked by expected impact. The codegraph is shipped (target-level §14.8,
-symbol-level §14.9); its open items there are deeper workspace discovery, all Go modules in the code graph, Bazel
+symbol-level §14.9); its open items there are Bazel
 symbols for TypeScript and Python, and stable symbol ids (normalization
 plus a stability suite).

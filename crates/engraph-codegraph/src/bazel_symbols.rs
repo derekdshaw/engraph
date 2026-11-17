@@ -226,7 +226,7 @@ pub fn index_bazel_symbols(
     repo: &Path,
     project: &str,
     prune_stale: bool,
-    go_tags: Option<&str>,
+    go: crate::index::GoOptions,
 ) -> Result<BazelSymbolStats> {
     let start = Instant::now();
     let mut stats = BazelSymbolStats::default();
@@ -240,7 +240,7 @@ pub fn index_bazel_symbols(
         // repo-specific). TS / Python: single-shot standalone indexer at the
         // workspace root.
         let outcome = match spec.language {
-            "go" => run_go(spec, repo, &bazel, &scip_dir, &mut parts, go_tags),
+            "go" => run_go(spec, repo, &bazel, &scip_dir, &mut parts, go),
             "java" => run_java(spec, repo, &bazel, &scip_dir, &mut parts),
             _ => run_language(spec, repo, &bazel, &scip_dir, &mut parts),
         };
@@ -473,7 +473,7 @@ fn run_go(
     bazel: &Path,
     scip_dir: &Path,
     parts: &mut Vec<Vec<u8>>,
-    go_tags: Option<&str>,
+    go: crate::index::GoOptions,
 ) -> Result<LangIndexResult> {
     const CMD_ENV: &str = GO_CMD_ENV;
     let configured = std::env::var(CMD_ENV)
@@ -482,7 +482,7 @@ fn run_go(
     if configured {
         run_delegated(spec, repo, bazel, scip_dir, parts, CMD_ENV, "index-go.scip")
     } else {
-        run_go_modules(spec, repo, bazel, scip_dir, parts, go_tags)
+        run_go_modules(spec, repo, bazel, scip_dir, parts, go)
     }
 }
 
@@ -545,7 +545,7 @@ fn run_go_modules(
     bazel: &Path,
     scip_dir: &Path,
     parts: &mut Vec<Vec<u8>>,
-    go_tags: Option<&str>,
+    go: crate::index::GoOptions,
 ) -> Result<LangIndexResult> {
     let start = Instant::now();
     let skip = |status: LangStatus| LangIndexResult {
@@ -593,11 +593,14 @@ fn run_go_modules(
             .arg("--module-root")
             .arg(module_root)
             .arg("--module-version")
-            .arg(crate::driver::SCIP_GO_VERSION)
-            // Skip test compilation: a module whose test-only deps don't resolve
-            // would otherwise fail wholesale, losing its library symbols too.
-            .arg("--skip-tests")
-            .arg("--output")
+            .arg(crate::driver::SCIP_GO_VERSION);
+        if !go.tests {
+            // Skip test compilation: a module whose test-only deps don't
+            // resolve would otherwise fail wholesale, losing its library
+            // symbols too. `--go-tests` takes that risk for the test symbols.
+            cmd.arg("--skip-tests");
+        }
+        cmd.arg("--output")
             .arg(&out_path)
             .current_dir(repo)
             .stdout(Stdio::piped())
@@ -605,7 +608,7 @@ fn run_go_modules(
         if crate::driver::outside_its_go_work(&repo.join(rel)) {
             cmd.env("GOWORK", "off");
         }
-        crate::driver::apply_go_tags(&mut cmd, go_tags);
+        crate::driver::apply_go_tags(&mut cmd, go.tags);
         tracing::info!(driver = spec.binary, module = %module_root.display(), "running scip-go for module");
         let output = cmd
             .output()
@@ -874,6 +877,7 @@ pub(crate) fn merge_scip_bytes(parts: &[Vec<u8>]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::GoOptions;
     use protobuf::{Message, MessageField};
     use scip::types::{Document, Index, Metadata, SymbolInformation};
 
@@ -1264,7 +1268,15 @@ mod tests {
             )
         };
         let mut parts: Vec<Vec<u8>> = Vec::new();
-        let r = run_go(spec, tmp.path(), &bazel, &scip_dir, &mut parts, None).unwrap();
+        let r = run_go(
+            spec,
+            tmp.path(),
+            &bazel,
+            &scip_dir,
+            &mut parts,
+            GoOptions::default(),
+        )
+        .unwrap();
         unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_GO_CMD") };
         assert_eq!(r.status, LangStatus::Indexed);
         assert_eq!(parts.len(), 1);
@@ -1394,7 +1406,15 @@ mod tests {
             std::fs::create_dir_all(&scip_dir).unwrap();
             let bazel = fake_bazel(tmp.path(), 2);
             let mut parts = Vec::new();
-            let r = run_go_modules(spec, &repo, &bazel, &scip_dir, &mut parts, None).unwrap();
+            let r = run_go_modules(
+                spec,
+                &repo,
+                &bazel,
+                &scip_dir,
+                &mut parts,
+                GoOptions::default(),
+            )
+            .unwrap();
             assert_eq!(
                 r.status,
                 LangStatus::IndexedModules {
@@ -1439,7 +1459,15 @@ mod tests {
         std::fs::create_dir_all(&scip_dir).unwrap();
         let bazel = fake_bazel(tmp.path(), 3);
         let mut parts = Vec::new();
-        run_go_modules(spec, &repo, &bazel, &scip_dir, &mut parts, None).unwrap();
+        run_go_modules(
+            spec,
+            &repo,
+            &bazel,
+            &scip_dir,
+            &mut parts,
+            GoOptions::default(),
+        )
+        .unwrap();
         let (defs, _) = go_symbols(&parts, "`example.com/c`/Lone().");
         assert_eq!(defs.len(), 1, "{defs:?}");
     }
@@ -1465,9 +1493,59 @@ mod tests {
         let bazel = fake_bazel(tmp.path(), 1);
         for (tags, want) in [(None, 0), (Some("integration"), 1)] {
             let mut parts = Vec::new();
-            run_go_modules(spec, &repo, &bazel, &scip_dir, &mut parts, tags).unwrap();
+            run_go_modules(
+                spec,
+                &repo,
+                &bazel,
+                &scip_dir,
+                &mut parts,
+                GoOptions { tags, tests: false },
+            )
+            .unwrap();
             let (defs, _) = go_symbols(&parts, "`example.com/t`/Tagged().");
             assert_eq!(defs.len(), want, "tags={tags:?}");
+        }
+    }
+
+    #[test]
+    fn go_modules_pass_indexes_test_files_only_with_go_tests() {
+        if !indexer_present("scip-go") {
+            eprintln!("skip: scip-go not installed");
+            return;
+        }
+        let spec = LANGS.iter().find(|s| s.language == "go").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("go.mod"), "module example.com/t\n\ngo 1.21\n").unwrap();
+        std::fs::write(
+            repo.join("t.go"),
+            "package t\n\nfunc Plain() int { return 0 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("t_test.go"),
+            "package t\n\nimport \"testing\"\n\nfunc TestPlain(t *testing.T) { Plain() }\n",
+        )
+        .unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 1);
+        for (tests, want) in [(false, 0), (true, 1)] {
+            let mut parts = Vec::new();
+            run_go_modules(
+                spec,
+                &repo,
+                &bazel,
+                &scip_dir,
+                &mut parts,
+                GoOptions { tags: None, tests },
+            )
+            .unwrap();
+            let (defs, _) = go_symbols(&parts, "`example.com/t`/TestPlain().");
+            assert_eq!(defs.len(), want, "tests={tests}");
+            let (plain, _) = go_symbols(&parts, "`example.com/t`/Plain().");
+            assert_eq!(plain.len(), 1, "tests={tests}");
         }
     }
 

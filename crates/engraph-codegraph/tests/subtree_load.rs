@@ -3,7 +3,7 @@
 //! under the subtree that was indexed — so sub-projects of a monorepo merge
 //! into one repo index, and a language indexed by another run survives.
 
-use engraph_codegraph::{IndexScope, index_repo, index_repo_in};
+use engraph_codegraph::{GoOptions, IndexScope, index_repo, index_repo_in};
 use engraph_core::db::{PooledConn, open_pool};
 use protobuf::{EnumOrUnknown, Message, MessageField};
 use scip::types::{
@@ -135,7 +135,7 @@ fn subtree_loads_merge_into_one_project_with_rebased_paths() {
         None,
         sub("svc-a"),
         false,
-        None,
+        GoOptions::default(),
         true,
     )
     .unwrap();
@@ -146,7 +146,7 @@ fn subtree_loads_merge_into_one_project_with_rebased_paths() {
         None,
         sub("svc-b"),
         false,
-        None,
+        GoOptions::default(),
         true,
     )
     .unwrap();
@@ -189,7 +189,7 @@ fn subtree_reindex_prunes_only_its_own_subtree() {
         None,
         sub("svc-a"),
         false,
-        None,
+        GoOptions::default(),
         true,
     )
     .unwrap();
@@ -200,7 +200,7 @@ fn subtree_reindex_prunes_only_its_own_subtree() {
         None,
         sub("svc-b"),
         false,
-        None,
+        GoOptions::default(),
         true,
     )
     .unwrap();
@@ -217,7 +217,7 @@ fn subtree_reindex_prunes_only_its_own_subtree() {
         None,
         sub("svc-a"),
         false,
-        None,
+        GoOptions::default(),
         true,
     )
     .unwrap();
@@ -299,7 +299,7 @@ fn root_and_subtree_runs_over_the_same_code_converge() {
         None,
         sub("svc-a"),
         false,
-        None,
+        GoOptions::default(),
         true,
     )
     .unwrap();

@@ -27,12 +27,6 @@ A failed driver of a multi-manifest repo is in the summary.
 
 Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Parts 1 to 15 and 17 to 19 are complete, and the plan does not have them. The numbers of the other parts do not change.
 
-## 3. All Go modules in the code graph
-
-engraph indexes all Go modules of a repo, with correct relations between the modules. This is also true in Bazel repos.
-
-Plan: [`docs/plans/03-all-go-modules-plan.md`](plans/03-all-go-modules-plan.md). Steps 1 to 10 are complete.
-
 ## 10. Separate code graphs for worktrees
 
 An agent in a worktree sees the base graph together with the changes of that worktree, and not the changes of other worktrees. A merge to the base branch updates the base graph and each overlay.

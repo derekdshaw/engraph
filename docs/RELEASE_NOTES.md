@@ -6,6 +6,7 @@ Last update: 2026-11-16, main at `267b7f5`
 
 ## Features
 
+- **Go tests in the Bazel Go pass.** `engraph index --bazel-symbols --go-tests` lets scip-go index `_test.go` files in the Bazel Go pass, which skips them by default so that a module with unresolved test-only dependencies keeps its library symbols. `--if-changed` repeats the flag (schema v16).
 - **Go build tags.** `engraph index --go-tags <a,b>` gives scip-go build tags, so the files behind `//go:build` lines that need them are in the code graph. It works for the Go driver and the Bazel Go pass, keeps the other flags in your `GOFLAGS`, and `--if-changed` repeats the tags of the recorded run. Schema v15 records them.
 - **Go workspaces.** A directory with a `go.work` file is a Go project, with or without its own `go.mod`. One scip-go run indexes every module that the `go.work` lists, so `engraph index` and `--recursive` do not index them one at a time. A Go module that the `go.work` does not list is still its own project.
 - **Discovery obeys ignore files.** `engraph index --workspace` and `--recursive` skip the directories that `.gitignore` (inside a git repo), `.ignore`, `.git/info/exclude`, or the global git excludes name — the same rules as `git ls-files --exclude-standard`. An ignored directory that is its own git repo is still found, and the parent's rules do not apply inside it. Both modes also skip hidden and build/dependency directories by name.

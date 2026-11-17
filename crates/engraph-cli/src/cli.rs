@@ -162,6 +162,11 @@ pub(crate) enum Cmd {
         /// `--if-changed` repeats the tags of the recorded run.
         #[arg(long, conflicts_with_all = ["scip", "scip_manifest"], value_parser = parse_go_tags)]
         go_tags: Option<String>,
+        /// With --bazel-symbols, let scip-go index `_test.go` files too (the
+        /// Bazel Go pass skips them by default; the Go driver always indexes
+        /// them). `--if-changed` repeats it.
+        #[arg(long, conflicts_with_all = ["scip", "scip_manifest"])]
+        go_tests: bool,
         /// Prune orphan entities before indexing and stale SCIP symbols after
         /// loading, limited to the indexers that ran and the indexed
         /// directory. On by default; use --no-gc to disable.

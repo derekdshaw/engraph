@@ -10,7 +10,7 @@
 //! on any machine.
 
 use engraph_codegraph::{
-    Discovery, DiscoveryFilter, format_markdown, index_workspace, subgraph_for,
+    Discovery, DiscoveryFilter, GoOptions, format_markdown, index_workspace, subgraph_for,
 };
 use engraph_core::db::open_pool;
 use std::process::Command;
@@ -101,7 +101,7 @@ fn workspace_links_app_b_caller_to_lib_a_foo() {
         &conn,
         &root,
         false,
-        None,
+        GoOptions::default(),
         Discovery::Children,
         &DiscoveryFilter::default(),
         false,

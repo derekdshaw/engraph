@@ -73,7 +73,7 @@ Index runs are serialized per project with an OS file lock on `locks/index-<hash
 | `scip-typescript` | `package.json` + `tsconfig.json` | `@sourcegraph/scip-typescript` (npm) |
 | `scip-java` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java` via Coursier (`cs install --contrib scip-java`) |
 
-**Go build tags:** scip-go indexes one build configuration, so a file behind a `//go:build` line that the build does not meet is not in the code graph. `engraph index --go-tags integration,e2e` gives scip-go those tags (through `GOFLAGS`, keeping your other Go flags), and `--if-changed` repeats them. `GOOS` / `GOARCH` in the environment of the run select the platform files the same way.
+**Go build tags and tests:** scip-go indexes one build configuration, so a file behind a `//go:build` line that the build does not meet is not in the code graph. `engraph index --go-tags integration,e2e` gives scip-go those tags (through `GOFLAGS`, keeping your other Go flags), and `--if-changed` repeats them. `GOOS` / `GOARCH` in the environment of the run select the platform files the same way. The Bazel Go pass skips `_test.go` files, so one module with unresolved test-only dependencies does not lose its library symbols; `--go-tests` indexes them too. The standalone Go driver always indexes tests.
 
 `scripts/install-scip-indexers.sh` is an idempotent installer for all five upstream indexers with per-toolchain prerequisite checks.
 

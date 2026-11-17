@@ -109,6 +109,18 @@ pub struct IndexMode {
     pub bazel_symbols: bool,
     /// The `--go-tags` of the run, if it had them.
     pub go_tags: Option<String>,
+    /// Whether the run had `--go-tests`.
+    pub go_tests: bool,
+}
+
+/// What an index run tells scip-go.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GoOptions<'a> {
+    /// `--go-tags`: build tags, comma-separated.
+    pub tags: Option<&'a str>,
+    /// `--go-tests`: the Bazel Go pass indexes `_test.go` files too. The Go
+    /// driver always does.
+    pub tests: bool,
 }
 
 /// Where an index run's SCIP came from.
@@ -165,8 +177,8 @@ pub fn record_indexed_commit(
         // seconds — too coarse for a file created moments after the index.
         conn.execute(
             "INSERT INTO index_state (project, subtree, commit_sha, source, lang, bazel_symbols, \
-             go_tags, indexed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%Y-%m-%d %H:%M:%f','now'))",
+             go_tags, go_tests, indexed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, strftime('%Y-%m-%d %H:%M:%f','now'))",
             rusqlite::params![
                 project,
                 subtree,
@@ -174,7 +186,8 @@ pub fn record_indexed_commit(
                 mode.source.as_str(),
                 mode.lang,
                 mode.bazel_symbols,
-                mode.go_tags
+                mode.go_tags,
+                mode.go_tests
             ],
         )?;
     }
@@ -215,7 +228,8 @@ pub fn index_modes(
     project: &str,
 ) -> Result<std::collections::HashMap<String, IndexMode>> {
     let mut stmt = conn.prepare(
-        "SELECT subtree, source, lang, bazel_symbols, go_tags FROM index_state WHERE project = ?1",
+        "SELECT subtree, source, lang, bazel_symbols, go_tags, go_tests FROM index_state
+         WHERE project = ?1",
     )?;
     let rows = stmt
         .query_map([project], |r| {
@@ -226,6 +240,7 @@ pub fn index_modes(
                     lang: r.get(2)?,
                     bazel_symbols: r.get(3)?,
                     go_tags: r.get(4)?,
+                    go_tests: r.get(5)?,
                 },
             ))
         })?
@@ -265,7 +280,7 @@ pub fn index_repo(
         lang_override,
         scope,
         bazel_symbols,
-        None,
+        GoOptions::default(),
         gc,
     )
 }
@@ -282,7 +297,7 @@ pub fn index_repo_in(
     lang_override: Option<&str>,
     scope: IndexScope,
     bazel_symbols: bool,
-    go_tags: Option<&str>,
+    go: GoOptions,
     gc: bool,
 ) -> Result<IndexStats> {
     let IndexScope { project, subtree } = scope;
@@ -314,7 +329,7 @@ pub fn index_repo_in(
         let mut symbol_langs = Vec::new();
         if bazel_symbols {
             tracing::info!("--bazel-symbols set; running symbol-level pass");
-            let sym = bazel_symbols::index_bazel_symbols(conn, repo, project, gc, go_tags)?;
+            let sym = bazel_symbols::index_bazel_symbols(conn, repo, project, gc, go)?;
             entities += sym.entities_inserted;
             relations += sym.relations_inserted;
             scip_bytes_total += sym.scip_bytes_total;
@@ -364,7 +379,7 @@ pub fn index_repo_in(
     // Explicit --lang override: pin to one driver, single SCIP load.
     if let Some(name) = lang_override {
         let drv = driver::by_name(name).ok_or_else(|| anyhow::anyhow!("unknown driver: {name}"))?;
-        let bytes = run_driver_to_scip(repo, &*drv, go_tags)?;
+        let bytes = run_driver_to_scip(repo, &*drv, go.tags)?;
         let load_stats = scip_loader::load_with_options(
             conn,
             project,
@@ -402,7 +417,7 @@ pub fn index_repo_in(
     let mut total_scip_bytes = 0usize;
     let mut succeeded_names: Vec<&'static str> = Vec::with_capacity(matching.len());
     for drv in &matching {
-        match run_driver_to_scip(repo, &**drv, go_tags) {
+        match run_driver_to_scip(repo, &**drv, go.tags) {
             Ok(bytes) => {
                 total_scip_bytes += bytes.len();
                 all_bytes.push(bytes);
@@ -1198,7 +1213,7 @@ pub fn index_workspace(
     conn: &PooledConn,
     workspace_root: &Path,
     bazel_symbols: bool,
-    go_tags: Option<&str>,
+    go: GoOptions,
     discovery: Discovery,
     filter: &DiscoveryFilter,
     gc: bool,
@@ -1256,7 +1271,7 @@ pub fn index_workspace(
             subtree: &subtree,
         };
         let outcome = match &locks[&project] {
-            Ok(_) => index_repo_in(conn, &repo, None, None, scope, bazel_symbols, go_tags, gc),
+            Ok(_) => index_repo_in(conn, &repo, None, None, scope, bazel_symbols, go, gc),
             Err(e) => Err(anyhow::anyhow!("{e}")),
         };
         stats.repos.push(WorkspaceRepoResult {
@@ -2104,6 +2119,7 @@ mod tests {
             lang: Some("scip-go".into()),
             bazel_symbols: true,
             go_tags: Some("integration,e2e".into()),
+            go_tests: true,
         };
         let prebuilt = IndexMode {
             source: IndexSource::Manifest,
