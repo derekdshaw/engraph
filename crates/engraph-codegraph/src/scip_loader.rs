@@ -203,7 +203,7 @@ pub fn load_with_options(
                 .or_insert_with(|| enum_or_unspecified(&s.kind));
         }
     }
-    let multi_document = defined_in_several_documents(&index);
+    let multi_document = MultiDocument::of(&index);
     let schemes = LoadSchemes::of(&index, &current_symbols);
 
     // One transaction for the whole load: atomic swap from the reader's POV.
@@ -329,7 +329,7 @@ fn load_document(
     project: &str,
     doc: &Document,
     sym_kind: &HashMap<String, SymKind>,
-    multi_document: &HashSet<String>,
+    multi_document: &MultiDocument,
     schemes: &LoadSchemes,
     stats: &mut LoadStats,
 ) -> Result<()> {
@@ -389,12 +389,20 @@ fn load_document(
         } else {
             names.name
         };
-        let (file_path, line_range) = match def_loc.get(&s.symbol) {
-            Some((start, end)) => (
-                Some(doc.relative_path.clone()),
+        let (file_path, line_range) = match multi_document.location(&s.symbol) {
+            // A multi-document symbol gets its one canonical location,
+            // whichever of its documents this is.
+            Some((path, (start, end))) => (
+                Some(path.clone()),
                 Some(format!("{}:{}", start + 1, end + 1)),
             ),
-            None => (Some(doc.relative_path.clone()), None),
+            None => match def_loc.get(&s.symbol) {
+                Some((start, end)) => (
+                    Some(doc.relative_path.clone()),
+                    Some(format!("{}:{}", start + 1, end + 1)),
+                ),
+                None => (Some(doc.relative_path.clone()), None),
+            },
         };
         let signature = signature_text(s);
         entity_insert.execute(rusqlite::params![
@@ -540,22 +548,58 @@ fn load_document(
     Ok(())
 }
 
-/// Symbols with a definition in more than one document (a Go package, which
-/// each of its files defines).
-fn defined_in_several_documents(index: &Index) -> HashSet<String> {
-    let mut first_doc: HashMap<&str, usize> = HashMap::new();
-    let mut several = HashSet::new();
-    for (i, doc) in index.documents.iter().enumerate() {
-        for occ in &doc.occurrences {
-            if occ.symbol.is_empty() || !role_set(occ.symbol_roles, SymbolRole::Definition) {
-                continue;
-            }
-            if *first_doc.entry(occ.symbol.as_str()).or_insert(i) != i {
-                several.insert(occ.symbol.clone());
+/// The symbols with a definition in more than one document (a Go package,
+/// which each of its files defines), each with one canonical location: the
+/// lexicographically smallest defining document path, and the smallest
+/// definition range there. The entity row gets this location, and a relation
+/// from such a source gets no line — otherwise both would follow the order of
+/// the documents in the SCIP blob, which is the indexer's to change, so the
+/// same repo could index differently on two machines.
+struct MultiDocument {
+    location: HashMap<String, (String, (i32, i32))>,
+}
+
+impl MultiDocument {
+    fn of(index: &Index) -> Self {
+        let mut first_doc: HashMap<&str, usize> = HashMap::new();
+        let mut several: HashSet<&str> = HashSet::new();
+        for (i, doc) in index.documents.iter().enumerate() {
+            for occ in &doc.occurrences {
+                if occ.symbol.is_empty() || !role_set(occ.symbol_roles, SymbolRole::Definition) {
+                    continue;
+                }
+                if *first_doc.entry(occ.symbol.as_str()).or_insert(i) != i {
+                    several.insert(occ.symbol.as_str());
+                }
             }
         }
+        let mut location: HashMap<String, (String, (i32, i32))> = HashMap::new();
+        for doc in &index.documents {
+            for occ in &doc.occurrences {
+                if !several.contains(occ.symbol.as_str())
+                    || !role_set(occ.symbol_roles, SymbolRole::Definition)
+                {
+                    continue;
+                }
+                let candidate = (doc.relative_path.clone(), decode_range(&occ.range));
+                match location.get_mut(&occ.symbol) {
+                    Some(best) => *best = std::cmp::min(std::mem::take(best), candidate),
+                    None => {
+                        location.insert(occ.symbol.clone(), candidate);
+                    }
+                }
+            }
+        }
+        Self { location }
     }
-    several
+
+    fn contains(&self, symbol: &str) -> bool {
+        self.location.contains_key(symbol)
+    }
+
+    fn location(&self, symbol: &str) -> Option<&(String, (i32, i32))> {
+        self.location.get(symbol)
+    }
 }
 
 fn nearest_enclosing(

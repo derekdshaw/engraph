@@ -953,6 +953,46 @@ fn an_anchor_defined_in_several_documents_records_no_line() {
     assert_eq!(lines, vec![None, None]);
 }
 
+#[test]
+fn a_symbol_defined_in_several_documents_gets_one_location() {
+    // Whatever order the indexer wrote the documents in, the entity row of a
+    // multi-document symbol (a Go package) records the lexicographically
+    // smallest defining document and the definition range there. Without one
+    // rule, the last document in the SCIP blob would win, and that order is
+    // the indexer's to change.
+    let pkg = "scip-go gomod demo v1 `demo`/";
+    let doc = |path: &str| {
+        let def_line = if path == "a.go" { 2 } else { 0 };
+        let mut d = Document::new();
+        d.relative_path = path.to_string();
+        d.symbols = vec![sym(pkg, "demo", SymKind::Package)];
+        d.occurrences = vec![occ(
+            pkg,
+            vec![def_line, 8, def_line, 12],
+            SymbolRole::Definition as i32,
+        )];
+        d
+    };
+    for order in [["a.go", "b.go"], ["b.go", "a.go"]] {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        load(&conn, "/proj/demo", &index_of(order.map(doc).into())).unwrap();
+        let (path, lines): (String, String) = conn
+            .query_row(
+                "SELECT file_path, line_range FROM entities WHERE id = ?1",
+                [pkg],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (path.as_str(), lines.as_str()),
+            ("a.go", "3:3"),
+            "document order {order:?}"
+        );
+    }
+}
+
 // A definition's `enclosing_range` is the whole function or class. The
 // document models (0-based lines):
 //
