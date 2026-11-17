@@ -8,8 +8,10 @@ helpers both use. Each defines 50+ symbols (functions, types, methods).
 The symbol ids these repos produce are recorded in `../snapshots/<lang>.json`
 (`tests/common/snapshot.rs` gives the format): every defined non-local symbol
 with its name, file path, line range, callers and callees, plus the indexer
-version. Any rename or move here changes the recorded ids on purpose, so edit
-these fixtures only together with their snapshots:
+version. `../scip/<lang>.scip` keeps each fixture's prebuilt SCIP blob
+(machine paths normalized away) for the loader-only test. Any rename or move
+here changes the recorded ids on purpose, so edit these fixtures only together
+with their snapshots and blobs:
 
 ```
 ENGRAPH_UPDATE_SNAPSHOTS=1 cargo test -p engraph-codegraph --test symbol_snapshots

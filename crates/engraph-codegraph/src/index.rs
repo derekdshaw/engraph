@@ -579,7 +579,7 @@ fn parse_manifest_line(
 /// `~/.local/share/engraph/scip/` (alongside the DB); `ENGRAPH_SCIP_OUTPUT_DIR`
 /// overrides the base. Either way a per-repo `<hash>` subdir is appended so
 /// concurrent indexes of different repos don't clobber each other's file.
-fn scip_output_dir(repo: &Path) -> PathBuf {
+pub fn scip_output_dir(repo: &Path) -> PathBuf {
     let base = std::env::var("ENGRAPH_SCIP_OUTPUT_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {

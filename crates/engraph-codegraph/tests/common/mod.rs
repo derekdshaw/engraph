@@ -52,6 +52,11 @@ impl Fixture {
             .join(format!("{}.json", self.lang))
     }
 
+    /// The prebuilt SCIP file of the fixture (plan 05, part 1, step 15).
+    pub fn scip_path(&self) -> PathBuf {
+        testdata().join("scip").join(format!("{}.scip", self.lang))
+    }
+
     /// The project key the fixture is indexed under in a test database.
     pub fn project(&self) -> String {
         format!("/fixtures/{}", self.lang)
@@ -110,6 +115,22 @@ pub fn binary_present(bin: &str) -> bool {
 /// SemanticDB, so without one an index run fails on an otherwise fine repo.
 pub fn java_build_tool() -> Option<&'static str> {
     ["mvn", "gradle"].into_iter().find(|t| binary_present(t))
+}
+
+/// The SCIP blob of an index run with the machine's paths removed, fit to
+/// keep in the repo: `metadata.project_root` (the `file://` URI of the
+/// indexed tree, a temp path in an update run) becomes a fixed URI, and
+/// `metadata.tool_info.arguments` (the indexer's argv, which carries the repo
+/// and output paths) is cleared. Everything else — documents, symbols,
+/// occurrences — holds only repo-relative paths, so the result is the same on
+/// every machine; the indexer's name and version stay.
+pub fn normalized_scip(bytes: &[u8]) -> Vec<u8> {
+    use protobuf::Message;
+    let mut index = scip::types::Index::parse_from_bytes(bytes).unwrap();
+    let metadata = index.metadata.mut_or_insert_default();
+    metadata.project_root = "file:///fixture".into();
+    metadata.tool_info.mut_or_insert_default().arguments = Vec::new();
+    index.write_to_bytes().unwrap()
 }
 
 /// Whether the Go toolchain is on PATH. `go` rejects `--version` (it prints

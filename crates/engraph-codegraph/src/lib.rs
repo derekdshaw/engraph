@@ -21,7 +21,8 @@ pub use index::{
     IndexScope, IndexSource, IndexStats, RECURSIVE_MAX_DEPTH, SymbolLangSummary, WorkspacePlan,
     WorkspaceRepoResult, WorkspaceStats, discover_workspace_repos, index_modes, index_repo,
     index_repo_in, index_scip_manifest, index_workspace, indexed_at_by_subtree, indexed_commits,
-    plan_repo, plan_workspace, record_indexed_commit, source_extensions, workspace_rel,
+    plan_repo, plan_workspace, record_indexed_commit, scip_output_dir, source_extensions,
+    workspace_rel,
 };
 pub use lock::{
     Acquire, IndexLock, acquire as acquire_index_lock, acquire_wait as acquire_index_lock_wait,

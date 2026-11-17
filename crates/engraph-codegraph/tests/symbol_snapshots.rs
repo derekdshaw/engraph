@@ -4,15 +4,16 @@
 //! The live test indexes each fixture whose indexer is installed and compares
 //! the result with `testdata/snapshots/<lang>.json`; a missing indexer skips
 //! that fixture, as in `drivers_live.rs`. With `ENGRAPH_UPDATE_SNAPSHOTS=1`
-//! it writes the snapshot files instead. Examine the diff before you commit a
+//! it writes the snapshot files and the prebuilt `testdata/scip/<lang>.scip`
+//! blobs (machine paths normalized away) instead. Examine the diff before you commit a
 //! new snapshot: a changed id can be a correct change of the indexer, or a
 //! regression in the loader.
 
 mod common;
 
 use common::snapshot::{Snapshot, SymbolRecord};
-use common::{FIXTURES, db_for_test, indexer_version, isolate_scip_output};
-use engraph_codegraph::index_repo;
+use common::{FIXTURES, db_for_test, indexer_version, isolate_scip_output, normalized_scip};
+use engraph_codegraph::{index_repo, scip_output_dir};
 use tempfile::tempdir;
 
 /// A fixture defines at least this many symbols (plan 05, part 1, step 3).
@@ -150,6 +151,43 @@ fn snapshot_diff_lists_changed_versions_and_symbols() {
 }
 
 #[test]
+fn normalized_scip_keeps_only_machine_free_metadata() {
+    use protobuf::Message;
+    let index_at = |root: &str, args: &[&str]| {
+        let mut index = scip::types::Index::new();
+        let metadata = index.metadata.mut_or_insert_default();
+        metadata.project_root = root.into();
+        let tool = metadata.tool_info.mut_or_insert_default();
+        tool.name = "scip-test".into();
+        tool.version = "1.2.3".into();
+        tool.arguments = args.iter().map(|a| a.to_string()).collect();
+        let mut doc = scip::types::Document::new();
+        doc.relative_path = "src/lib.rs".into();
+        index.documents.push(doc);
+        index.write_to_bytes().unwrap()
+    };
+    let normalized = normalized_scip(&index_at(
+        "file:///tmp/one/repo",
+        &["--cwd", "/tmp/one/repo"],
+    ));
+    let index = scip::types::Index::parse_from_bytes(&normalized).unwrap();
+    assert_eq!(index.metadata.project_root, "file:///fixture");
+    assert!(index.metadata.tool_info.arguments.is_empty());
+    assert_eq!(index.metadata.tool_info.name, "scip-test");
+    assert_eq!(index.metadata.tool_info.version, "1.2.3");
+    assert_eq!(index.documents[0].relative_path, "src/lib.rs");
+    // Two runs of the same fixture from different directories give the same
+    // bytes, so a regeneration does not churn the committed file.
+    assert_eq!(
+        normalized,
+        normalized_scip(&index_at(
+            "file:///tmp/two/repo",
+            &["--cwd", "/tmp/two/repo"]
+        ))
+    );
+}
+
+#[test]
 fn snapshot_diff_marks_an_order_only_change() {
     // The same ids in a different order: the record differs, but no id went
     // or came, so the set-style caller lines would say nothing at all.
@@ -212,11 +250,16 @@ fn fixture_ids_match_the_snapshots() {
         );
         if update {
             snap.write(&fixture.snapshot_path());
+            let blob = std::fs::read(scip_output_dir(&repo).join("index.scip"))
+                .expect("the index run leaves index.scip in scip_output_dir");
+            std::fs::create_dir_all(fixture.scip_path().parent().unwrap()).unwrap();
+            std::fs::write(fixture.scip_path(), normalized_scip(&blob)).unwrap();
             eprintln!(
-                "wrote {} ({} symbols, {} {version})",
+                "wrote {} ({} symbols, {} {version}) and {}",
                 fixture.snapshot_path().display(),
                 snap.symbols.len(),
-                fixture.indexer
+                fixture.indexer,
+                fixture.scip_path().display()
             );
         } else {
             let want = Snapshot::read(&fixture.snapshot_path());
