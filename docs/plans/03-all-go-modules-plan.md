@@ -22,8 +22,8 @@ modules. This is also true in Bazel repos.
   gets `GOWORK=off`, because Go builds nothing in it.
 - A relation from a function in one Go module to a function in a different Go
   module points to the definition. This is true for the native Go pass, with
-  or without a `go.work`, and for the Bazel Go pass. The Bazel Go pass indexes
-  the modules of a root `go.work` in one scip-go run.
+  or without a `go.work`, and for the Bazel Go pass. The version in each Go
+  symbol id is `0.0.0`.
 - A vendored copy of a module does not cause a second symbol. Discovery skips
   `vendor` directories, and scip-go does not write documents for vendored
   packages.
@@ -51,10 +51,13 @@ step 5 does not.
 
 Step 7 found two bugs:
 
-- In the Bazel Go pass, each module of a `go.work` had its own scip-go run.
-  scip-go then gave a reference to a different listed module the version
-  `.`, but the definition had the version `0.0.0`. Thus the relation pointed
-  to a placeholder. The modules of a root `go.work` now have one run.
+- When scip-go cannot tie a module to the indexed module, it gives a
+  reference to that module the version `.`. This occurs for a `go.work`
+  member that is indexed alone, and for each module of the Bazel Go pass.
+  The definition had a different version, thus the relation pointed to a
+  placeholder. The loader now changes the version `.` to `0.0.0`, and the Go
+  driver gives `--module-version 0.0.0` to scip-go. This is also step 1 of
+  part 2 of [plan 05](05-stable-symbol-ids-plan.md).
 - A module below a `go.work` that does not list it got no symbols, in the Go
   driver and in the Bazel Go pass. Its run now sets `GOWORK=off`.
 
@@ -80,8 +83,9 @@ target repo.
 - `engraph index` of a `go.work` directory without a `go.mod` indexes each
   module that the `go.work` lists.
 - A relation from module A to module B points to the correct symbol: with
-  a `go.work`, with a `replace` and `--recursive`, and in the Bazel Go pass
-  with and without a `go.work`.
+  a `go.work`, with a `replace` and `--recursive`, for a `go.work` member
+  that is indexed alone, and in the Bazel Go pass with and without a
+  `go.work`.
 - A module below a `go.work` that does not list it gets its symbols.
 - A vendored copy of a module does not add a second symbol.
 - In the Bazel Go pass with `--go-tests`, a function in a `_test.go` file is in
@@ -91,12 +95,6 @@ target repo.
 
 An index run for each Go module can use much time in a large repo. Use the
 `--include` flag of [plan 02](completed/02-deeper-workspace-discovery-plan.md) to select modules.
-
-In the native Go pass, the version in a Go symbol id is the git commit. When
-`--if-changed` indexes module A again after a commit, but not module B, the
-relation from A to B points to a placeholder. Step 1 of part 2 of
-[plan 05](05-stable-symbol-ids-plan.md) (stable Go symbol ids) removes this
-problem.
 
 ## Dependencies
 

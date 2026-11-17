@@ -22,8 +22,7 @@
 //!   targets that have no `go.mod`). Unset → the native multi-module pass:
 //!   enumerate every `go.mod` (`discover_go_modules`, skipping symlinked /
 //!   `vendor` / `testdata` / hidden trees), run `scip-go index --module-root
-//!   <dir>` per module (the modules a root `go.work` lists in one run, with
-//!   a pattern each), and rebase each module's document paths back to
+//!   <dir>` per module, and rebase each module's document paths back to
 //!   repo-root before merging. The native pass can't see `go_library` targets
 //!   without a `go.mod`; that gap is reported via the `go targets` count.
 //! - **TypeScript**: `scip-typescript index` at the workspace root.
@@ -574,32 +573,10 @@ fn run_go_modules(
         }));
     }
 
-    // Each job is a module root, its package patterns (none: scip-go's
-    // default `./...`), and the number of modules it covers. Run one at a
-    // time, the modules of a go.work resolve each other through it, and
-    // scip-go then gives a reference into another listed module the version
-    // `.`, not the pinned version of its definition, so the relation misses.
-    // One run with a pattern per listed module pins both sides.
-    let listed = go_work_listed(repo, &modules);
-    let mut jobs: Vec<(PathBuf, Vec<String>, usize)> = Vec::new();
-    if !listed.is_empty() {
-        let patterns = listed
-            .iter()
-            .map(|m| crate::driver::go_work_pattern(&crate::index::workspace_rel(Path::new(""), m)))
-            .collect();
-        jobs.push((PathBuf::new(), patterns, listed.len()));
-    }
-    jobs.extend(
-        modules
-            .iter()
-            .filter(|m| !listed.contains(m))
-            .map(|m| (m.clone(), Vec::new(), 1)),
-    );
-
     let mut indexed = 0usize;
     let mut failed = 0usize;
     let mut scip_bytes = 0usize;
-    for (n, (rel, patterns, covers)) in jobs.iter().enumerate() {
+    for (n, rel) in modules.iter().enumerate() {
         let module_root = if rel.as_os_str().is_empty() {
             Path::new(".")
         } else {
@@ -619,19 +596,18 @@ fn run_go_modules(
             .arg("--skip-tests")
             .arg("--output")
             .arg(&out_path)
-            .args(patterns)
             .current_dir(repo)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if patterns.is_empty() && crate::driver::outside_its_go_work(&repo.join(rel)) {
+        if crate::driver::outside_its_go_work(&repo.join(rel)) {
             cmd.env("GOWORK", "off");
         }
-        tracing::info!(driver = spec.binary, module = %module_root.display(), ?patterns, "running scip-go for module");
+        tracing::info!(driver = spec.binary, module = %module_root.display(), "running scip-go for module");
         let output = cmd
             .output()
             .with_context(|| format!("spawning {} for {}", spec.binary, module_root.display()))?;
         if !output.status.success() {
-            failed += covers;
+            failed += 1;
             tracing::warn!(
                 module = %module_root.display(),
                 "scip-go failed (isolated): {}",
@@ -642,7 +618,7 @@ fn run_go_modules(
         let bytes = match std::fs::read(&out_path) {
             Ok(b) => b,
             Err(e) => {
-                failed += covers;
+                failed += 1;
                 tracing::warn!(module = %module_root.display(), "scip-go succeeded but its SCIP output was unreadable: {e}");
                 continue;
             }
@@ -650,14 +626,14 @@ fn run_go_modules(
         let rebased = match rebase_documents(&bytes, rel) {
             Ok(b) => b,
             Err(e) => {
-                failed += covers;
+                failed += 1;
                 tracing::warn!(module = %module_root.display(), "rebasing SCIP paths failed (isolated): {e:#}");
                 continue;
             }
         };
         scip_bytes += rebased.len();
         parts.push(rebased);
-        indexed += covers;
+        indexed += 1;
     }
 
     Ok(LangIndexResult {
@@ -670,20 +646,6 @@ fn run_go_modules(
             targets,
         },
     })
-}
-
-/// The discovered `modules` that the `go.work` at the root of `repo` lists.
-fn go_work_listed<'a>(repo: &Path, modules: &'a [PathBuf]) -> Vec<&'a PathBuf> {
-    let Some(uses) = crate::driver::go_work_uses(repo) else {
-        return Vec::new();
-    };
-    modules
-        .iter()
-        .filter(|m| {
-            let rel = crate::index::workspace_rel(Path::new(""), m);
-            uses.iter().any(|u| crate::driver::go_work_rel(u) == rel)
-        })
-        .collect()
 }
 
 /// Enumerate every Go module (directory containing `go.mod`) under `repo`, as
@@ -1396,7 +1358,9 @@ mod tests {
         use protobuf::Message;
         let (mut defs, mut refs) = (Vec::new(), Vec::new());
         for part in parts {
-            let idx = scip::types::Index::parse_from_bytes(part).unwrap();
+            // As the loader reads it.
+            let mut idx = scip::types::Index::parse_from_bytes(part).unwrap();
+            crate::scip_loader::pin_go_module_versions(&mut idx);
             for occ in idx.documents.iter().flat_map(|d| &d.occurrences) {
                 if !occ.symbol.ends_with(suffix) {
                     continue;

@@ -326,3 +326,28 @@ fn a_module_its_go_work_does_not_list_still_gets_its_symbols() {
         [Some("b/b.go".into())]
     );
 }
+
+#[test]
+fn a_go_work_member_indexed_alone_points_at_its_sibling() {
+    if !go_tools_present() {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("e.db");
+    let repo = caller_and_helper(dir.path(), true, false);
+    // Only the go.work ties `a` to `b`: scip-go, run in `a` alone, gives
+    // `b`'s symbols the version `.`.
+    write(
+        &repo,
+        "a/go.mod",
+        "module example.com/a\n\ngo 1.21\n\nrequire example.com/b v0.0.0\n",
+    );
+    git(&repo, &["commit", "-q", "-am", "no replace"]);
+    index_ok(&db, dir.path(), &["index", repo.to_str().unwrap()]);
+    index_ok(&db, &repo, &["index", "a"]);
+    assert_eq!(entity_count(&db, "Helper"), 1);
+    assert_eq!(
+        relation_targets(&db, "Caller", "Helper"),
+        [Some("b/b.go".into())]
+    );
+}

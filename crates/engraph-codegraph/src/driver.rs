@@ -109,11 +109,13 @@ impl Driver for ScipPython {
     }
 }
 
-/// Fixed `--module-version` passed to scip-go by the Bazel multi-module symbol
-/// pass (`bazel_symbols::run_go_modules`). scip-go defaults this to the git
-/// short hash of the cwd repo, which embeds into every moniker — so without a
-/// pin, Go entity IDs churn on each commit. Same rationale as
-/// `SCIP_PYTHON_VERSION`. NOT applied to the standalone `ScipGo` driver below.
+/// Fixed `--module-version` passed to scip-go by the `ScipGo` driver and the
+/// Bazel multi-module symbol pass (`bazel_symbols::run_go_modules`). scip-go
+/// defaults this to the git short hash of the cwd repo, which embeds into
+/// every moniker — so without a pin, Go entity IDs churn on each commit. Same
+/// rationale as `SCIP_PYTHON_VERSION`. The loader gives the same version to
+/// the ids scip-go writes with the version `.`
+/// (`scip_loader::pin_go_module_versions`).
 pub(crate) const SCIP_GO_VERSION: &str = "0.0.0";
 
 pub struct ScipGo;
@@ -134,6 +136,8 @@ impl Driver for ScipGo {
         let mut c = Command::new("scip-go");
         c.arg("--module-root")
             .arg(repo)
+            .arg("--module-version")
+            .arg(SCIP_GO_VERSION)
             .arg("--output")
             .arg(out)
             .current_dir(repo);
@@ -226,7 +230,7 @@ pub(crate) fn go_work_rel(path: &str) -> &str {
 }
 
 /// The scip-go package pattern for every package of a `use` directory.
-pub(crate) fn go_work_pattern(path: &str) -> String {
+fn go_work_pattern(path: &str) -> String {
     match go_work_rel(path) {
         "." => "./...".to_string(),
         abs if Path::new(abs).is_absolute() => format!("{abs}/..."),
@@ -474,7 +478,14 @@ mod tests {
                 .collect()
         };
         let root = dir.path().to_string_lossy().into_owned();
-        let base = ["--module-root", &root, "--output", "/tmp/out/index.scip"];
+        let base = [
+            "--module-root",
+            &root,
+            "--module-version",
+            SCIP_GO_VERSION,
+            "--output",
+            "/tmp/out/index.scip",
+        ];
         // A plain module: scip-go's default `./...` covers it.
         std::fs::write(dir.path().join("go.mod"), "module x\n").unwrap();
         assert_eq!(args(dir.path()), base);
