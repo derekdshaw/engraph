@@ -226,6 +226,7 @@ pub fn index_bazel_symbols(
     repo: &Path,
     project: &str,
     prune_stale: bool,
+    go: crate::index::GoOptions,
 ) -> Result<BazelSymbolStats> {
     let start = Instant::now();
     let mut stats = BazelSymbolStats::default();
@@ -239,7 +240,7 @@ pub fn index_bazel_symbols(
         // repo-specific). TS / Python: single-shot standalone indexer at the
         // workspace root.
         let outcome = match spec.language {
-            "go" => run_go(spec, repo, &bazel, &scip_dir, &mut parts),
+            "go" => run_go(spec, repo, &bazel, &scip_dir, &mut parts, go),
             "java" => run_java(spec, repo, &bazel, &scip_dir, &mut parts),
             _ => run_language(spec, repo, &bazel, &scip_dir, &mut parts),
         };
@@ -472,6 +473,7 @@ fn run_go(
     bazel: &Path,
     scip_dir: &Path,
     parts: &mut Vec<Vec<u8>>,
+    go: crate::index::GoOptions,
 ) -> Result<LangIndexResult> {
     const CMD_ENV: &str = GO_CMD_ENV;
     let configured = std::env::var(CMD_ENV)
@@ -480,7 +482,7 @@ fn run_go(
     if configured {
         run_delegated(spec, repo, bazel, scip_dir, parts, CMD_ENV, "index-go.scip")
     } else {
-        run_go_modules(spec, repo, bazel, scip_dir, parts)
+        run_go_modules(spec, repo, bazel, scip_dir, parts, go)
     }
 }
 
@@ -543,6 +545,7 @@ fn run_go_modules(
     bazel: &Path,
     scip_dir: &Path,
     parts: &mut Vec<Vec<u8>>,
+    go: crate::index::GoOptions,
 ) -> Result<LangIndexResult> {
     let start = Instant::now();
     let skip = |status: LangStatus| LangIndexResult {
@@ -585,20 +588,15 @@ fn run_go_modules(
         let out_path = scip_dir.join(format!("index-go-{n}.scip"));
         let _ = std::fs::remove_file(&out_path); // ignore-if-absent
 
-        let mut cmd = Command::new(spec.binary);
-        cmd.arg("index")
-            .arg("--module-root")
-            .arg(module_root)
-            .arg("--module-version")
-            .arg(crate::driver::SCIP_GO_VERSION)
-            // Skip test compilation: a module whose test-only deps don't resolve
-            // would otherwise fail wholesale, losing its library symbols too.
-            .arg("--skip-tests")
-            .arg("--output")
-            .arg(&out_path)
-            .current_dir(repo)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let mut cmd = crate::driver::scip_go_command(repo, module_root, &out_path);
+        if !go.tests {
+            // Skip test compilation: a module whose test-only deps don't
+            // resolve would otherwise fail wholesale, losing its library
+            // symbols too. `--go-tests` takes that risk for the test symbols.
+            cmd.arg("--skip-tests");
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        crate::driver::apply_go_tags(&mut cmd, go.tags);
         tracing::info!(driver = spec.binary, module = %module_root.display(), "running scip-go for module");
         let output = cmd
             .output()
@@ -867,6 +865,7 @@ pub(crate) fn merge_scip_bytes(parts: &[Vec<u8>]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::GoOptions;
     use protobuf::{Message, MessageField};
     use scip::types::{Document, Index, Metadata, SymbolInformation};
 
@@ -1257,7 +1256,15 @@ mod tests {
             )
         };
         let mut parts: Vec<Vec<u8>> = Vec::new();
-        let r = run_go(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
+        let r = run_go(
+            spec,
+            tmp.path(),
+            &bazel,
+            &scip_dir,
+            &mut parts,
+            GoOptions::default(),
+        )
+        .unwrap();
         unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_GO_CMD") };
         assert_eq!(r.status, LangStatus::Indexed);
         assert_eq!(parts.len(), 1);
@@ -1323,6 +1330,211 @@ mod tests {
         let out = format!("{s}");
         assert!(out.contains("2 go.mod modules"), "{out}");
         assert!(out.contains("1 failed"), "{out}");
+    }
+
+    /// Module `a` (`Caller`) calls `Helper` of module `b` at `root`; a
+    /// `replace` resolves `b` without a go.work. `go_work` adds a root
+    /// `go.work` that lists both.
+    fn go_caller_and_helper(root: &Path, go_work: bool) {
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write("b/go.mod", "module example.com/b\n\ngo 1.21\n");
+        write("b/b.go", "package b\n\nfunc Helper() int { return 2 }\n");
+        write(
+            "a/go.mod",
+            "module example.com/a\n\ngo 1.21\n\nrequire example.com/b v0.0.0\n\nreplace example.com/b => ../b\n",
+        );
+        write(
+            "a/a.go",
+            "package a\n\nimport \"example.com/b\"\n\nfunc Caller() int { return b.Helper() }\n",
+        );
+        if go_work {
+            write("go.work", "go 1.21\n\nuse (\n\t./a\n\t./b\n)\n");
+        }
+    }
+
+    /// The definition and the reference symbols in `parts` that end with
+    /// `suffix`.
+    fn go_symbols(parts: &[Vec<u8>], suffix: &str) -> (Vec<String>, Vec<String>) {
+        use protobuf::Message;
+        let (mut defs, mut refs) = (Vec::new(), Vec::new());
+        for part in parts {
+            // As the loader reads it.
+            let mut idx = scip::types::Index::parse_from_bytes(part).unwrap();
+            crate::scip_loader::pin_go_module_versions(&mut idx);
+            for occ in idx.documents.iter().flat_map(|d| &d.occurrences) {
+                if !occ.symbol.ends_with(suffix) {
+                    continue;
+                }
+                if occ.symbol_roles & scip::types::SymbolRole::Definition as i32 != 0 {
+                    defs.push(occ.symbol.clone());
+                } else {
+                    refs.push(occ.symbol.clone());
+                }
+            }
+        }
+        (defs, refs)
+    }
+
+    #[test]
+    fn go_modules_pass_links_a_call_into_another_module() {
+        if !indexer_present("scip-go") {
+            eprintln!("skip: scip-go not installed");
+            return;
+        }
+        let spec = LANGS.iter().find(|s| s.language == "go").unwrap();
+        for go_work in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let repo = tmp.path().join("repo");
+            go_caller_and_helper(&repo, go_work);
+            let scip_dir = tmp.path().join("out");
+            std::fs::create_dir_all(&scip_dir).unwrap();
+            let bazel = fake_bazel(tmp.path(), 2);
+            let mut parts = Vec::new();
+            let r = run_go_modules(
+                spec,
+                &repo,
+                &bazel,
+                &scip_dir,
+                &mut parts,
+                GoOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                r.status,
+                LangStatus::IndexedModules {
+                    indexed: 2,
+                    failed: 0,
+                    targets: 2
+                },
+                "go_work={go_work}"
+            );
+            let (defs, refs) = go_symbols(&parts, "`example.com/b`/Helper().");
+            assert_eq!(defs.len(), 1, "go_work={go_work}: {defs:?}");
+            assert!(
+                !refs.is_empty(),
+                "go_work={go_work}: no reference to Helper"
+            );
+            assert!(
+                refs.iter().all(|r| *r == defs[0]),
+                "go_work={go_work}: a reference misses the definition {}: {refs:?}",
+                defs[0]
+            );
+        }
+    }
+
+    #[test]
+    fn go_modules_pass_indexes_a_module_its_go_work_does_not_list() {
+        if !indexer_present("scip-go") {
+            eprintln!("skip: scip-go not installed");
+            return;
+        }
+        let spec = LANGS.iter().find(|s| s.language == "go").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        go_caller_and_helper(&repo, true);
+        std::fs::create_dir_all(repo.join("c")).unwrap();
+        std::fs::write(repo.join("c/go.mod"), "module example.com/c\n\ngo 1.21\n").unwrap();
+        std::fs::write(
+            repo.join("c/c.go"),
+            "package c\n\nfunc Lone() int { return 3 }\n",
+        )
+        .unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 3);
+        let mut parts = Vec::new();
+        run_go_modules(
+            spec,
+            &repo,
+            &bazel,
+            &scip_dir,
+            &mut parts,
+            GoOptions::default(),
+        )
+        .unwrap();
+        let (defs, _) = go_symbols(&parts, "`example.com/c`/Lone().");
+        assert_eq!(defs.len(), 1, "{defs:?}");
+    }
+
+    #[test]
+    fn go_modules_pass_gives_the_go_tags_to_scip_go() {
+        if !indexer_present("scip-go") {
+            eprintln!("skip: scip-go not installed");
+            return;
+        }
+        let spec = LANGS.iter().find(|s| s.language == "go").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("go.mod"), "module example.com/t\n\ngo 1.21\n").unwrap();
+        std::fs::write(
+            repo.join("tag.go"),
+            "//go:build integration\n\npackage t\n\nfunc Tagged() int { return 1 }\n",
+        )
+        .unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 1);
+        for (tags, want) in [(None, 0), (Some("integration"), 1)] {
+            let mut parts = Vec::new();
+            run_go_modules(
+                spec,
+                &repo,
+                &bazel,
+                &scip_dir,
+                &mut parts,
+                GoOptions { tags, tests: false },
+            )
+            .unwrap();
+            let (defs, _) = go_symbols(&parts, "`example.com/t`/Tagged().");
+            assert_eq!(defs.len(), want, "tags={tags:?}");
+        }
+    }
+
+    #[test]
+    fn go_modules_pass_indexes_test_files_only_with_go_tests() {
+        if !indexer_present("scip-go") {
+            eprintln!("skip: scip-go not installed");
+            return;
+        }
+        let spec = LANGS.iter().find(|s| s.language == "go").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("go.mod"), "module example.com/t\n\ngo 1.21\n").unwrap();
+        std::fs::write(
+            repo.join("t.go"),
+            "package t\n\nfunc Plain() int { return 0 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("t_test.go"),
+            "package t\n\nimport \"testing\"\n\nfunc TestPlain(t *testing.T) { Plain() }\n",
+        )
+        .unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 1);
+        for (tests, want) in [(false, 0), (true, 1)] {
+            let mut parts = Vec::new();
+            run_go_modules(
+                spec,
+                &repo,
+                &bazel,
+                &scip_dir,
+                &mut parts,
+                GoOptions { tags: None, tests },
+            )
+            .unwrap();
+            let (defs, _) = go_symbols(&parts, "`example.com/t`/TestPlain().");
+            assert_eq!(defs.len(), want, "tests={tests}");
+            let (plain, _) = go_symbols(&parts, "`example.com/t`/Plain().");
+            assert_eq!(plain.len(), 1, "tests={tests}");
+        }
     }
 
     #[test]

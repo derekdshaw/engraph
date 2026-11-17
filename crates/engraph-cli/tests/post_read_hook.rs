@@ -6,11 +6,10 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
-use tempfile::tempdir;
 
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_engraph")
-}
+mod common;
+use common::{bin, git};
+use tempfile::tempdir;
 
 fn run_hook(db_path: &std::path::Path, file_path: &str) -> String {
     let payload = serde_json::json!({
@@ -154,28 +153,6 @@ fn empty_stdin_passes_through() {
     let (_t, db) = db_dir();
     let out = run_hook_raw(&db, "");
     assert!(out.trim().is_empty());
-}
-
-fn git(repo: &std::path::Path, args: &[&str]) {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args([
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 /// A committed git repo at `<dir>/<name>` with `src/lib.rs`, canonicalized.

@@ -112,6 +112,43 @@ fn scope_local_symbols(index: &mut Index, project: &str) {
     }
 }
 
+/// Give the version `.` of each scip-go module id the pinned version
+/// (`driver::SCIP_GO_VERSION`). scip-go writes `.` for a module of the same
+/// repo that it cannot tie to the indexed one (no `replace`, and the run does
+/// not start at the go.work root), but the module's own run defines its
+/// symbols with the pinned version. Without the pin, the reference and the
+/// definition are two ids, and the relation ends at a placeholder. A
+/// published module has a real version, which stays.
+pub(crate) fn pin_go_module_versions(index: &mut Index) {
+    fn pin(symbol: &mut String) {
+        let Some(rest) = symbol.strip_prefix("scip-go gomod ") else {
+            return;
+        };
+        let Some((module, after)) = rest.split_once(' ') else {
+            return;
+        };
+        if let Some(descriptors) = after.strip_prefix(". ") {
+            *symbol = format!(
+                "scip-go gomod {module} {} {descriptors}",
+                crate::driver::SCIP_GO_VERSION
+            );
+        }
+    }
+    let pin_info = |info: &mut scip::types::SymbolInformation| {
+        pin(&mut info.symbol);
+        for rel in &mut info.relationships {
+            pin(&mut rel.symbol);
+        }
+    };
+    for doc in &mut index.documents {
+        doc.symbols.iter_mut().for_each(pin_info);
+        for occ in &mut doc.occurrences {
+            pin(&mut occ.symbol);
+        }
+    }
+    index.external_symbols.iter_mut().for_each(pin_info);
+}
+
 /// The first 16 hex digits of the SHA-256 of a project key: a short, fixed
 /// part of a local symbol id that differs between projects.
 fn project_tag(project: &str) -> String {
@@ -145,6 +182,7 @@ pub fn load_with_options(
 ) -> Result<LoadStats> {
     let mut index = Index::parse_from_bytes(scip_bytes).context("decoding SCIP protobuf")?;
     scope_local_symbols(&mut index, project);
+    pin_go_module_versions(&mut index);
 
     // Pass 1: gather every symbol's Kind across all documents (and the
     // external_symbols list). The CALLS vs REFERENCES distinction is based on
@@ -1102,6 +1140,39 @@ mod tests {
         // A second pass does not scope an id again.
         scope_local_symbols(&mut index, "/home/me/repo");
         assert_eq!(index.documents[0].symbols[0].symbol, local3);
+    }
+
+    #[test]
+    fn go_module_versions_pin_only_the_unknown_version() {
+        let sibling = "scip-go gomod example.com/b . `example.com/b`/Helper().";
+        let pinned = "scip-go gomod example.com/b 0.0.0 `example.com/b`/Helper().";
+        let published = "scip-go gomod github.com/x/y v1.2.3 `github.com/x/y`/F().";
+        let other = "rust-analyzer cargo a . a/f().";
+        let mut info = scip::types::SymbolInformation::new();
+        info.symbol = sibling.into();
+        let mut rel = scip::types::Relationship::new();
+        rel.symbol = sibling.into();
+        info.relationships.push(rel);
+        let mut doc = Document::new();
+        doc.symbols.push(info);
+        for symbol in [sibling, published, other] {
+            let mut occ = scip::types::Occurrence::new();
+            occ.symbol = symbol.into();
+            doc.occurrences.push(occ);
+        }
+        let mut ext = scip::types::SymbolInformation::new();
+        ext.symbol = sibling.into();
+        let mut index = Index::new();
+        index.documents.push(doc);
+        index.external_symbols.push(ext);
+
+        pin_go_module_versions(&mut index);
+        let doc = &index.documents[0];
+        assert_eq!(doc.symbols[0].symbol, pinned);
+        assert_eq!(doc.symbols[0].relationships[0].symbol, pinned);
+        let occs: Vec<_> = doc.occurrences.iter().map(|o| o.symbol.as_str()).collect();
+        assert_eq!(occs, [pinned, published, other]);
+        assert_eq!(index.external_symbols[0].symbol, pinned);
     }
 
     #[test]

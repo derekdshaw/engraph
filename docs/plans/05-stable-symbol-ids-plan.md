@@ -13,13 +13,10 @@ indexer changes the ids or the relations of known symbols.
 ## Condition at this time (2026-10-30)
 
 - The function `scip_loader::normalize_moniker` does not change the symbol id.
-- The standalone Go driver (`ScipGo` in `driver.rs`) does not give
-  `--module-version` to scip-go. Thus, scip-go uses a version tag on `HEAD`, or
-  the first 12 characters of the `HEAD` commit hash, in each Go symbol id
-  (`InferModuleVersion` in scip-go v0.2.7). All Go symbol ids change at each
-  commit that has no tag. The Bazel Go pass
-  gives a fixed version (`SCIP_GO_VERSION`). The Python driver also gives a
-  fixed version (`SCIP_PYTHON_VERSION`).
+- The standalone Go driver (`ScipGo` in `driver.rs`) and the Bazel Go pass
+  give a fixed version (`SCIP_GO_VERSION`) to scip-go, and the loader changes
+  the version `.` of a scip-go module id to it (2026-11-16, plan 03 step 7).
+  The Python driver also gives a fixed version (`SCIP_PYTHON_VERSION`).
 - Earlier documents say that scip-java gives an empty version to first-party
   Java code (`semanticdb maven . . …`). Thus, two repos with the same package
   names can have the same symbol ids. This is not verified. The live database
@@ -68,6 +65,8 @@ indexer changes the ids or the relations of known symbols.
 18. In the CI job, install specified versions of the indexers.
 
 ## Steps, part 2: normalization of symbol ids
+
+Step 1 is complete (plan 03, step 7).
 
 1. In the standalone Go driver, give `--module-version` with the value of
    `SCIP_GO_VERSION` to scip-go. This change replaces all Go symbol ids one

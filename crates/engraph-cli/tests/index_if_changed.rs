@@ -9,33 +9,10 @@ use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 mod common;
-use common::{bin, engraph};
+use common::{bin, engraph, git};
 
 fn stdout(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn git(repo: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args([
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 /// A committed monorepo with cargo crates `svc-a` and `svc-b`, plus an empty

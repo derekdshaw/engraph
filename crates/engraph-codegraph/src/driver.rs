@@ -16,6 +16,8 @@ pub trait Driver: Send + Sync {
     /// untracked file with one of them starts an `--if-changed` refresh.
     fn extensions(&self) -> &'static [&'static str];
     fn command(&self, repo: &Path, out: &Path) -> Command;
+    /// Give the run's `--go-tags` to `cmd`. Only scip-go takes them.
+    fn set_go_tags(&self, _cmd: &mut Command, _tags: Option<&str>) {}
 }
 
 pub fn registry() -> Vec<Box<dyn Driver>> {
@@ -109,11 +111,13 @@ impl Driver for ScipPython {
     }
 }
 
-/// Fixed `--module-version` passed to scip-go by the Bazel multi-module symbol
-/// pass (`bazel_symbols::run_go_modules`). scip-go defaults this to the git
-/// short hash of the cwd repo, which embeds into every moniker — so without a
-/// pin, Go entity IDs churn on each commit. Same rationale as
-/// `SCIP_PYTHON_VERSION`. NOT applied to the standalone `ScipGo` driver below.
+/// Fixed `--module-version` passed to scip-go by the `ScipGo` driver and the
+/// Bazel multi-module symbol pass (`bazel_symbols::run_go_modules`). scip-go
+/// defaults this to the git short hash of the cwd repo, which embeds into
+/// every moniker — so without a pin, Go entity IDs churn on each commit. Same
+/// rationale as `SCIP_PYTHON_VERSION`. The loader gives the same version to
+/// the ids scip-go writes with the version `.`
+/// (`scip_loader::pin_go_module_versions`).
 pub(crate) const SCIP_GO_VERSION: &str = "0.0.0";
 
 pub struct ScipGo;
@@ -122,22 +126,171 @@ impl Driver for ScipGo {
         "scip-go"
     }
     fn detect(&self, repo: &Path) -> bool {
-        repo.join("go.mod").is_file()
+        repo.join("go.mod").is_file() || repo.join("go.work").is_file()
     }
     fn extensions(&self) -> &'static [&'static str] {
         &["go"]
     }
     fn command(&self, repo: &Path, out: &Path) -> Command {
-        // scip-go defaults --output to `index.scip` in the cwd; pin it to `out`
-        // so nothing lands in the repo. Still chdir into the repo for module
-        // resolution.
-        let mut c = Command::new("scip-go");
-        c.arg("--module-root")
-            .arg(repo)
-            .arg("--output")
-            .arg(out)
-            .current_dir(repo);
+        let mut c = scip_go_command(repo, repo, out);
+        // scip-go's default pattern `./...` reaches only the module of the
+        // cwd. In a go.work, one `<dir>/...` pattern per `use` directory
+        // indexes every module in one run, each under its own module path.
+        if let Some(uses) = go_work_uses(repo) {
+            c.args(uses.iter().map(|u| go_work_pattern(u)));
+        }
         c
+    }
+    fn set_go_tags(&self, cmd: &mut Command, tags: Option<&str>) {
+        apply_go_tags(cmd, tags);
+    }
+}
+
+/// scip-go, run in `cwd`, indexing the module at `module_root` (relative to
+/// `cwd`, or absolute) into `out`, with the pinned module version and
+/// `GOWORK=off` when the module's go.work does not list it. scip-go defaults
+/// `--output` to `index.scip` in the cwd; pinning it to `out` keeps the repo
+/// clean. Used by the `ScipGo` driver and the Bazel Go pass.
+pub(crate) fn scip_go_command(cwd: &Path, module_root: &Path, out: &Path) -> Command {
+    let mut c = Command::new("scip-go");
+    c.arg("index")
+        .arg("--module-root")
+        .arg(module_root)
+        .arg("--module-version")
+        .arg(SCIP_GO_VERSION)
+        .arg("--output")
+        .arg(out)
+        .current_dir(cwd);
+    let dir = if module_root == Path::new(".") {
+        cwd.to_path_buf()
+    } else {
+        cwd.join(module_root)
+    };
+    if outside_its_go_work(&dir) {
+        c.env("GOWORK", "off");
+    }
+    c
+}
+
+/// `GOFLAGS` for a scip-go run with the build `tags` (comma-separated): the
+/// user's `existing` flags, then `-tags=<tags>`. Go takes the last `-tags`,
+/// so these win over a `-tags` the user set, and the other flags stay.
+pub(crate) fn go_flags_with_tags(existing: Option<&str>, tags: &str) -> String {
+    match existing.map(str::trim).filter(|e| !e.is_empty()) {
+        Some(e) => format!("{e} -tags={tags}"),
+        None => format!("-tags={tags}"),
+    }
+}
+
+/// Give the build `tags` to the scip-go `cmd`. scip-go has no tags flag, but
+/// its package loader reads `GOFLAGS` (verified 2026-11-16, scip-go 0.2.7).
+/// The existing flags come from `go env`, not the process environment: a
+/// `GOFLAGS` variable replaces the one `go env -w` saved, so reading only the
+/// variable would drop the saved flags.
+pub(crate) fn apply_go_tags(cmd: &mut Command, tags: Option<&str>) {
+    if let Some(tags) = tags {
+        let existing = Command::new("go")
+            .args(["env", "GOFLAGS"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+        cmd.env("GOFLAGS", go_flags_with_tags(existing.as_deref(), tags));
+    }
+}
+
+/// Whether the nearest `go.work` above `dir` does not list it. Go then
+/// builds nothing in `dir`, and scip-go exits 0 with an empty index, so the
+/// run needs `GOWORK=off`. A `go.work` in `dir` itself is the one its run
+/// uses (`ScipGo::command`).
+pub(crate) fn outside_its_go_work(dir: &Path) -> bool {
+    if dir.join("go.work").is_file() {
+        return false;
+    }
+    dir.ancestors()
+        .skip(1)
+        .find(|work_dir| work_dir.join("go.work").is_file())
+        .is_some_and(|work_dir| !go_work_lists(work_dir, dir))
+}
+
+/// Whether the `go.work` in `work_dir` lists `dir` as a `use` directory, by
+/// a path relative to `work_dir` or an absolute one. `dir` may be relative
+/// (discovery from `.`), so an absolute `use` is compared canonicalized.
+pub(crate) fn go_work_lists(work_dir: &Path, dir: &Path) -> bool {
+    let rel = crate::index::workspace_rel(work_dir, dir);
+    go_work_uses(work_dir).is_some_and(|uses| {
+        uses.iter().any(|u| {
+            let u = go_work_rel(u);
+            u == rel
+                || (Path::new(u).is_absolute()
+                    && matches!(
+                        (Path::new(u).canonicalize(), dir.canonicalize()),
+                        (Ok(a), Ok(b)) if a == b
+                    ))
+        })
+    })
+}
+
+/// The `use` directories of the `go.work` in `dir`, as written: relative to
+/// `dir`, or absolute. `None` without a `go.work`.
+pub(crate) fn go_work_uses(dir: &Path) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(dir.join("go.work")).ok()?;
+    Some(parse_go_work_uses(&text))
+}
+
+/// The paths of the `use` directives of a `go.work`: `use ./a`, or a
+/// `use ( ... )` block with one path per line. A path may be quoted, and
+/// `//` starts a comment.
+fn parse_go_work_uses(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_block = false;
+    for line in text.lines() {
+        let line = line.split("//").next().unwrap_or_default().trim();
+        if line.is_empty() {
+            continue;
+        }
+        let path = if in_block {
+            if line == ")" {
+                in_block = false;
+                continue;
+            }
+            line
+        } else {
+            let Some(rest) = line
+                .strip_prefix("use")
+                .filter(|r| r.starts_with([' ', '\t', '(']))
+            else {
+                continue;
+            };
+            let rest = rest.trim();
+            if rest == "(" {
+                in_block = true;
+                continue;
+            }
+            rest
+        };
+        out.push(path.trim_matches('"').to_string());
+    }
+    out
+}
+
+/// A `use` path of a `go.work` as `workspace_rel` gives it: `.` for the root,
+/// else `/`-separated without a leading `./` or a trailing `/`. An absolute
+/// path stays as it is.
+fn go_work_rel(path: &str) -> &str {
+    if Path::new(path).is_absolute() {
+        return path;
+    }
+    let rel = path.trim_start_matches("./").trim_end_matches('/');
+    if rel.is_empty() { "." } else { rel }
+}
+
+/// The scip-go package pattern for every package of a `use` directory.
+fn go_work_pattern(path: &str) -> String {
+    match go_work_rel(path) {
+        "." => "./...".to_string(),
+        abs if Path::new(abs).is_absolute() => format!("{abs}/..."),
+        rel => format!("./{rel}/..."),
     }
 }
 
@@ -362,6 +515,82 @@ mod tests {
             std::fs::write(dir.path().join(f), "packages:\n  - 'packages/*'\n").unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn go_work_uses_reads_single_and_block_forms() {
+        let text = "go 1.21\n\nuse ./a // first\nuse (\n\t.\n\t\"./b/c\"\n\t/abs/d\n\t// comment line\n)\n\nuser ./not-a-use\n";
+        assert_eq!(parse_go_work_uses(text), ["./a", ".", "./b/c", "/abs/d"]);
+    }
+
+    #[test]
+    fn scip_go_names_each_go_work_module() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = |dir: &Path| -> Vec<String> {
+            ScipGo
+                .command(dir, Path::new("/tmp/out/index.scip"))
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let root = dir.path().to_string_lossy().into_owned();
+        let base = [
+            "index",
+            "--module-root",
+            &root,
+            "--module-version",
+            SCIP_GO_VERSION,
+            "--output",
+            "/tmp/out/index.scip",
+        ];
+        // A plain module: scip-go's default `./...` covers it.
+        std::fs::write(dir.path().join("go.mod"), "module x\n").unwrap();
+        assert_eq!(args(dir.path()), base);
+        // A go.work: scip-go indexes only the patterns it is given, so one
+        // per `use` directory, the root included.
+        std::fs::write(
+            dir.path().join("go.work"),
+            "go 1.21\n\nuse (\n\t.\n\t./tools/\n\tsvc\n)\n",
+        )
+        .unwrap();
+        assert_eq!(
+            args(dir.path()),
+            [&base[..], &["./...", "./tools/...", "./svc/..."]].concat()
+        );
+    }
+
+    #[test]
+    fn go_tags_append_to_the_goflags_of_the_user() {
+        // The last `-tags` in GOFLAGS wins, so the appended one does.
+        assert_eq!(go_flags_with_tags(None, "a,b"), "-tags=a,b");
+        assert_eq!(
+            go_flags_with_tags(Some("-mod=mod -tags=x"), "a"),
+            "-mod=mod -tags=x -tags=a"
+        );
+        assert_eq!(go_flags_with_tags(Some("  "), "a"), "-tags=a");
+    }
+
+    #[test]
+    fn scip_go_turns_off_a_go_work_that_does_not_list_the_module() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("go.work"), "go 1.21\n\nuse ./a\n").unwrap();
+        for m in ["a", "c"] {
+            std::fs::create_dir_all(root.join(m)).unwrap();
+            std::fs::write(root.join(m).join("go.mod"), "module x\n").unwrap();
+        }
+        let gowork = |dir: &Path| {
+            ScipGo
+                .command(dir, Path::new("/tmp/out/index.scip"))
+                .get_envs()
+                .find(|(k, _)| *k == "GOWORK")
+                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        // Listed, or the go.work root itself: Go uses the go.work.
+        assert_eq!(gowork(&root.join("a")), None);
+        assert_eq!(gowork(root), None);
+        // Not listed: Go would build nothing in it.
+        assert_eq!(gowork(&root.join("c")), Some("off".into()));
     }
 
     #[test]

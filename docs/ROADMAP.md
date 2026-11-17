@@ -23,15 +23,9 @@ Small performance improvements are not items in this file. They are in
 
 ## 1. Code graph bugs
 
-A failed driver of a multi-manifest repo is in the summary.
+A failed driver of a multi-manifest repo is in the summary. The code graph has no symbols from documents outside the repo, such as the Go build cache.
 
 Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Parts 1 to 15 and 17 to 19 are complete, and the plan does not have them. The numbers of the other parts do not change.
-
-## 3. All Go modules in the code graph
-
-engraph indexes all Go modules of a repo, with correct relations between the modules. This is also true in Bazel repos.
-
-Plan: [`docs/plans/03-all-go-modules-plan.md`](plans/03-all-go-modules-plan.md)
 
 ## 10. Separate code graphs for worktrees
 

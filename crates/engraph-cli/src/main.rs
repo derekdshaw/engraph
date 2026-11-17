@@ -260,6 +260,8 @@ async fn main() -> Result<()> {
             workspace,
             bazel_symbols,
             no_bazel_symbols,
+            go_tags,
+            go_tests,
             gc,
             no_gc,
             recursive,
@@ -288,6 +290,10 @@ async fn main() -> Result<()> {
             // (clap makes --gc / --no-gc mutually exclusive, so this is just
             // `!no_gc` with an explicit --gc also forcing it on.)
             let effective_gc = gc || !no_gc;
+            let go = engraph_codegraph::GoOptions {
+                tags: go_tags.as_deref(),
+                tests: go_tests,
+            };
             // `--recursive` indexes a tree of projects rooted at --workspace, or
             // the positional repo if --workspace wasn't given.
             let discovery = if recursive {
@@ -399,6 +405,11 @@ async fn main() -> Result<()> {
                             } else {
                                 mode.bazel_symbols
                             };
+                            // Likewise an explicit --go-tags or --go-tests.
+                            let go = engraph_codegraph::GoOptions {
+                                tags: go.tags.or(mode.go_tags.as_deref()),
+                                tests: go.tests || mode.go_tests,
+                            };
                             if dry_run {
                                 let mut how = Vec::new();
                                 if let Some(l) = &mode.lang {
@@ -406,6 +417,12 @@ async fn main() -> Result<()> {
                                 }
                                 if bazel {
                                     how.push("--bazel-symbols".to_string());
+                                }
+                                if let Some(t) = go.tags {
+                                    how.push(format!("--go-tags {t}"));
+                                }
+                                if go.tests {
+                                    how.push("--go-tests".to_string());
                                 }
                                 let how = if how.is_empty() {
                                     String::new()
@@ -429,6 +446,7 @@ async fn main() -> Result<()> {
                                 &project_key,
                                 subtree,
                                 bazel,
+                                go,
                                 effective_gc,
                             );
                             match outcome {
@@ -497,6 +515,7 @@ async fn main() -> Result<()> {
                     &conn,
                     &root,
                     effective_bazel_symbols,
+                    go,
                     discovery,
                     &filter,
                     effective_gc,
@@ -519,6 +538,8 @@ async fn main() -> Result<()> {
                                 &r.repo,
                                 &engraph_codegraph::IndexMode {
                                     bazel_symbols: effective_bazel_symbols,
+                                    go_tags: go_tags.clone(),
+                                    go_tests,
                                     ..Default::default()
                                 },
                             )?;
@@ -637,6 +658,7 @@ async fn main() -> Result<()> {
                     &project_key,
                     &subtree,
                     effective_bazel_symbols,
+                    go,
                     effective_gc,
                 )?;
                 telemetry::record_event(
@@ -1177,13 +1199,15 @@ fn index_single(
     project_key: &str,
     subtree: &str,
     bazel_symbols: bool,
+    go: engraph_codegraph::GoOptions,
     gc: bool,
 ) -> Result<engraph_codegraph::IndexStats> {
     let scope = engraph_codegraph::IndexScope {
         project: project_key,
         subtree,
     };
-    let stats = engraph_codegraph::index_repo_in(conn, repo, scip, lang, scope, bazel_symbols, gc)?;
+    let stats =
+        engraph_codegraph::index_repo_in(conn, repo, scip, lang, scope, bazel_symbols, go, gc)?;
     let mode = engraph_codegraph::IndexMode {
         source: if scip.is_some() {
             engraph_codegraph::IndexSource::Scip
@@ -1192,6 +1216,8 @@ fn index_single(
         },
         lang: lang.map(str::to_string),
         bazel_symbols,
+        go_tags: go.tags.map(str::to_string),
+        go_tests: go.tests,
     };
     divergence::record_index_commit(conn, project_key, subtree, repo, &mode)?;
     let pruned_note = if stats.entities_pruned > 0 {
@@ -1234,9 +1260,7 @@ pub(crate) fn canonical_repo_key(start: &std::path::Path) -> String {
 /// first entry is always the main worktree. `None` when `start` isn't a git
 /// working tree or git can't be run.
 fn git_main_worktree(start: &std::path::Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(start)
+    let out = engraph_core::utils::git_cmd(start)
         .args(["worktree", "list", "--porcelain"])
         .output()
         .ok()?;
@@ -1278,9 +1302,7 @@ fn git_main_worktree(start: &std::path::Path) -> Option<String> {
 /// copy, not the (possibly stale or absent) indexed checkout. `None` outside a
 /// git working tree.
 pub(crate) fn git_current_toplevel(start: &std::path::Path) -> Option<std::path::PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(start)
+    let out = engraph_core::utils::git_cmd(start)
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .ok()?;

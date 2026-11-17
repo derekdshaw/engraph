@@ -107,6 +107,20 @@ pub struct IndexMode {
     pub lang: Option<String>,
     /// Whether the run included the symbol-level Bazel pass.
     pub bazel_symbols: bool,
+    /// The `--go-tags` of the run, if it had them.
+    pub go_tags: Option<String>,
+    /// Whether the run had `--go-tests`.
+    pub go_tests: bool,
+}
+
+/// What an index run tells scip-go.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GoOptions<'a> {
+    /// `--go-tags`: build tags, comma-separated.
+    pub tags: Option<&'a str>,
+    /// `--go-tests`: the Bazel Go pass indexes `_test.go` files too. The Go
+    /// driver always does.
+    pub tests: bool,
 }
 
 /// Where an index run's SCIP came from.
@@ -163,15 +177,17 @@ pub fn record_indexed_commit(
         // seconds — too coarse for a file created moments after the index.
         conn.execute(
             "INSERT INTO index_state (project, subtree, commit_sha, source, lang, bazel_symbols, \
-             indexed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%d %H:%M:%f','now'))",
+             go_tags, go_tests, indexed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, strftime('%Y-%m-%d %H:%M:%f','now'))",
             rusqlite::params![
                 project,
                 subtree,
                 sha,
                 mode.source.as_str(),
                 mode.lang,
-                mode.bazel_symbols
+                mode.bazel_symbols,
+                mode.go_tags,
+                mode.go_tests
             ],
         )?;
     }
@@ -212,7 +228,8 @@ pub fn index_modes(
     project: &str,
 ) -> Result<std::collections::HashMap<String, IndexMode>> {
     let mut stmt = conn.prepare(
-        "SELECT subtree, source, lang, bazel_symbols FROM index_state WHERE project = ?1",
+        "SELECT subtree, source, lang, bazel_symbols, go_tags, go_tests FROM index_state
+         WHERE project = ?1",
     )?;
     let rows = stmt
         .query_map([project], |r| {
@@ -222,6 +239,8 @@ pub fn index_modes(
                     source: IndexSource::from_db(&r.get::<_, String>(1)?),
                     lang: r.get(2)?,
                     bazel_symbols: r.get(3)?,
+                    go_tags: r.get(4)?,
+                    go_tests: r.get(5)?,
                 },
             ))
         })?
@@ -261,6 +280,7 @@ pub fn index_repo(
         lang_override,
         scope,
         bazel_symbols,
+        GoOptions::default(),
         gc,
     )
 }
@@ -269,6 +289,7 @@ pub fn index_repo(
 /// into the codegraph tables under `scope`. When `gc` is set, orphan entities
 /// in scope are pruned before the load and stale SCIP symbols after it. The
 /// Bazel path ignores `scope.subtree` and refreshes the whole project.
+#[allow(clippy::too_many_arguments)]
 pub fn index_repo_in(
     conn: &PooledConn,
     repo: &Path,
@@ -276,6 +297,7 @@ pub fn index_repo_in(
     lang_override: Option<&str>,
     scope: IndexScope,
     bazel_symbols: bool,
+    go: GoOptions,
     gc: bool,
 ) -> Result<IndexStats> {
     let IndexScope { project, subtree } = scope;
@@ -307,7 +329,7 @@ pub fn index_repo_in(
         let mut symbol_langs = Vec::new();
         if bazel_symbols {
             tracing::info!("--bazel-symbols set; running symbol-level pass");
-            let sym = bazel_symbols::index_bazel_symbols(conn, repo, project, gc)?;
+            let sym = bazel_symbols::index_bazel_symbols(conn, repo, project, gc, go)?;
             entities += sym.entities_inserted;
             relations += sym.relations_inserted;
             scip_bytes_total += sym.scip_bytes_total;
@@ -357,7 +379,7 @@ pub fn index_repo_in(
     // Explicit --lang override: pin to one driver, single SCIP load.
     if let Some(name) = lang_override {
         let drv = driver::by_name(name).ok_or_else(|| anyhow::anyhow!("unknown driver: {name}"))?;
-        let bytes = run_driver_to_scip(repo, &*drv)?;
+        let bytes = run_driver_to_scip(repo, &*drv, go.tags)?;
         let load_stats = scip_loader::load_with_options(
             conn,
             project,
@@ -395,7 +417,7 @@ pub fn index_repo_in(
     let mut total_scip_bytes = 0usize;
     let mut succeeded_names: Vec<&'static str> = Vec::with_capacity(matching.len());
     for drv in &matching {
-        match run_driver_to_scip(repo, &**drv) {
+        match run_driver_to_scip(repo, &**drv, go.tags) {
             Ok(bytes) => {
                 total_scip_bytes += bytes.len();
                 all_bytes.push(bytes);
@@ -578,17 +600,27 @@ fn scip_output_dir(repo: &Path) -> PathBuf {
     base.join(&hex[..16])
 }
 
-fn run_driver_to_scip(repo: &Path, drv: &dyn driver::Driver) -> Result<Vec<u8>> {
-    run_driver_into(&scip_output_dir(repo), repo, drv)
+fn run_driver_to_scip(
+    repo: &Path,
+    drv: &dyn driver::Driver,
+    go_tags: Option<&str>,
+) -> Result<Vec<u8>> {
+    run_driver_into(&scip_output_dir(repo), repo, drv, go_tags)
 }
 
 /// `run_driver_to_scip` with the output directory given, so a test does not
 /// write under the user's data directory.
-fn run_driver_into(out_dir: &Path, repo: &Path, drv: &dyn driver::Driver) -> Result<Vec<u8>> {
+fn run_driver_into(
+    out_dir: &Path,
+    repo: &Path,
+    drv: &dyn driver::Driver,
+    go_tags: Option<&str>,
+) -> Result<Vec<u8>> {
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("creating SCIP output dir {}", out_dir.display()))?;
     let scip_path = out_dir.join("index.scip");
     let mut cmd = drv.command(repo, &scip_path);
+    drv.set_go_tags(&mut cmd, go_tags);
     tracing::info!(driver = drv.name(), ?cmd, "running SCIP indexer");
     // Capture rather than inherit: rust-analyzer is noisy on stderr (load
     // progress, known SCIP-emitter warnings, duplicate-symbol reports) yet
@@ -1000,8 +1032,9 @@ fn is_member(lang: &str, parent: &Path, dir: &Path, installed: &dyn Fn(&str) -> 
         // own workspace (e.g. a `cargo fuzz` crate) is in no other.
         "rust-analyzer" => cargo_has_workspace(parent) && !cargo_has_workspace(dir),
         "scip-typescript" => typescript_workspace_lists(parent, dir, installed),
-        // Go tools leave a nested module out of the module above it.
-        "scip-go" => false,
+        // Go tools leave a nested module out of the module above it, unless
+        // the parent's go.work lists it.
+        "scip-go" => driver::go_work_lists(parent, dir),
         // scip-python indexes every file below its directory, so a nested
         // project is in the parent's run; scip-java builds Maven and Gradle
         // multi-module projects from the root.
@@ -1165,10 +1198,12 @@ impl Walker<'_> {
 /// runs from trampling each other. Failures are captured per-repo rather than
 /// fatal — a broken indexer for one language shouldn't block the rest of the
 /// workspace.
+#[allow(clippy::too_many_arguments)]
 pub fn index_workspace(
     conn: &PooledConn,
     workspace_root: &Path,
     bazel_symbols: bool,
+    go: GoOptions,
     discovery: Discovery,
     filter: &DiscoveryFilter,
     gc: bool,
@@ -1226,7 +1261,7 @@ pub fn index_workspace(
             subtree: &subtree,
         };
         let outcome = match &locks[&project] {
-            Ok(_) => index_repo_in(conn, &repo, None, None, scope, bazel_symbols, gc),
+            Ok(_) => index_repo_in(conn, &repo, None, None, scope, bazel_symbols, go, gc),
             Err(e) => Err(anyhow::anyhow!("{e}")),
         };
         stats.repos.push(WorkspaceRepoResult {
@@ -1623,9 +1658,8 @@ mod tests {
     /// `.gitignore` applies only inside a git repo (the `ignore` crate's
     /// `require_git` default), so the fixtures that test it need one.
     fn git_init(dir: &Path) {
-        let out = std::process::Command::new("git")
+        let out = engraph_core::utils::git_cmd(dir)
             .args(["init", "-q"])
-            .current_dir(dir)
             .output()
             .unwrap();
         assert!(out.status.success(), "git init failed: {out:?}");
@@ -1901,6 +1935,38 @@ mod tests {
     }
 
     #[test]
+    fn recursive_go_work_members_are_covered_by_the_root() {
+        // A go.work root without its own go.mod is a project; the modules
+        // it lists are its members, and a module it does not list is not.
+        let tmp = tempfile::tempdir().unwrap();
+        let r = dir_with(tmp.path(), "", "go.work");
+        std::fs::write(
+            r.join("go.work"),
+            "go 1.21\n\nuse (\n\t./tools\n\t./svc/api\n)\n",
+        )
+        .unwrap();
+        dir_with(tmp.path(), "tools", "go.mod");
+        dir_with(tmp.path(), "svc/api", "go.mod");
+        let other = dir_with(tmp.path(), "svc/other", "go.mod");
+        assert_eq!(recursive_roots(tmp.path()), vec![r, other]);
+    }
+
+    #[test]
+    fn recursive_go_work_members_listed_by_absolute_path_are_covered() {
+        // scip-go gets the absolute `use` as a pattern too, so the module is
+        // in the root's run and must not also be its own project.
+        let tmp = tempfile::tempdir().unwrap();
+        let r = dir_with(tmp.path(), "", "go.work");
+        let tools = dir_with(tmp.path(), "tools", "go.mod");
+        std::fs::write(
+            r.join("go.work"),
+            format!("go 1.21\n\nuse {}\n", tools.display()),
+        )
+        .unwrap();
+        assert_eq!(recursive_roots(tmp.path()), vec![r]);
+    }
+
+    #[test]
     fn recursive_go_modules_are_never_members() {
         let tmp = tempfile::tempdir().unwrap();
         let r = dir_with(tmp.path(), "", "go.mod");
@@ -2057,6 +2123,8 @@ mod tests {
             source: IndexSource::Drivers,
             lang: Some("scip-go".into()),
             bazel_symbols: true,
+            go_tags: Some("integration,e2e".into()),
+            go_tests: true,
         };
         let prebuilt = IndexMode {
             source: IndexSource::Manifest,
@@ -2129,7 +2197,7 @@ mod tests {
     fn a_failed_indexer_that_writes_only_to_stdout_shows_the_stdout_tail() {
         let out = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
-        let err = run_driver_into(out.path(), repo.path(), &StdoutOnlyIndexer).unwrap_err();
+        let err = run_driver_into(out.path(), repo.path(), &StdoutOnlyIndexer, None).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("stdout (tail):\nerror TS6053: File 'x/tsconfig' not found."),

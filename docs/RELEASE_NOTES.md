@@ -6,6 +6,9 @@ Last update: 2026-11-16, main at `267b7f5`
 
 ## Features
 
+- **Go tests in the Bazel Go pass.** `engraph index --bazel-symbols --go-tests` lets scip-go index `_test.go` files in the Bazel Go pass, which skips them by default so that a module with unresolved test-only dependencies keeps its library symbols. `--if-changed` repeats the flag (schema v16).
+- **Go build tags.** `engraph index --go-tags <a,b>` gives scip-go build tags, so the files behind `//go:build` lines that need them are in the code graph. It works for the Go driver and the Bazel Go pass, keeps the other flags in your `GOFLAGS`, and `--if-changed` repeats the tags of the recorded run. Schema v15 records them.
+- **Go workspaces.** A directory with a `go.work` file is a Go project, with or without its own `go.mod`. One scip-go run indexes every module that the `go.work` lists, so `engraph index` and `--recursive` do not index them one at a time. A Go module that the `go.work` does not list is still its own project.
 - **Discovery obeys ignore files.** `engraph index --workspace` and `--recursive` skip the directories that `.gitignore` (inside a git repo), `.ignore`, `.git/info/exclude`, or the global git excludes name — the same rules as `git ls-files --exclude-standard`. An ignored directory that is its own git repo is still found, and the parent's rules do not apply inside it. Both modes also skip hidden and build/dependency directories by name.
 - **Discovery flags.** `--max-depth <n>` (default 16, with `--recursive`) limits how deep discovery goes. `--include <glob>` and `--exclude <glob>` (repeatable, with either mode) filter the discovered projects by their path below the workspace root: `*` stays within one level, `**` crosses levels, `.` is the root, and a glob matches only the path it names. When both match a project, `--exclude` wins with a warning.
 - **The dry run explains discovery.** `engraph index --dry-run` with `--workspace` or `--recursive` lists each directory that explains the result, with its cause: projects with their languages, workspace members with the project that covers them, Bazel roots, ignored directories, directories beyond `--max-depth`, and projects the filter globs dropped.
@@ -29,6 +32,8 @@ Last update: 2026-11-16, main at `267b7f5`
 
 ## Bugs
 
+- A Go module below a `go.work` that does not list it got no symbols: Go builds nothing in such a module, and scip-go exited 0 with an empty index. Its scip-go run now sets `GOWORK=off`, in the Go driver and in the Bazel Go pass.
+- A call from one Go module into another module of the same repo pointed at a placeholder, not at the definition, when scip-go could not tie the two modules together: a `go.work` member indexed alone, and each module of the Bazel Go pass. scip-go gave the reference the version `.`, and the definition had a different version. The loader now pins `.` to `0.0.0`, and the Go driver passes `--module-version 0.0.0` as the Bazel Go pass does. This changes every Go symbol id one time; the next index run of a Go repo replaces them.
 - A git submodule got its gitdir (`<parent>/.git/modules/<name>`) as its project key, so engraph treated its checkout as a linked worktree: `engraph index --if-changed` and the SessionStart refresh skipped every submodule. A submodule now scopes to its own checkout.
 - `engraph run` showed no output when the shell had to expand a word of the command (`~`, `$`, a glob, or braces). The hook does not wrap these commands now.
 - When a command failed, 16 filters did not show its error text. They now add stderr when the exit code is not zero.

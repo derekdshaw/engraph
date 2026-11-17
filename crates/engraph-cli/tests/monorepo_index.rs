@@ -10,42 +10,7 @@ use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
 mod common;
-use common::bin;
-
-/// `common::engraph`, with the SCIP scratch file kept out of the user's data
-/// dir.
-fn engraph(db: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
-    common::command(db, cwd, args)
-        .env(
-            "ENGRAPH_SCIP_OUTPUT_DIR",
-            std::env::temp_dir().join("engraph-test-scip"),
-        )
-        .output()
-        .expect("spawn engraph")
-}
-
-fn git(repo: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args([
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
+use common::{bin, engraph_temp_scip as engraph, git};
 
 /// A git monorepo with two Rust crates whose files share a relative path:
 /// `svc-a/src/lib.rs` (`alpha_handler`) and `svc-b/src/lib.rs` (`beta_handler`).
