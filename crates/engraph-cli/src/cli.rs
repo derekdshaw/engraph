@@ -39,6 +39,16 @@ pub(crate) enum Cmd {
         /// Month-by-month savings breakdown.
         #[arg(long)]
         monthly: bool,
+        /// Tokens of all file reads, of repeats (a range of a file that the
+        /// session read before), and of new ranges (another range of such a
+        /// file). Reads are not savings; the totals do not change.
+        #[arg(long)]
+        reads: bool,
+        /// Index runs per type (`auto`, `if_changed`, `workspace`, driver):
+        /// runs that produced SCIP, their total and mean time, SCIP bytes,
+        /// and no-op runs (nothing to do, skipped, failed). Not savings.
+        #[arg(long)]
+        index: bool,
         /// Show the summary plus every breakdown at once.
         #[arg(long)]
         all: bool,
@@ -301,6 +311,11 @@ pub(crate) enum HookCmd {
     /// append a listing of symbols in the file (name, line range, signature)
     /// as additionalContext so a follow-up subgraph call is often unneeded.
     PostRead,
+    /// Internal: the telemetry of one `post-read`, in a detached child so the
+    /// hook does not wait for the tokenizer. Reads the read's session, path,
+    /// type, range, text, and augment, as JSON, from stdin.
+    #[command(hide = true)]
+    RecordRead,
     /// SessionStart hook: emit a terse brief of prior context for the current
     /// project in the output shape expected by the target client.
     SessionStart {

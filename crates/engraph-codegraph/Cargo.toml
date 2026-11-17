@@ -16,7 +16,6 @@ tracing.workspace = true
 uuid.workspace = true
 scip.workspace = true
 protobuf.workspace = true
-sha2.workspace = true
 dirs.workspace = true
 chrono.workspace = true
 ignore.workspace = true

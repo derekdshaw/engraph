@@ -20,7 +20,6 @@
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -284,10 +283,7 @@ pub(crate) fn output_base_for(repo: &Path) -> PathBuf {
         return PathBuf::from(env);
     }
     let canonical = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.to_string_lossy().as_bytes());
-    let digest = hasher.finalize();
-    let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+    let hex = engraph_core::utils::sha256_hex(canonical.to_string_lossy().as_bytes());
     let base = dirs::cache_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".cache"))
         .join("engraph")

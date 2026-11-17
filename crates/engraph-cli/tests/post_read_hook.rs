@@ -4,11 +4,10 @@
 //! - missing file_path → silent passthrough
 //! - malformed JSON / empty stdin → silent passthrough (no crash)
 
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 mod common;
-use common::{bin, git};
+use common::{bin, engraph_stdin, git};
 use tempfile::tempdir;
 
 fn run_hook(db_path: &std::path::Path, file_path: &str) -> String {
@@ -20,24 +19,48 @@ fn run_hook(db_path: &std::path::Path, file_path: &str) -> String {
     run_hook_raw(db_path, &payload)
 }
 
+/// Run the hook. A payload with a `file_path` makes the hook record its
+/// telemetry in a detached child, so wait for that child's `read` event: the
+/// tests then see it, and no child writes after the temp dir is gone.
 fn run_hook_raw(db_path: &std::path::Path, payload: &str) -> String {
-    let mut child = Command::new(bin())
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("ENGRAPH_DB_PATH", db_path)
-        .args(["hook", "post-read"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn engraph");
-    child
-        .stdin
-        .as_mut()
+    let records = serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/tool_input/file_path")
+                .and_then(|s| s.as_str())
+                .map(|s| !s.trim().is_empty())
+        })
+        .unwrap_or(false);
+    let before = read_event_count(db_path);
+    let out = run_engraph(db_path, &["hook", "post-read"], payload);
+    if records {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while read_event_count(db_path) == before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the read event was not recorded"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    out
+}
+
+fn read_event_count(db: &std::path::Path) -> i64 {
+    rusqlite::Connection::open(db)
         .unwrap()
-        .write_all(payload.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE feature = 'read'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// `engraph <args>` with `payload` on stdin; returns stdout.
+fn run_engraph(db_path: &std::path::Path, args: &[&str], payload: &str) -> String {
+    let cwd = std::env::current_dir().unwrap();
+    let out = engraph_stdin(db_path, &cwd, args, payload);
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -225,4 +248,230 @@ fn absolute_path_in_a_linked_worktree_emits_context() {
     insert_in_project(&db, &repo);
     let out = run_hook(&db, wt.join("src/lib.rs").to_str().unwrap());
     assert!(context(&out).contains("widget_count"), "got: {out}");
+}
+
+/// The `read` events in `db`: (session_id, filter_id, input_tokens, path_hash).
+fn read_events(db: &std::path::Path) -> Vec<(Option<String>, String, i64, String)> {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT session_id, filter_id, input_tokens, path_hash FROM events
+             WHERE kind = 'hook' AND feature = 'read' ORDER BY seq",
+        )
+        .unwrap();
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// A PostToolUse(Read) payload of a text read, in the shape Claude Code sends.
+fn text_read_payload(session: &str, file_path: &str, content: &str) -> String {
+    serde_json::json!({
+        "session_id": session,
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_input": { "file_path": file_path },
+        "tool_response": {
+            "type": "text",
+            "file": {
+                "filePath": file_path,
+                "content": content,
+                "numLines": 2,
+                "startLine": 1,
+                "totalLines": 2
+            }
+        }
+    })
+    .to_string()
+}
+
+#[test]
+fn text_read_records_one_event_with_the_read_tokens() {
+    let (_t, db) = db_dir();
+    let content = "fn main() {\n    println!(\"hello\");\n}";
+    run_hook_raw(&db, &text_read_payload("s1", "/repo/src/main.rs", content));
+    let events = read_events(&db);
+    assert_eq!(events.len(), 1, "got: {events:?}");
+    let (session, kind, tokens, hash) = &events[0];
+    assert_eq!(session.as_deref(), Some("s1"));
+    assert_eq!(kind, "text");
+    assert_eq!(*tokens, engraph_core::tokens::count(content) as i64);
+    // A hash, not the path itself.
+    assert_eq!(hash.len(), 64);
+    assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(!hash.contains("main.rs"));
+}
+
+#[test]
+fn read_of_an_indexed_file_records_the_read_and_the_augment() {
+    let (_t, db) = db_dir();
+    insert_entity(
+        &db,
+        "process_order",
+        "src/order.rs",
+        "1-2",
+        "fn process_order()",
+    );
+    let out = run_hook_raw(
+        &db,
+        &text_read_payload("s1", "src/order.rs", "fn process_order() {}"),
+    );
+    assert!(context(&out).contains("process_order"));
+    assert_eq!(read_events(&db).len(), 1);
+}
+
+#[test]
+fn reads_of_one_path_have_one_hash() {
+    let (_t, db) = db_dir();
+    run_hook_raw(&db, &text_read_payload("s1", "/repo/a.rs", "a"));
+    run_hook_raw(&db, &text_read_payload("s1", "/repo/a.rs", "a"));
+    run_hook_raw(&db, &text_read_payload("s1", "/repo/b.rs", "b"));
+    let events = read_events(&db);
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].3, events[1].3);
+    assert_ne!(events[0].3, events[2].3);
+}
+
+#[test]
+fn image_read_records_an_event_with_no_tokens() {
+    let (_t, db) = db_dir();
+    let payload = serde_json::json!({
+        "session_id": "s1",
+        "tool_name": "Read",
+        "tool_input": { "file_path": "/repo/p.png" },
+        "tool_response": {
+            "type": "image",
+            "file": { "base64": "iVBORw0KGgo=", "type": "image/png", "originalSize": 70 }
+        }
+    })
+    .to_string();
+    run_hook_raw(&db, &payload);
+    let events = read_events(&db);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].1, "image");
+    assert_eq!(events[0].2, 0);
+}
+
+#[test]
+fn notebook_read_counts_the_cell_sources() {
+    let (_t, db) = db_dir();
+    let payload = serde_json::json!({
+        "session_id": "s1",
+        "tool_name": "Read",
+        "tool_input": { "file_path": "/repo/n.ipynb" },
+        "tool_response": {
+            "type": "notebook",
+            "file": {
+                "filePath": "/repo/n.ipynb",
+                "cells": [
+                    { "cellType": "code", "source": "print(1)", "cell_id": "cell-0" },
+                    { "cellType": "markdown", "source": "# Title", "cell_id": "cell-1" }
+                ]
+            }
+        }
+    })
+    .to_string();
+    run_hook_raw(&db, &payload);
+    let events = read_events(&db);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].1, "notebook");
+    let expected = engraph_core::tokens::count("print(1)") + engraph_core::tokens::count("# Title");
+    assert_eq!(events[0].2, expected as i64);
+}
+
+#[test]
+fn record_read_records_the_read_and_the_augment() {
+    let (_t, db) = db_dir();
+    let payload = serde_json::json!({
+        "session_id": "s1",
+        "file_path": "/repo/a.rs",
+        "read_type": "text",
+        "range": "1+1",
+        "texts": ["fn a() {}"],
+        "augment": "Indexed symbols in /repo/a.rs:\n- `a` @ 1:1\n"
+    })
+    .to_string();
+    let out = run_engraph(&db, &["hook", "record-read"], &payload);
+    assert!(
+        out.trim().is_empty(),
+        "record-read prints nothing, got: {out}"
+    );
+    let events = read_events(&db);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].2, engraph_core::tokens::count("fn a() {}") as i64);
+    let augment: i64 = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT output_tokens FROM events WHERE feature = 'read_augment'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        augment,
+        engraph_core::tokens::count("Indexed symbols in /repo/a.rs:\n- `a` @ 1:1\n") as i64
+    );
+}
+
+#[test]
+fn read_of_an_indexed_file_records_the_augment_tokens() {
+    let (_t, db) = db_dir();
+    insert_entity(
+        &db,
+        "process_order",
+        "src/order.rs",
+        "1-2",
+        "fn process_order()",
+    );
+    let out = run_hook_raw(
+        &db,
+        &text_read_payload("s1", "src/order.rs", "fn process_order() {}"),
+    );
+    let ctx = context(&out);
+    // The augment event is written in the same child, before the read event,
+    // with the session of the read (the payload's: the env var is unset).
+    let (augment, session): (i64, Option<String>) = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT output_tokens, session_id FROM events WHERE feature = 'read_augment'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(augment, engraph_core::tokens::count(&ctx) as i64);
+    assert_eq!(session.as_deref(), Some("s1"));
+}
+
+/// The `read_range` of each `read` event in `db`, in order.
+fn read_ranges(db: &std::path::Path) -> Vec<Option<String>> {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT read_range FROM events WHERE feature = 'read' ORDER BY seq")
+        .unwrap();
+    stmt.query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+#[test]
+fn text_read_records_the_lines_it_returned_as_its_range() {
+    let (_t, db) = db_dir();
+    run_hook_raw(&db, &text_read_payload("s1", "/repo/a.rs", "a\nb"));
+    assert_eq!(read_ranges(&db), [Some("1+2".to_string())]);
+}
+
+#[test]
+fn pdf_read_records_its_pages_as_its_range() {
+    let (_t, db) = db_dir();
+    let payload = serde_json::json!({
+        "session_id": "s1",
+        "tool_name": "Read",
+        "tool_input": { "file_path": "/repo/d.pdf", "pages": "3-5" },
+        "tool_response": { "type": "pdf", "file": { "base64": "JVBERi0=" } }
+    })
+    .to_string();
+    run_hook_raw(&db, &payload);
+    assert_eq!(read_ranges(&db), [Some("3-5".to_string())]);
 }

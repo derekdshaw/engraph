@@ -49,7 +49,6 @@ use crate::bazel::{FAILURE_TAIL_LINES, bazel_binary, failure_tail, output_base_f
 use crate::scip_loader::{self, LoadOptions};
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
-use sha2::{Digest, Sha256};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -822,10 +821,7 @@ fn scip_output_dir(repo: &Path) -> Result<PathBuf> {
     // `bazel clean` doesn't blow them away mid-load). Hash by canonical
     // repo path for stability across runs.
     let canonical = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.to_string_lossy().as_bytes());
-    let digest = hasher.finalize();
-    let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+    let hex = engraph_core::utils::sha256_hex(canonical.to_string_lossy().as_bytes());
     let base = dirs::cache_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".cache"))
         .join("engraph")

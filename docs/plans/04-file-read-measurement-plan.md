@@ -41,33 +41,90 @@ total. `engraph gain --by-filter` does not show them, because each report uses
 `SAVINGS_WHERE` does not include `kind = 'index'`. Thus, the user cannot see
 how frequently the automatic refresh operates, or its time.
 
+Condition of the read telemetry (2026-11-16): steps 1 and 2 are complete.
+The input of the PostToolUse(Read) hook includes the read in
+`tool_response`. For a text file, `tool_response.file.content` has only the
+lines that `offset` and `limit` selected. Thus, the hook does not read the
+file again. The hook records one `hook` / `read` event for each read, with
+the token count in `input_tokens`, the read type (`text`, `notebook`,
+`image`, `pdf`) in `filter_id`, and the SHA-256 of the path in
+`events.path_hash` and the range that the read returned in
+`events.read_range` (schema v17). Images and PDFs record 0 tokens. The
+tokenizer starts in approximately 70 ms, thus a detached child process
+(`engraph hook record-read`) counts the tokens and records the events. The
+hook does not wait for the child.
+
+Condition (2026-11-16): step 3 is complete. `engraph gain --reads` shows
+the count and tokens of all reads, of the repeats (a range of a file that
+the session read before), and of the new ranges (another range of such a
+file). Step 4
+waits until the binary with steps 2 and 3 is installed.
+
+Condition (2026-11-16): step 8 is complete. `engraph gain --index` shows
+one row for each `filter_id` of the `index` events (`auto`, `if_changed`,
+`workspace`, or the driver name): the runs, the total time, the mean time,
+and the SCIP bytes of the runs that produced SCIP, and the count of no-op
+runs (nothing to do, skipped, or failed). `--all` and `--json` include the rows. The CSV gives
+the runs and the SCIP bytes, but not the time, because the CSV has no time
+column. The savings totals do not change.
+
+Steps 1, 2, 3, and 8 are done. Steps 4 to 7 are follow-up work.
+
 ## Steps
 
 The index runs step (step 8) does not depend on the other steps. You can do it
 at any time.
 
-1. Find out if the input of the PostToolUse(Read) hook includes the content of
+1. **Done (2026-11-16).** Find out if the input of the PostToolUse(Read) hook includes the content of
    the read in `tool_response`. If it does not, count the tokens of the lines
    that the read selected. Use the file path, `offset`, and `limit` in
    `tool_input`.
-2. In the PostToolUse(Read) hook, record a telemetry event for each read. In
+
+   Result: it does. Claude Code 2.1.326 sends `tool_response.file.content`
+   for text, `file.cells` for a notebook, and `file.base64` for an image or
+   a PDF. 256 text reads in 47 transcripts had the same shape.
+2. **Done (2026-11-16).** In the PostToolUse(Read) hook, record a telemetry event for each read. In
    this event, record the token count of the read and a hash of the file path.
-3. Add the `--reads` flag to the `engraph gain` command. With `--reads`, show
+3. **Done (2026-11-16).** Add the `--reads` flag to the `engraph gain` command. With `--reads`, show
    the tokens of all reads. Also show the tokens of reads of a file that the
    session read before.
-4. Collect this data for two weeks. In the same two weeks, measure the total
+4. **Follow-up.** Collect this data for two weeks. In the same two weeks, measure the total
    savings with `engraph gain`. The initial success criterion of engraph is
    that it saves 20% or more of all tokens.
-5. If the reads of the same file again are not one of the three largest token
+5. **Follow-up.** If the reads of the same file again are not one of the three largest token
    sources, stop the work on this plan.
-6. Find out if a different method can make reads of the same file smaller. A
-   possible method: for a read of an unchanged file that the session read
-   before, the PreToolUse(Read) hook stops the read and refers Claude to the
-   earlier result.
-7. Before you use the method of step 6, find out what occurs after Claude Code
+6. **Follow-up.** Find out if a different method can make reads of the same
+   file smaller. A possible method: for a read of an unchanged file that the
+   session read before, the PreToolUse(Read) hook stops the read and refers
+   Claude to the earlier result.
+
+   This method is possibly not safe. The hook cannot know if the earlier
+   result is still in the context. After compaction, Claude can receive a
+   refusal and no file content. A different method: mark each read. The
+   PostToolUse(Read) hook adds a marker to `additionalContext`, for example
+   `engraph-read:<hash>`, where the hash identifies the path, the range, and
+   the content. Before a read of the same file, the PreToolUse(Read) hook
+   looks for the marker in the session transcript (`transcript_path`). If
+   the marker is present and the content did not change, the hook refers
+   Claude to the earlier result. If the marker is not present, the hook
+   lets the read continue. Find out these items:
+
+   - Compaction writes a `system` entry with `subtype: "compact_boundary"`.
+     Its `compactMetadata.preservedMessages.uuids` gives the messages that
+     stay in the context. The marker is present only if it is after the last
+     boundary, or in a preserved message.
+   - The compaction summary (a `user` entry with `isCompactSummary: true`)
+     can contain the marker text, but not the file content. Do not use a
+     marker in the summary.
+   - Find out if Claude Code can remove old tool results from the context
+     without a `compact_boundary` entry. If it can, the transcript does not
+     show the removal, and the marker method is not safe.
+   - Find out if the marker in `additionalContext` is in the transcript, and
+     where.
+7. **Follow-up.** Before you use the method of step 6, find out what occurs after Claude Code
    compacts the conversation. After compaction, the earlier result is possibly
    not in the context.
-8. Add the `--index` flag to the `engraph gain` command. With `--index`, show
+8. **Done (2026-11-16).** Add the `--index` flag to the `engraph gain` command. With `--index`, show
    one row for each `filter_id` of the `index` events: the number of runs, the
    total time, the mean time, and the SCIP bytes. Do not add these rows to
    `SAVINGS_WHERE`, because index runs do not save tokens. Include the rows in

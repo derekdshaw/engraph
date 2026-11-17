@@ -13,10 +13,46 @@ pub struct EventInput<'a> {
 }
 
 pub fn record_event(conn: &PooledConn, ev: EventInput<'_>) -> Result<String> {
+    insert_event(conn, &ev, None, None)
+}
+
+/// Record one file read (a `hook` / `read` event). `input_tokens` is the token
+/// count of the read; `filter_id` is the read type (`text`, `image`, `pdf`,
+/// `notebook`); `range` is the part of the file the read returned (`None`
+/// when the read reports none: a notebook, an image, a whole PDF). The path is stored only as its SHA-256, which is enough to
+/// find reads of a file, or of one range of it, that the session read before.
+pub fn record_read(
+    conn: &PooledConn,
+    session_id: Option<&str>,
+    read_type: &str,
+    file_path: &str,
+    range: Option<&str>,
+    tokens: i64,
+    latency_ms: i64,
+) -> Result<String> {
+    let ev = EventInput {
+        session_id,
+        kind: EventKind::Hook,
+        feature: "read",
+        filter_id: Some(read_type),
+        input_tokens: tokens,
+        output_tokens: 0,
+        latency_ms,
+    };
+    let path_hash = crate::utils::sha256_hex(file_path.as_bytes());
+    insert_event(conn, &ev, Some(&path_hash), range)
+}
+
+fn insert_event(
+    conn: &PooledConn,
+    ev: &EventInput<'_>,
+    path_hash: Option<&str>,
+    read_range: Option<&str>,
+) -> Result<String> {
     let id = Uuid::now_v7().to_string();
     conn.execute(
-        "INSERT INTO events (id, session_id, kind, feature, filter_id, input_tokens, output_tokens, latency_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO events (id, session_id, kind, feature, filter_id, input_tokens, output_tokens, latency_ms, path_hash, read_range) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             id,
             ev.session_id,
@@ -26,9 +62,11 @@ pub fn record_event(conn: &PooledConn, ev: EventInput<'_>) -> Result<String> {
             ev.input_tokens,
             ev.output_tokens,
             ev.latency_ms,
+            path_hash,
+            read_range,
         ],
     )?;
-    emit_metrics(&ev);
+    emit_metrics(ev);
     Ok(id)
 }
 
@@ -270,6 +308,96 @@ pub fn gain_summary(conn: &PooledConn) -> Result<GainSummary> {
         })
     })?;
     Ok(s)
+}
+
+/// File reads (`read` events, §5.6 of DETAILS.md): all of them; the repeats,
+/// reads of a range of a file that the same session read before; and the new
+/// ranges, reads of another range of a file that the session read before
+/// (such as the next page of a long file). A read without a session id is
+/// neither. Reads have no savings semantic, so they are outside
+/// `SAVINGS_WHERE`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReadsReport {
+    pub reads: i64,
+    pub read_tokens: i64,
+    pub repeat_reads: i64,
+    pub repeat_tokens: i64,
+    pub new_range_reads: i64,
+    pub new_range_tokens: i64,
+}
+
+// Only read events have a path_hash, so the filter is that column alone:
+// it lets the scan use the partial `idx_events_reads`, whose order serves
+// the `range_nth` window (SQLite evaluates the last window first).
+const READS_SQL: &str = "SELECT COUNT(*), COALESCE(SUM(input_tokens),0), \
+        COALESCE(SUM(range_nth > 1),0), \
+        COALESCE(SUM(CASE WHEN range_nth > 1 THEN input_tokens ELSE 0 END),0), \
+        COALESCE(SUM(range_nth = 1 AND path_nth > 1),0), \
+        COALESCE(SUM(CASE WHEN range_nth = 1 AND path_nth > 1 \
+                          THEN input_tokens ELSE 0 END),0) \
+ FROM (SELECT input_tokens, \
+              CASE WHEN session_id IS NULL THEN 1 \
+                   ELSE ROW_NUMBER() OVER (PARTITION BY session_id, path_hash \
+                                           ORDER BY seq) END AS path_nth, \
+              CASE WHEN session_id IS NULL THEN 1 \
+                   ELSE ROW_NUMBER() OVER (PARTITION BY session_id, path_hash, \
+                                           read_range ORDER BY seq) END AS range_nth \
+       FROM events WHERE path_hash IS NOT NULL)";
+
+pub fn gain_reads(conn: &PooledConn) -> Result<ReadsReport> {
+    let r = conn.query_row(READS_SQL, [], |r| {
+        Ok(ReadsReport {
+            reads: r.get(0)?,
+            read_tokens: r.get(1)?,
+            repeat_reads: r.get(2)?,
+            repeat_tokens: r.get(3)?,
+            new_range_reads: r.get(4)?,
+            new_range_tokens: r.get(5)?,
+        })
+    })?;
+    Ok(r)
+}
+
+/// Index runs (`index` events) of one `filter_id`: `auto` (the SessionStart
+/// refresh), `if_changed` (`--if-changed` by hand), `workspace`, or the
+/// driver name. `runs`, `total_ms`, and `mean_ms` are of the runs that
+/// produced SCIP; `no_op` counts the others, which `auto` and `if_changed`
+/// record when they find nothing to do, are skipped, or fail (0 bytes), so
+/// the refresh rate is visible without the change checks diluting the time.
+/// Index runs save no tokens, so they are outside `SAVINGS_WHERE`;
+/// `scip_bytes` is the sum of `input_tokens`, which holds the SCIP bytes of a
+/// run.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IndexRow {
+    pub filter_id: String,
+    pub runs: i64,
+    pub total_ms: i64,
+    pub mean_ms: f64,
+    pub scip_bytes: i64,
+    pub no_op: i64,
+}
+
+pub fn gain_index(conn: &PooledConn) -> Result<Vec<IndexRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(filter_id,'?') AS f, COALESCE(SUM(input_tokens > 0),0), \
+                COALESCE(SUM(CASE WHEN input_tokens > 0 THEN latency_ms ELSE 0 END),0), \
+                COALESCE(AVG(CASE WHEN input_tokens > 0 THEN latency_ms END),0), \
+                COALESCE(SUM(input_tokens),0), COALESCE(SUM(input_tokens = 0),0) \
+         FROM events WHERE kind = 'index' GROUP BY f ORDER BY COUNT(*) DESC, f",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(IndexRow {
+                filter_id: r.get(0)?,
+                runs: r.get(1)?,
+                total_ms: r.get(2)?,
+                mean_ms: r.get(3)?,
+                scip_bytes: r.get(4)?,
+                no_op: r.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 /// Calendar granularity for `gain_by_time`.
@@ -577,6 +705,112 @@ mod tests {
         assert_eq!(s.input_tokens, 1800);
         assert_eq!(s.output_tokens, 550);
         assert_eq!(s.saved_tokens, 1250);
+    }
+
+    #[test]
+    fn reads_report_separates_repeats_and_new_ranges() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let read = |session, path, range, tokens| {
+            record_read(&conn, session, "text", path, range, tokens, 0).unwrap();
+        };
+        read(Some("s1"), "/r/a.rs", Some("1+10"), 100);
+        // Same session, file, and range: a repeat.
+        read(Some("s1"), "/r/a.rs", Some("1+10"), 40);
+        // The next page of a file the session read: a new range, not a repeat.
+        read(Some("s1"), "/r/a.rs", Some("11+10"), 60);
+        read(Some("s1"), "/r/a.rs", Some("11+10"), 20);
+        read(Some("s1"), "/r/b.rs", None, 30);
+        // Another session reading a.rs for the first time: neither.
+        read(Some("s2"), "/r/a.rs", Some("1+10"), 100);
+        // Without a session id, a read is neither.
+        read(None, "/r/c.rs", None, 10);
+        read(None, "/r/c.rs", None, 10);
+        // Other events are not reads.
+        record_event(&conn, ev(EventKind::Hook, "read_augment", 0, 50)).unwrap();
+
+        let r = gain_reads(&conn).unwrap();
+        assert_eq!((r.reads, r.read_tokens), (8, 370));
+        assert_eq!((r.repeat_reads, r.repeat_tokens), (2, 60));
+        assert_eq!((r.new_range_reads, r.new_range_tokens), (1, 60));
+        // Reads have no savings semantic.
+        assert_eq!(gain_summary(&conn).unwrap().commands, 0);
+    }
+
+    #[test]
+    fn reads_report_scans_the_reads_index() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {READS_SQL}"))
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map([], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|d| d.contains("idx_events_reads")),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn index_report_has_one_row_per_filter_id() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let index = |filter_id, bytes, ms| EventInput {
+            session_id: None,
+            kind: EventKind::Index,
+            feature: "codegraph_index",
+            filter_id: Some(filter_id),
+            input_tokens: bytes,
+            output_tokens: 0,
+            latency_ms: ms,
+        };
+        record_event(&conn, index("auto", 1000, 100)).unwrap();
+        record_event(&conn, index("auto", 3000, 300)).unwrap();
+        record_event(&conn, index("if_changed", 500, 50)).unwrap();
+        record_event(&conn, index("rust-analyzer", 9000, 2000)).unwrap();
+        // Runs that produced no SCIP (nothing changed, skipped) are no-ops:
+        // counted apart, and not in the time.
+        record_event(&conn, index("auto", 0, 5)).unwrap();
+        record_event(&conn, index("if_changed", 0, 5)).unwrap();
+        record_event(&conn, index("workspace", 0, 5)).unwrap();
+        record_event(&conn, ev(EventKind::Compress, "compress", 1000, 400)).unwrap();
+        let before = gain_summary(&conn).unwrap();
+
+        let rows = gain_index(&conn).unwrap();
+        let row = |f: &str| rows.iter().find(|r| r.filter_id == f).unwrap();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            (
+                row("auto").runs,
+                row("auto").total_ms,
+                row("auto").scip_bytes
+            ),
+            (2, 400, 4000)
+        );
+        assert_eq!(row("auto").mean_ms, 200.0);
+        assert_eq!(row("auto").no_op, 1);
+        assert_eq!(row("if_changed").no_op, 1);
+        assert_eq!(row("rust-analyzer").no_op, 0);
+        let ws = row("workspace");
+        assert_eq!((ws.runs, ws.total_ms, ws.mean_ms, ws.no_op), (0, 0, 0.0, 1));
+        assert_eq!(
+            (row("if_changed").runs, row("if_changed").total_ms),
+            (1, 50)
+        );
+        assert_eq!(
+            (row("rust-analyzer").runs, row("rust-analyzer").scip_bytes),
+            (1, 9000)
+        );
+        // Index runs save no tokens: the summary counts only the compress row.
+        assert_eq!(before.commands, 1);
+        assert_eq!(before.input_tokens, 1000);
     }
 
     #[test]

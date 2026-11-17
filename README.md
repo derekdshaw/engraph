@@ -146,6 +146,8 @@ Savings come from three sources, partitioned by the `by source` table: **command
 | `--daily` / `--weekly` / `--monthly` / `--all` | time-bucketed breakdowns |
 | `--graph` | horizontal bar chart of saved tokens/day over the last 30 days |
 | `--history [N]` | the most recent N savings events |
+| `--reads` | tokens of all file reads, of repeats (a range of a file that the session read before), and of new ranges (another range of such a file) (not savings; included in `--all`) |
+| `--index` | index runs per type (`auto`, `if_changed`, `workspace`, driver name): runs that produced SCIP, their total and mean time, SCIP bytes, and no-op runs (not savings; included in `--all`) |
 | `--format text\|json\|csv` (or `--json`) | machine-readable export |
 
 The same telemetry can be exported to an OpenTelemetry collector (OTLP/gRPC) for
@@ -362,6 +364,8 @@ engraph gain                       # summary + per-feature table
 engraph gain --by-filter           # per-command breakdown
 engraph gain --daily               # (or --weekly / --monthly / --all)
 engraph gain --graph               # ASCII saved-tokens/day chart
+engraph gain --reads               # file-read tokens, and the share of repeat reads
+engraph gain --index               # index runs per type: count, time, SCIP bytes, no-op runs
 engraph gain --all --format json   # machine-readable export (--json still works)
 
 # Per-session token budget (--session-id is required)

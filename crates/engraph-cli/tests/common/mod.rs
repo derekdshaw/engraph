@@ -3,8 +3,9 @@
 // Each test binary compiles this module and uses only some of it.
 #![allow(dead_code)]
 
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 pub fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_engraph")
@@ -26,6 +27,34 @@ pub fn command(db: &Path, cwd: &Path, args: &[&str]) -> Command {
 /// Run `command` to completion.
 pub fn engraph(db: &Path, cwd: &Path, args: &[&str]) -> Output {
     command(db, cwd, args).output().expect("spawn engraph")
+}
+
+/// Run `command` to completion with `stdin` as its input.
+pub fn engraph_stdin(db: &Path, cwd: &Path, args: &[&str], stdin: &str) -> Output {
+    let mut child = command(db, cwd, args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn engraph");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// The whitespace-separated fields of the line of `text` whose first field
+/// is `key`, for a row of a text table.
+pub fn row(text: &str, key: &str) -> Vec<String> {
+    text.lines()
+        .find(|l| l.split_whitespace().next() == Some(key))
+        .unwrap_or_else(|| panic!("no `{key}` row in:\n{text}"))
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
 }
 
 /// `engraph`, with the SCIP scratch file kept out of the user's data dir.

@@ -24,13 +24,13 @@ mod redirect;
 mod rewrite;
 use cli::{BudgetCmd, Cli, Cmd, GainFormat, HookCmd};
 use hooks::{
-    run_post_read_hook, run_pre_bash_hook, run_pre_grep_hook, run_session_end_hook,
-    run_session_start_hook,
+    run_post_read_hook, run_pre_bash_hook, run_pre_grep_hook, run_record_read,
+    run_session_end_hook, run_session_start_hook,
 };
 use output::{
     csv_line, print_filter_gain_table, print_gain_summary, print_gain_table, print_graph,
-    print_history, print_hits, print_repo_plan, print_scope_table, print_source_table,
-    print_symbol_langs, print_time_table, print_workspace_plan, scope_label,
+    print_history, print_hits, print_index_table, print_reads, print_repo_plan, print_scope_table,
+    print_source_table, print_symbol_langs, print_time_table, print_workspace_plan, scope_label,
 };
 
 // `main` is async because the OTLP/gRPC metrics exporter (the `otel` feature)
@@ -64,6 +64,17 @@ async fn main() -> Result<()> {
     let otel_guard = engraph_core::otel::init_from_env();
 
     let cli = Cli::parse();
+    // Before the database opens: the post-read hook's write to this child's
+    // stdin waits until the child reads it.
+    if let Cmd::Hook {
+        cmd: HookCmd::RecordRead,
+    } = cli.cmd
+    {
+        if let Err(e) = run_record_read() {
+            tracing::warn!(?e, "record-read failed; read not recorded");
+        }
+        return Ok(());
+    }
     let pool = db::open_default_pool()?;
     let conn = pool.get()?;
 
@@ -77,6 +88,8 @@ async fn main() -> Result<()> {
             daily,
             weekly,
             monthly,
+            reads,
+            index,
             all,
             graph,
             history,
@@ -92,6 +105,8 @@ async fn main() -> Result<()> {
                     daily: daily || all,
                     weekly: weekly || all,
                     monthly: monthly || all,
+                    reads: reads || all,
+                    index: index || all,
                     graph,
                     history,
                 },
@@ -179,6 +194,7 @@ async fn main() -> Result<()> {
                     tracing::warn!(?e, "post-read hook failed; emitting empty");
                 }
             }
+            HookCmd::RecordRead => unreachable!("handled before the database opens"),
             HookCmd::SessionStart { client } => {
                 if let Err(e) = run_session_start_hook(&conn, client) {
                     tracing::warn!(?e, "session-start hook failed; emitting empty");
@@ -907,6 +923,8 @@ struct GainOpts {
     daily: bool,
     weekly: bool,
     monthly: bool,
+    reads: bool,
+    index: bool,
     graph: bool,
     history: Option<usize>,
 }
@@ -920,6 +938,8 @@ impl GainOpts {
             && !self.daily
             && !self.weekly
             && !self.monthly
+            && !self.reads
+            && !self.index
             && !self.graph
             && self.history.is_none()
     }
@@ -961,6 +981,14 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
         .monthly
         .then(|| telemetry::gain_by_time(conn, TimeBucket::Monthly))
         .transpose()?;
+    let reads = opts
+        .reads
+        .then(|| telemetry::gain_reads(conn))
+        .transpose()?;
+    let index = opts
+        .index
+        .then(|| telemetry::gain_index(conn))
+        .transpose()?;
     let history = opts
         .history
         .map(|n| telemetry::gain_history(conn, n.max(1)))
@@ -995,6 +1023,12 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
             }
             if let Some(r) = &monthly {
                 obj.insert("monthly".into(), serde_json::to_value(r)?);
+            }
+            if let Some(r) = &reads {
+                obj.insert("reads".into(), serde_json::to_value(r)?);
+            }
+            if let Some(r) = &index {
+                obj.insert("index".into(), serde_json::to_value(r)?);
             }
             if let Some(r) = &history {
                 obj.insert("history".into(), serde_json::to_value(r)?);
@@ -1109,6 +1143,35 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
                     }
                 }
             }
+            // Reads are not savings: only count and tokens (in `input_tk`).
+            if let Some(r) = &reads {
+                for (key, count, tokens) in [
+                    ("all", r.reads, r.read_tokens),
+                    ("repeat", r.repeat_reads, r.repeat_tokens),
+                    ("new_range", r.new_range_reads, r.new_range_tokens),
+                ] {
+                    println!(
+                        "{}",
+                        csv_line(&["reads", key, &n(count), &n(tokens), "", "", ""])
+                    );
+                }
+            }
+            // Index runs are not savings: runs and SCIP bytes (in `input_tk`).
+            // The CSV has no time column; time is in text and JSON.
+            for r in index.iter().flatten() {
+                println!(
+                    "{}",
+                    csv_line(&[
+                        "index",
+                        &r.filter_id,
+                        &n(r.runs),
+                        &n(r.scip_bytes),
+                        "",
+                        "",
+                        ""
+                    ])
+                );
+            }
         }
         GainFormat::Text => {
             print_gain_summary(&summary);
@@ -1134,6 +1197,12 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
             }
             if let Some(rows) = &monthly {
                 print_time_table(rows, TimeBucket::Monthly.label());
+            }
+            if let Some(r) = &reads {
+                print_reads(r);
+            }
+            if let Some(rows) = &index {
+                print_index_table(rows);
             }
             if let Some(rows) = &graph {
                 print_graph(rows, GRAPH_DAYS);

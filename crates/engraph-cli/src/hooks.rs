@@ -5,6 +5,7 @@ use engraph_core::{
     telemetry::{self, EventInput},
     tokens,
 };
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -220,11 +221,21 @@ fn spawn_detached_index(cwd: &Path) {
         .stdin(Stdio::null())
         .stdout(out)
         .stderr(err);
+    detach(&mut cmd);
+    match cmd.spawn() {
+        // Dropping the handle without waiting is the point: the child is
+        // reparented when the hook exits.
+        Ok(child) => tracing::info!(pid = child.id(), cwd = %cwd.display(), "auto-index started"),
+        Err(e) => tracing::warn!(error = %e, "auto-index: spawn failed"),
+    }
+}
+
+/// Put `cmd` in its own process group (session on Windows), so a
+/// SIGINT/SIGHUP aimed at the hook's group doesn't take the child with it.
+fn detach(cmd: &mut std::process::Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // New process group: a SIGINT/SIGHUP aimed at the hook's group
-        // doesn't take the refresh with it.
         cmd.process_group(0);
     }
     #[cfg(windows)]
@@ -233,12 +244,6 @@ fn spawn_detached_index(cwd: &Path) {
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
-    match cmd.spawn() {
-        // Dropping the handle without waiting is the point: the child is
-        // reparented when the hook exits.
-        Ok(child) => tracing::info!(pid = child.id(), cwd = %cwd.display(), "auto-index started"),
-        Err(e) => tracing::warn!(error = %e, "auto-index: spawn failed"),
     }
 }
 
@@ -562,6 +567,16 @@ fn hook_cwd(v: &serde_json::Value) -> Option<PathBuf> {
         .or_else(|| std::env::current_dir().ok())
 }
 
+/// The session of a hook: `CLAUDE_SESSION_ID` when set, else the payload's
+/// `session_id` (Codex sends only the payload).
+fn hook_session_id(v: &serde_json::Value) -> Option<String> {
+    std::env::var("CLAUDE_SESSION_ID").ok().or_else(|| {
+        v.pointer("/session_id")
+            .and_then(|s| s.as_str())
+            .map(str::to_string)
+    })
+}
+
 /// PreToolUse(Grep) hook: redirect bareword Grep on an indexed symbol to
 /// `engraph subgraph`. See `try_subgraph_redirect` for the gate.
 pub(crate) fn run_pre_grep_hook(conn: &db::PooledConn) -> Result<()> {
@@ -617,30 +632,168 @@ pub(crate) fn run_post_read_hook(conn: &db::PooledConn) -> Result<()> {
         None => (None, file_path.to_string()),
     };
     let entities =
-        engraph_codegraph::subgraph::entities_in_file(conn, project.as_deref(), &indexed_path, 30)?;
-    if entities.is_empty() {
-        return Ok(());
+        engraph_codegraph::subgraph::entities_in_file(conn, project.as_deref(), &indexed_path, 30);
+    let context = match &entities {
+        Ok(e) if !e.is_empty() => Some(truncate_to_bytes(
+            &build_read_context(file_path, e),
+            MAX_BRIEF_BYTES,
+        )),
+        _ => None,
+    };
+    if let Some(context) = &context {
+        let decision = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": context
+            }
+        });
+        println!("{decision}");
     }
-    let context = truncate_to_bytes(&build_read_context(file_path, &entities), MAX_BRIEF_BYTES);
-    let decision = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "additionalContext": context
+    // The tokenizer takes ~70 ms to start in each process; count in a
+    // detached child so Claude does not wait for it.
+    spawn_record_read(&read_record(&v, file_path, context.as_deref()));
+    entities.map(|_| ())
+}
+
+/// What `record-read` needs of one read. The hook extracts it so that only
+/// the text to count crosses the pipe, not the base64 of an image or PDF.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReadRecord<'a> {
+    #[serde(borrow)]
+    session_id: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    file_path: Cow<'a, str>,
+    #[serde(borrow)]
+    read_type: Cow<'a, str>,
+    /// `startLine+numLines` of a text read, the `pages` of a PDF read.
+    range: Option<String>,
+    /// The text that Claude received: `file.content` of a text read (only
+    /// the lines that `offset`/`limit` selected, without the line-number
+    /// prefixes Claude sees), the cell sources of a notebook. Empty for an
+    /// image or PDF: base64 the tokenizer cannot measure, so 0 tokens; the
+    /// read type keeps them apart in reports.
+    #[serde(borrow)]
+    texts: Vec<Cow<'a, str>>,
+    #[serde(borrow)]
+    augment: Option<Cow<'a, str>>,
+}
+
+fn read_record<'a>(
+    v: &'a serde_json::Value,
+    file_path: &'a str,
+    augment: Option<&'a str>,
+) -> ReadRecord<'a> {
+    let read_type = v
+        .pointer("/tool_response/type")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown");
+    let file = v.pointer("/tool_response/file");
+    let field = |name: &str| file.and_then(|f| f.get(name));
+    let texts = match read_type {
+        "text" => field("content")
+            .and_then(|s| s.as_str())
+            .map(Cow::Borrowed)
+            .into_iter()
+            .collect(),
+        "notebook" => field("cells")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c.get("source").and_then(|s| s.as_str()))
+            .map(Cow::Borrowed)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let line = |name: &str| field(name).and_then(|n| n.as_u64());
+    let range = match (line("startLine"), line("numLines")) {
+        (Some(start), Some(n)) => Some(format!("{start}+{n}")),
+        _ => v
+            .pointer("/tool_input/pages")
+            .and_then(|p| p.as_str())
+            .map(str::to_string),
+    };
+    ReadRecord {
+        session_id: hook_session_id(v).map(Cow::Owned),
+        file_path: Cow::Borrowed(file_path),
+        read_type: Cow::Borrowed(read_type),
+        range,
+        texts,
+        augment: augment.map(Cow::Borrowed),
+    }
+}
+
+/// Start `engraph hook record-read` detached, give it `record` on stdin, and
+/// return without waiting. stdout/stderr are null so no inherited pipe keeps
+/// the hook "running". Failures are logged and ignored: telemetry is
+/// best-effort.
+fn spawn_record_read(record: &ReadRecord<'_>) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let Ok(exe) = std::env::current_exe() else {
+        tracing::warn!("record-read: can't locate the engraph binary");
+        return;
+    };
+    let mut cmd = Command::new(exe);
+    cmd.args(["hook", "record-read"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    detach(&mut cmd);
+    match cmd.spawn() {
+        // The child reads all of stdin before it opens the database or
+        // starts the tokenizer, so a record larger than the pipe buffer
+        // blocks only until the child has started. Dropping `stdin` closes
+        // the pipe; the child is reparented when the hook exits.
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take()
+                && let Err(e) = serde_json::to_vec(record)
+                    .map_err(std::io::Error::from)
+                    .and_then(|bytes| stdin.write_all(&bytes))
+            {
+                tracing::warn!(error = %e, "record-read: write failed");
+            }
         }
-    });
-    println!("{decision}");
-    let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
-    telemetry::record_event(
-        conn,
-        EventInput {
-            session_id: session_id.as_deref(),
-            kind: EventKind::Hook,
-            feature: "read_augment",
-            filter_id: Some("read-augment"),
-            input_tokens: 0,
-            output_tokens: tokens::count(&context) as i64,
-            latency_ms: 0,
-        },
+        Err(e) => tracing::warn!(error = %e, "record-read: spawn failed"),
+    }
+}
+
+/// `engraph hook record-read`: the telemetry of one `post-read`, from the
+/// record that `spawn_record_read` writes. Opens the database only after
+/// stdin is drained, since the hook's write waits for that. The augment event
+/// is written before the read event, so a reader that sees the read sees both.
+pub(crate) fn run_record_read() -> Result<()> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf)?;
+    let r: ReadRecord = serde_json::from_str(&buf)?;
+    let pool = db::open_default_pool()?;
+    let conn = pool.get()?;
+    let session_id = r.session_id.as_deref();
+    if let Some(context) = &r.augment {
+        telemetry::record_event(
+            &conn,
+            EventInput {
+                session_id,
+                kind: EventKind::Hook,
+                feature: "read_augment",
+                filter_id: Some("read-augment"),
+                input_tokens: 0,
+                output_tokens: tokens::count(context) as i64,
+                latency_ms: 0,
+            },
+        )
+        .ok();
+    }
+    let start = Instant::now();
+    let read_tokens: u32 = r.texts.iter().map(|t| tokens::count(t)).sum();
+    telemetry::record_read(
+        &conn,
+        session_id,
+        &r.read_type,
+        &r.file_path,
+        r.range.as_deref(),
+        read_tokens as i64,
+        start.elapsed().as_millis() as i64,
     )
     .ok();
     Ok(())
@@ -669,12 +822,7 @@ pub(crate) fn run_session_end_hook(conn: &db::PooledConn) -> Result<()> {
     };
     let start = std::time::Instant::now();
     let stats = engraph_ingest::ingest_file(conn, std::path::Path::new(transcript_path))?;
-    // Claude exports the id via env; Codex carries it in the hook payload.
-    let session_id = std::env::var("CLAUDE_SESSION_ID").ok().or_else(|| {
-        v.pointer("/session_id")
-            .and_then(|s| s.as_str())
-            .map(|s| s.to_string())
-    });
+    let session_id = hook_session_id(&v);
     telemetry::record_event(
         conn,
         EventInput {

@@ -347,6 +347,18 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE index_state ADD COLUMN go_tests INTEGER NOT NULL DEFAULT 0;
     "#,
+    // v17 — `events.path_hash`: the SHA-256 of the file path of a `read`
+    // event, so a report can find reads of a file that the session read
+    // before without storing the path; `events.read_range`: the part of the
+    // file that the read returned (NULL when the read reports none). Both
+    // NULL for all other events. The index is in the order of `gain_reads`'
+    // windows.
+    r#"
+    ALTER TABLE events ADD COLUMN path_hash TEXT;
+    ALTER TABLE events ADD COLUMN read_range TEXT;
+    CREATE INDEX IF NOT EXISTS idx_events_reads ON events(session_id, path_hash, read_range)
+        WHERE path_hash IS NOT NULL;
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
@@ -753,6 +765,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, ("abc".into(), false));
+    }
+
+    #[test]
+    fn migrates_through_v17_events_path_hash() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations_to(&mut conn, 16).unwrap();
+        conn.execute_batch("INSERT INTO events (id, kind, feature) VALUES ('e1', 'hook', 'x');")
+            .unwrap();
+        run_migrations_to(&mut conn, 17).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 17);
+        let row: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT path_hash, read_range FROM events WHERE id = 'e1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (None, None));
     }
 
     #[test]
