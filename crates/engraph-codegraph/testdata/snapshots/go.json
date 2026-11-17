@@ -5,8 +5,16 @@
     {
       "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/",
       "name": "models",
-      "file_path": "models/models.go",
-      "line_range": "4:4",
+      "file_path": "models/extra.go",
+      "line_range": "1:1",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/Archived().",
+      "name": "Archived",
+      "file_path": "models/extra.go",
+      "line_range": "6:6",
       "callers": [],
       "callees": []
     },
