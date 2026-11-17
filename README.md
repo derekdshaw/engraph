@@ -146,6 +146,7 @@ Savings come from three sources, partitioned by the `by source` table: **command
 | `--daily` / `--weekly` / `--monthly` / `--all` | time-bucketed breakdowns |
 | `--graph` | horizontal bar chart of saved tokens/day over the last 30 days |
 | `--history [N]` | the most recent N savings events |
+| `--reads` | tokens of all file reads, and of reads of a file that the session read before (not savings; included in `--all`) |
 | `--format text\|json\|csv` (or `--json`) | machine-readable export |
 
 The same telemetry can be exported to an OpenTelemetry collector (OTLP/gRPC) for
@@ -362,6 +363,7 @@ engraph gain                       # summary + per-feature table
 engraph gain --by-filter           # per-command breakdown
 engraph gain --daily               # (or --weekly / --monthly / --all)
 engraph gain --graph               # ASCII saved-tokens/day chart
+engraph gain --reads               # file-read tokens, and the share of repeat reads
 engraph gain --all --format json   # machine-readable export (--json still works)
 
 # Per-session token budget (--session-id is required)

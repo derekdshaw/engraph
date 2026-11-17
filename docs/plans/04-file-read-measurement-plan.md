@@ -53,6 +53,11 @@ tokenizer starts in approximately 70 ms, thus a detached child process
 (`engraph hook record-read`) counts the tokens and records the events. The
 hook does not wait for the child.
 
+Condition (2026-11-16): step 3 is complete. `engraph gain --reads` shows
+the count and tokens of all reads, and of the reads of a file that the
+session read before (at any range, also after the file changed). Step 4
+waits until the binary with steps 2 and 3 is installed.
+
 ## Steps
 
 The index runs step (step 8) does not depend on the other steps. You can do it

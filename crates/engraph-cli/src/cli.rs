@@ -39,6 +39,10 @@ pub(crate) enum Cmd {
         /// Month-by-month savings breakdown.
         #[arg(long)]
         monthly: bool,
+        /// Tokens of all file reads, and of reads of a file that the session
+        /// read before. Reads are not savings; the totals do not change.
+        #[arg(long)]
+        reads: bool,
         /// Show the summary plus every breakdown at once.
         #[arg(long)]
         all: bool,

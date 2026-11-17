@@ -1319,6 +1319,19 @@ This is the contract `engraph gain` is built around. The `TOTAL_SAVED`
 row at the bottom sums only the rows that contributed a numeric
 `saved_tokens`.
 
+### 10.3 File reads (`--reads`)
+
+`engraph gain --reads` (also in `--all`, `--json` as `reads`, CSV as two
+`reads` rows with the tokens in `input_tk`) reports the `read` events of
+§5.6: the count and tokens of all reads, and of the repeats. A repeat is
+a read of a file (`path_hash`) that the same session read before, by
+`ROW_NUMBER() OVER (PARTITION BY session_id, path_hash ORDER BY seq) > 1`
+in `telemetry::gain_reads`. A read of a different range of the file, and a
+read after the file changed, also count as repeats. A read without a
+session id is never a repeat. The text table gives the repeat tokens as a
+share of all read tokens. Reads are not in `SAVINGS_WHERE`, so the savings
+totals do not change.
+
 ---
 
 ## 11. Cross-platform

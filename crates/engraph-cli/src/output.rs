@@ -293,6 +293,29 @@ pub(crate) fn print_source_table(rows: &[telemetry::SourceRow]) {
     }
 }
 
+/// File reads (`--reads`): all of them, and the reads of a file that the
+/// session read before, with that row's share of the read tokens.
+pub(crate) fn print_reads(r: &telemetry::ReadsReport) {
+    println!("\nfile reads");
+    println!(
+        "{:<8} {:>6} {:>10} {:>7}",
+        "reads", "count", "tokens", "share"
+    );
+    let share = if r.read_tokens > 0 {
+        r.repeat_tokens as f64 / r.read_tokens as f64 * 100.0
+    } else {
+        0.0
+    };
+    println!(
+        "{:<8} {:>6} {:>10} {:>6.1}%",
+        "all", r.reads, r.read_tokens, 100.0
+    );
+    println!(
+        "{:<8} {:>6} {:>10} {:>6.1}%",
+        "repeat", r.repeat_reads, r.repeat_tokens, share
+    );
+}
+
 pub(crate) fn print_time_table(rows: &[telemetry::TimeRow], label: &str) {
     println!("\n{label} breakdown ({} bucket(s))", rows.len());
     if rows.is_empty() {

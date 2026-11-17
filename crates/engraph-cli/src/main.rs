@@ -29,7 +29,7 @@ use hooks::{
 };
 use output::{
     csv_line, print_filter_gain_table, print_gain_summary, print_gain_table, print_graph,
-    print_history, print_hits, print_repo_plan, print_scope_table, print_source_table,
+    print_history, print_hits, print_reads, print_repo_plan, print_scope_table, print_source_table,
     print_symbol_langs, print_time_table, print_workspace_plan, scope_label,
 };
 
@@ -77,6 +77,7 @@ async fn main() -> Result<()> {
             daily,
             weekly,
             monthly,
+            reads,
             all,
             graph,
             history,
@@ -92,6 +93,7 @@ async fn main() -> Result<()> {
                     daily: daily || all,
                     weekly: weekly || all,
                     monthly: monthly || all,
+                    reads: reads || all,
                     graph,
                     history,
                 },
@@ -912,6 +914,7 @@ struct GainOpts {
     daily: bool,
     weekly: bool,
     monthly: bool,
+    reads: bool,
     graph: bool,
     history: Option<usize>,
 }
@@ -925,6 +928,7 @@ impl GainOpts {
             && !self.daily
             && !self.weekly
             && !self.monthly
+            && !self.reads
             && !self.graph
             && self.history.is_none()
     }
@@ -966,6 +970,10 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
         .monthly
         .then(|| telemetry::gain_by_time(conn, TimeBucket::Monthly))
         .transpose()?;
+    let reads = opts
+        .reads
+        .then(|| telemetry::gain_reads(conn))
+        .transpose()?;
     let history = opts
         .history
         .map(|n| telemetry::gain_history(conn, n.max(1)))
@@ -1000,6 +1008,9 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
             }
             if let Some(r) = &monthly {
                 obj.insert("monthly".into(), serde_json::to_value(r)?);
+            }
+            if let Some(r) = &reads {
+                obj.insert("reads".into(), serde_json::to_value(r)?);
             }
             if let Some(r) = &history {
                 obj.insert("history".into(), serde_json::to_value(r)?);
@@ -1114,6 +1125,18 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
                     }
                 }
             }
+            // Reads are not savings: only count and tokens (in `input_tk`).
+            if let Some(r) = &reads {
+                for (key, count, tokens) in [
+                    ("all", r.reads, r.read_tokens),
+                    ("repeat", r.repeat_reads, r.repeat_tokens),
+                ] {
+                    println!(
+                        "{}",
+                        csv_line(&["reads", key, &n(count), &n(tokens), "", "", ""])
+                    );
+                }
+            }
         }
         GainFormat::Text => {
             print_gain_summary(&summary);
@@ -1139,6 +1162,9 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
             }
             if let Some(rows) = &monthly {
                 print_time_table(rows, TimeBucket::Monthly.label());
+            }
+            if let Some(r) = &reads {
+                print_reads(r);
             }
             if let Some(rows) = &graph {
                 print_graph(rows, GRAPH_DAYS);

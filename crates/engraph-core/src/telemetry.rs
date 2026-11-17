@@ -318,6 +318,41 @@ pub fn gain_summary(conn: &PooledConn) -> Result<GainSummary> {
     Ok(s)
 }
 
+/// File reads (`read` events, §5.6 of DETAILS.md): all of them, and the
+/// repeats — reads of a file that the same session read before, at any
+/// range. A read without a session id cannot be a repeat. Reads have no
+/// savings semantic, so they are outside `SAVINGS_WHERE`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReadsReport {
+    pub reads: i64,
+    pub read_tokens: i64,
+    pub repeat_reads: i64,
+    pub repeat_tokens: i64,
+}
+
+pub fn gain_reads(conn: &PooledConn) -> Result<ReadsReport> {
+    let r = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(input_tokens),0), \
+                COALESCE(SUM(nth > 1),0), \
+                COALESCE(SUM(CASE WHEN nth > 1 THEN input_tokens ELSE 0 END),0) \
+         FROM (SELECT input_tokens, \
+                      CASE WHEN session_id IS NULL THEN 1 \
+                           ELSE ROW_NUMBER() OVER (PARTITION BY session_id, path_hash \
+                                                   ORDER BY seq) END AS nth \
+               FROM events WHERE kind = 'hook' AND feature = 'read')",
+        [],
+        |r| {
+            Ok(ReadsReport {
+                reads: r.get(0)?,
+                read_tokens: r.get(1)?,
+                repeat_reads: r.get(2)?,
+                repeat_tokens: r.get(3)?,
+            })
+        },
+    )?;
+    Ok(r)
+}
+
 /// Calendar granularity for `gain_by_time`.
 #[derive(Debug, Clone, Copy)]
 pub enum TimeBucket {
@@ -623,6 +658,33 @@ mod tests {
         assert_eq!(s.input_tokens, 1800);
         assert_eq!(s.output_tokens, 550);
         assert_eq!(s.saved_tokens, 1250);
+    }
+
+    #[test]
+    fn reads_report_separates_repeat_reads() {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        record_read(&conn, Some("s1"), "text", "/r/a.rs", 100, 0).unwrap();
+        // Same session, same file: a repeat. A different range still counts.
+        record_read(&conn, Some("s1"), "text", "/r/a.rs", 40, 0).unwrap();
+        record_read(&conn, Some("s1"), "text", "/r/a.rs", 60, 0).unwrap();
+        record_read(&conn, Some("s1"), "text", "/r/b.rs", 30, 0).unwrap();
+        // Another session reading a.rs for the first time: not a repeat.
+        record_read(&conn, Some("s2"), "text", "/r/a.rs", 100, 0).unwrap();
+        // Without a session id, a read cannot be a repeat.
+        record_read(&conn, None, "text", "/r/c.rs", 10, 0).unwrap();
+        record_read(&conn, None, "text", "/r/c.rs", 10, 0).unwrap();
+        // Other events are not reads.
+        record_event(&conn, ev(EventKind::Hook, "read_augment", 0, 50)).unwrap();
+
+        let r = gain_reads(&conn).unwrap();
+        assert_eq!(r.reads, 7);
+        assert_eq!(r.read_tokens, 350);
+        assert_eq!(r.repeat_reads, 2);
+        assert_eq!(r.repeat_tokens, 100);
+        // Reads have no savings semantic.
+        assert_eq!(gain_summary(&conn).unwrap().commands, 0);
     }
 
     #[test]
