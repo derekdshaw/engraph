@@ -11,7 +11,6 @@
 //! while the waiter goes on to lock the old, unlinked one: two holders.
 
 use anyhow::{Context, Result};
-use sha2::{Digest, Sha256};
 use std::fs::{File, TryLockError};
 use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
@@ -73,13 +72,7 @@ pub fn lock_path(project: &str) -> PathBuf {
 
 /// [`lock_path`] under an explicit directory.
 pub fn lock_path_in(dir: &Path, project: &str) -> PathBuf {
-    let mut hasher = Sha256::new();
-    hasher.update(project.as_bytes());
-    let hex: String = hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let hex = engraph_core::utils::sha256_hex(project.as_bytes());
     dir.join(format!("index-{}.lock", &hex[..16]))
 }
 

@@ -293,30 +293,45 @@ pub(crate) fn print_source_table(rows: &[telemetry::SourceRow]) {
     }
 }
 
-/// File reads (`--reads`): all of them, and the reads of a file that the
-/// session read before, with that row's share of the read tokens.
+/// File reads (`--reads`): all of them, the repeats (a range of a file that
+/// the session read before), and the new ranges (another range of such a
+/// file), with each row's share of the read tokens.
 pub(crate) fn print_reads(r: &telemetry::ReadsReport) {
     println!("\nfile reads");
+    if r.reads == 0 {
+        println!("(no file reads)");
+        return;
+    }
     println!(
-        "{:<8} {:>6} {:>10} {:>7}",
+        "{:<10} {:>6} {:>10} {:>7}",
         "reads", "count", "tokens", "share"
     );
-    let share = if r.read_tokens > 0 {
-        r.repeat_tokens as f64 / r.read_tokens as f64 * 100.0
-    } else {
-        0.0
+    // Reads of only images or PDFs have 0 tokens: every share is 0, also
+    // the share of all reads.
+    let share = |tokens: i64| {
+        if r.read_tokens > 0 {
+            tokens as f64 / r.read_tokens as f64 * 100.0
+        } else {
+            0.0
+        }
     };
-    println!(
-        "{:<8} {:>6} {:>10} {:>6.1}%",
-        "all", r.reads, r.read_tokens, 100.0
-    );
-    println!(
-        "{:<8} {:>6} {:>10} {:>6.1}%",
-        "repeat", r.repeat_reads, r.repeat_tokens, share
-    );
+    for (key, count, tokens) in [
+        ("all", r.reads, r.read_tokens),
+        ("repeat", r.repeat_reads, r.repeat_tokens),
+        ("new_range", r.new_range_reads, r.new_range_tokens),
+    ] {
+        println!(
+            "{:<10} {:>6} {:>10} {:>6.1}%",
+            key,
+            count,
+            tokens,
+            share(tokens)
+        );
+    }
 }
 
-/// Index runs per `filter_id` (`--index`). Not savings.
+/// Index runs per `filter_id` (`--index`): the runs that produced SCIP, and
+/// the no-op runs. Not savings.
 pub(crate) fn print_index_table(rows: &[telemetry::IndexRow]) {
     println!("\nindex runs");
     if rows.is_empty() {
@@ -324,13 +339,13 @@ pub(crate) fn print_index_table(rows: &[telemetry::IndexRow]) {
         return;
     }
     println!(
-        "{:<16} {:>6} {:>10} {:>9} {:>12}",
-        "type", "runs", "total_ms", "mean_ms", "scip_bytes"
+        "{:<16} {:>6} {:>10} {:>9} {:>12} {:>6}",
+        "type", "runs", "total_ms", "mean_ms", "scip_bytes", "no_op"
     );
     for r in rows {
         println!(
-            "{:<16} {:>6} {:>10} {:>9.0} {:>12}",
-            r.filter_id, r.runs, r.total_ms, r.mean_ms, r.scip_bytes
+            "{:<16} {:>6} {:>10} {:>9.0} {:>12} {:>6}",
+            r.filter_id, r.runs, r.total_ms, r.mean_ms, r.scip_bytes, r.no_op
         );
     }
 }

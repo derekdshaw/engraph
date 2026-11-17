@@ -349,10 +349,14 @@ const MIGRATIONS: &[&str] = &[
     "#,
     // v17 — `events.path_hash`: the SHA-256 of the file path of a `read`
     // event, so a report can find reads of a file that the session read
-    // before without storing the path. NULL for all other events.
+    // before without storing the path; `events.read_range`: the part of the
+    // file that the read returned (NULL when the read reports none). Both
+    // NULL for all other events. The index is in the order of `gain_reads`'
+    // windows.
     r#"
     ALTER TABLE events ADD COLUMN path_hash TEXT;
-    CREATE INDEX IF NOT EXISTS idx_events_session_path ON events(session_id, path_hash)
+    ALTER TABLE events ADD COLUMN read_range TEXT;
+    CREATE INDEX IF NOT EXISTS idx_events_reads ON events(session_id, path_hash, read_range)
         WHERE path_hash IS NOT NULL;
     "#,
 ];
@@ -771,12 +775,14 @@ mod tests {
             .unwrap();
         run_migrations_to(&mut conn, 17).unwrap();
         assert_eq!(current_version(&conn).unwrap(), 17);
-        let hash: Option<String> = conn
-            .query_row("SELECT path_hash FROM events WHERE id = 'e1'", [], |r| {
-                r.get(0)
-            })
+        let row: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT path_hash, read_range FROM events WHERE id = 'e1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
-        assert_eq!(hash, None);
+        assert_eq!(row, (None, None));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! `engraph gain --index`: one row per `filter_id` of the `index` events.
 
 mod common;
-use common::engraph;
+use common::{engraph, row};
 use engraph_core::{
     db,
     models::EventKind,
@@ -19,6 +19,9 @@ fn db_with_index_runs() -> (tempfile::TempDir, std::path::PathBuf) {
         ("auto", 3000, 300),
         ("if_changed", 500, 50),
         ("rust-analyzer", 9000, 2000),
+        // Runs that produced no SCIP are no-ops, not in runs or time.
+        ("auto", 0, 5),
+        ("workspace", 0, 5),
     ] {
         telemetry::record_event(
             &conn,
@@ -49,18 +52,14 @@ fn index_text_shows_one_row_per_filter_id() {
     let out = engraph(&db, dir.path(), &["gain", "--index"]);
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
-    let row = |key: &str| {
-        text.lines()
-            .find(|l| l.split_whitespace().next() == Some(key))
-            .unwrap_or_else(|| panic!("no `{key}` row in:\n{text}"))
-            .split_whitespace()
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    };
-    // runs, total_ms, mean_ms, scip_bytes
-    assert_eq!(row("auto")[1..], ["2", "400", "200", "4000"]);
-    assert_eq!(row("if_changed")[1..], ["1", "50", "50", "500"]);
-    assert_eq!(row("rust-analyzer")[1..], ["1", "2000", "2000", "9000"]);
+    // runs, total_ms, mean_ms, scip_bytes, no_op
+    assert_eq!(row(&text, "auto")[1..], ["2", "400", "200", "4000", "1"]);
+    assert_eq!(row(&text, "if_changed")[1..], ["1", "50", "50", "500", "0"]);
+    assert_eq!(
+        row(&text, "rust-analyzer")[1..],
+        ["1", "2000", "2000", "9000", "0"]
+    );
+    assert_eq!(row(&text, "workspace")[1..], ["0", "0", "0", "0", "1"]);
 }
 
 #[test]
@@ -74,11 +73,12 @@ fn index_json_and_all_have_the_rows_and_the_totals_do_not_change() {
     ] {
         let v = json(&db, dir.path(), args);
         let rows = v["index"].as_array().expect("index rows");
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4);
         let auto = rows.iter().find(|r| r["filter_id"] == "auto").unwrap();
         assert_eq!(auto["runs"], 2);
         assert_eq!(auto["total_ms"], 400);
         assert_eq!(auto["scip_bytes"], 4000);
+        assert_eq!(auto["no_op"], 1);
         assert_eq!(v["summary"], plain["summary"]);
     }
 }

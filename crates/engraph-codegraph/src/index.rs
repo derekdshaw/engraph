@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use ignore::{IncrementalIgnore, WalkBuilder};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -590,13 +589,7 @@ fn scip_output_dir(repo: &Path) -> PathBuf {
                 .join("scip")
         });
     let canonical = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.to_string_lossy().as_bytes());
-    let hex: String = hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect();
+    let hex = engraph_core::utils::sha256_hex(canonical.to_string_lossy().as_bytes());
     base.join(&hex[..16])
 }
 

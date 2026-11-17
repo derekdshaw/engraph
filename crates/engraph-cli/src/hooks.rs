@@ -5,6 +5,7 @@ use engraph_core::{
     telemetry::{self, EventInput},
     tokens,
 };
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -566,6 +567,16 @@ fn hook_cwd(v: &serde_json::Value) -> Option<PathBuf> {
         .or_else(|| std::env::current_dir().ok())
 }
 
+/// The session of a hook: `CLAUDE_SESSION_ID` when set, else the payload's
+/// `session_id` (Codex sends only the payload).
+fn hook_session_id(v: &serde_json::Value) -> Option<String> {
+    std::env::var("CLAUDE_SESSION_ID").ok().or_else(|| {
+        v.pointer("/session_id")
+            .and_then(|s| s.as_str())
+            .map(str::to_string)
+    })
+}
+
 /// PreToolUse(Grep) hook: redirect bareword Grep on an indexed symbol to
 /// `engraph subgraph`. See `try_subgraph_redirect` for the gate.
 pub(crate) fn run_pre_grep_hook(conn: &db::PooledConn) -> Result<()> {
@@ -640,15 +651,82 @@ pub(crate) fn run_post_read_hook(conn: &db::PooledConn) -> Result<()> {
     }
     // The tokenizer takes ~70 ms to start in each process; count in a
     // detached child so Claude does not wait for it.
-    spawn_record_read(&serde_json::json!({ "read": v, "augment": context }));
+    spawn_record_read(&read_record(&v, file_path, context.as_deref()));
     entities.map(|_| ())
 }
 
-/// Start `engraph hook record-read` detached, give it `payload` on stdin, and
+/// What `record-read` needs of one read. The hook extracts it so that only
+/// the text to count crosses the pipe, not the base64 of an image or PDF.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReadRecord<'a> {
+    #[serde(borrow)]
+    session_id: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    file_path: Cow<'a, str>,
+    #[serde(borrow)]
+    read_type: Cow<'a, str>,
+    /// `startLine+numLines` of a text read, the `pages` of a PDF read.
+    range: Option<String>,
+    /// The text that Claude received: `file.content` of a text read (only
+    /// the lines that `offset`/`limit` selected, without the line-number
+    /// prefixes Claude sees), the cell sources of a notebook. Empty for an
+    /// image or PDF: base64 the tokenizer cannot measure, so 0 tokens; the
+    /// read type keeps them apart in reports.
+    #[serde(borrow)]
+    texts: Vec<Cow<'a, str>>,
+    #[serde(borrow)]
+    augment: Option<Cow<'a, str>>,
+}
+
+fn read_record<'a>(
+    v: &'a serde_json::Value,
+    file_path: &'a str,
+    augment: Option<&'a str>,
+) -> ReadRecord<'a> {
+    let read_type = v
+        .pointer("/tool_response/type")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown");
+    let file = v.pointer("/tool_response/file");
+    let field = |name: &str| file.and_then(|f| f.get(name));
+    let texts = match read_type {
+        "text" => field("content")
+            .and_then(|s| s.as_str())
+            .map(Cow::Borrowed)
+            .into_iter()
+            .collect(),
+        "notebook" => field("cells")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c.get("source").and_then(|s| s.as_str()))
+            .map(Cow::Borrowed)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let line = |name: &str| field(name).and_then(|n| n.as_u64());
+    let range = match (line("startLine"), line("numLines")) {
+        (Some(start), Some(n)) => Some(format!("{start}+{n}")),
+        _ => v
+            .pointer("/tool_input/pages")
+            .and_then(|p| p.as_str())
+            .map(str::to_string),
+    };
+    ReadRecord {
+        session_id: hook_session_id(v).map(Cow::Owned),
+        file_path: Cow::Borrowed(file_path),
+        read_type: Cow::Borrowed(read_type),
+        range,
+        texts,
+        augment: augment.map(Cow::Borrowed),
+    }
+}
+
+/// Start `engraph hook record-read` detached, give it `record` on stdin, and
 /// return without waiting. stdout/stderr are null so no inherited pipe keeps
 /// the hook "running". Failures are logged and ignored: telemetry is
 /// best-effort.
-fn spawn_record_read(payload: &serde_json::Value) {
+fn spawn_record_read(record: &ReadRecord<'_>) {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let Ok(exe) = std::env::current_exe() else {
@@ -662,12 +740,15 @@ fn spawn_record_read(payload: &serde_json::Value) {
         .stderr(Stdio::null());
     detach(&mut cmd);
     match cmd.spawn() {
-        // The child reads all of stdin before it starts the tokenizer, so a
-        // payload larger than the pipe buffer blocks only briefly. Dropping
-        // `stdin` closes the pipe; the child is reparented when the hook exits.
+        // The child reads all of stdin before it opens the database or
+        // starts the tokenizer, so a record larger than the pipe buffer
+        // blocks only until the child has started. Dropping `stdin` closes
+        // the pipe; the child is reparented when the hook exits.
         Ok(mut child) => {
             if let Some(mut stdin) = child.stdin.take()
-                && let Err(e) = stdin.write_all(payload.to_string().as_bytes())
+                && let Err(e) = serde_json::to_vec(record)
+                    .map_err(std::io::Error::from)
+                    .and_then(|bytes| stdin.write_all(&bytes))
             {
                 tracing::warn!(error = %e, "record-read: write failed");
             }
@@ -677,19 +758,22 @@ fn spawn_record_read(payload: &serde_json::Value) {
 }
 
 /// `engraph hook record-read`: the telemetry of one `post-read`, from the
-/// payload that `spawn_record_read` writes. The augment event is written
-/// before the read event, so a reader that sees the read sees both.
-pub(crate) fn run_record_read(conn: &db::PooledConn) -> Result<()> {
+/// record that `spawn_record_read` writes. Opens the database only after
+/// stdin is drained, since the hook's write waits for that. The augment event
+/// is written before the read event, so a reader that sees the read sees both.
+pub(crate) fn run_record_read() -> Result<()> {
     use std::io::Read;
     let mut buf = String::new();
     std::io::stdin().read_to_string(&mut buf)?;
-    let w: serde_json::Value = serde_json::from_str(&buf)?;
-    if let Some(context) = w.pointer("/augment").and_then(|s| s.as_str()) {
-        let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
+    let r: ReadRecord = serde_json::from_str(&buf)?;
+    let pool = db::open_default_pool()?;
+    let conn = pool.get()?;
+    let session_id = r.session_id.as_deref();
+    if let Some(context) = &r.augment {
         telemetry::record_event(
-            conn,
+            &conn,
             EventInput {
-                session_id: session_id.as_deref(),
+                session_id,
                 kind: EventKind::Hook,
                 feature: "read_augment",
                 filter_id: Some("read-augment"),
@@ -700,62 +784,19 @@ pub(crate) fn run_record_read(conn: &db::PooledConn) -> Result<()> {
         )
         .ok();
     }
-    let read = &w["read"];
-    let file_path = read
-        .pointer("/tool_input/file_path")
-        .and_then(|s| s.as_str())
-        .unwrap_or("")
-        .trim();
-    if !file_path.is_empty() {
-        record_read(conn, read, file_path);
-    }
-    Ok(())
-}
-
-/// Record the read in telemetry, with the token count of what Claude received.
-/// `tool_response` carries the read: `file.content` for text (only the lines
-/// that `offset`/`limit` selected, without the line-number prefixes Claude
-/// sees), `file.cells` for a notebook. Images and PDFs are base64 that the
-/// tokenizer cannot measure, so they count 0 tokens; their `filter_id` keeps
-/// them apart in reports.
-fn record_read(conn: &db::PooledConn, v: &serde_json::Value, file_path: &str) {
     let start = Instant::now();
-    let read_type = v
-        .pointer("/tool_response/type")
-        .and_then(|s| s.as_str())
-        .unwrap_or("unknown");
-    let tokens: u32 = match read_type {
-        "text" => v
-            .pointer("/tool_response/file/content")
-            .and_then(|s| s.as_str())
-            .map_or(0, tokens::count),
-        "notebook" => v
-            .pointer("/tool_response/file/cells")
-            .and_then(|c| c.as_array())
-            .map_or(0, |cells| {
-                cells
-                    .iter()
-                    .filter_map(|c| c.get("source").and_then(|s| s.as_str()))
-                    .map(tokens::count)
-                    .sum()
-            }),
-        _ => 0,
-    };
-    // Claude Code sends the id in the payload; the env var is the older path.
-    let session_id = std::env::var("CLAUDE_SESSION_ID").ok().or_else(|| {
-        v.pointer("/session_id")
-            .and_then(|s| s.as_str())
-            .map(str::to_string)
-    });
+    let read_tokens: u32 = r.texts.iter().map(|t| tokens::count(t)).sum();
     telemetry::record_read(
-        conn,
-        session_id.as_deref(),
-        read_type,
-        file_path,
-        tokens as i64,
+        &conn,
+        session_id,
+        &r.read_type,
+        &r.file_path,
+        r.range.as_deref(),
+        read_tokens as i64,
         start.elapsed().as_millis() as i64,
     )
     .ok();
+    Ok(())
 }
 
 /// SessionEnd hook: Claude Code (SessionEnd) and Codex (Stop) both emit a JSON
@@ -781,12 +822,7 @@ pub(crate) fn run_session_end_hook(conn: &db::PooledConn) -> Result<()> {
     };
     let start = std::time::Instant::now();
     let stats = engraph_ingest::ingest_file(conn, std::path::Path::new(transcript_path))?;
-    // Claude exports the id via env; Codex carries it in the hook payload.
-    let session_id = std::env::var("CLAUDE_SESSION_ID").ok().or_else(|| {
-        v.pointer("/session_id")
-            .and_then(|s| s.as_str())
-            .map(|s| s.to_string())
-    });
+    let session_id = hook_session_id(&v);
     telemetry::record_event(
         conn,
         EventInput {

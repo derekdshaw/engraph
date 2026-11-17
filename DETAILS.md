@@ -749,15 +749,22 @@ the `type`, so reports can keep these apart. The count leaves out the
 `N\t` line-number prefixes that Claude sees, so it is a little low. The
 path is stored only as `path_hash` (hex SHA-256 of `tool_input.file_path`),
 which is enough to find reads of a file that the session read before.
-A failed read gives no PostToolUse event and is not recorded.
+`read_range` is the part of the file that the read returned:
+`<startLine>+<numLines>` for text, `tool_input.pages` for a PDF, and NULL
+when the read reports neither (a notebook, an image, a whole PDF). A failed
+read gives no PostToolUse event and is not recorded.
 
 The `cl100k_base` tokenizer takes ~70 ms to start (release build), in
 each process. So the hook does not count: after it prints the augment, it
 starts `engraph hook record-read` (hidden) detached, with stdout/stderr
-null, writes `{"read": <hook payload>, "augment": <context or null>}` to
-its stdin, and exits (~10 ms). The child counts and writes the
-`read_augment` event, then the `read` event. Its `latency_ms` is the
-child's count time, not time that Claude waited.
+null, and writes to its stdin only what the child needs: the session id
+(`CLAUDE_SESSION_ID`, else the payload's `session_id`), the path, the type,
+the range, the text to count, and the augment. The base64 of an image or a
+PDF stays behind. The child reads all of stdin before it opens the
+database, because the hook's write waits until the child reads it; the hook
+then exits (~10 ms). The child counts and writes the `read_augment` event,
+then the `read` event, both with the same session id. Its `latency_ms` is
+the child's count time, not time that Claude waited.
 
 Tests in `crates/engraph-cli/tests/pre_bash_hook.rs`,
 `pre_grep_hook.rs`, and `post_read_hook.rs` pin each hook's branches
@@ -1291,7 +1298,7 @@ report.
 
 ```
 events(seq INT PK, id UUIDv7, session_id, kind, feature, filter_id,
-       input_tokens, output_tokens, latency_ms, ts, path_hash)
+       input_tokens, output_tokens, latency_ms, ts, path_hash, read_range)
 kind ∈ {compress, retrieve, hook, wrapped_cmd, index}
 ```
 
@@ -1300,7 +1307,8 @@ needing a separate `created_at` column.
 
 `record_event` (`engraph-core::telemetry`) is the insert point for all
 events but `read`; `record_read` writes `read` events with their
-`path_hash` (§5.6), which is NULL in all other rows. Every feature that compresses, retrieves, hooks, or runs a
+`path_hash` and `read_range` (§5.6), which are NULL in all other rows. Both
+go through one private `insert_event`. Every feature that compresses, retrieves, hooks, or runs a
 wrapped command writes a row.
 
 ### 10.2 Savings semantics
@@ -1321,27 +1329,35 @@ row at the bottom sums only the rows that contributed a numeric
 
 ### 10.3 File reads (`--reads`)
 
-`engraph gain --reads` (also in `--all`, `--json` as `reads`, CSV as two
+`engraph gain --reads` (also in `--all`, `--json` as `reads`, CSV as three
 `reads` rows with the tokens in `input_tk`) reports the `read` events of
-§5.6: the count and tokens of all reads, and of the repeats. A repeat is
-a read of a file (`path_hash`) that the same session read before, by
-`ROW_NUMBER() OVER (PARTITION BY session_id, path_hash ORDER BY seq) > 1`
-in `telemetry::gain_reads`. A read of a different range of the file, and a
-read after the file changed, also count as repeats. A read without a
-session id is never a repeat. The text table gives the repeat tokens as a
-share of all read tokens. Reads are not in `SAVINGS_WHERE`, so the savings
-totals do not change.
+§5.6: the count and tokens of all reads, of the repeats, and of the new
+ranges. A repeat is a read of a range of a file (`path_hash`, `read_range`)
+that the same session read before. A new range is a read of a file that
+the session read before, at a range that it did not read before, such as
+the next page of a long file. `telemetry::gain_reads` numbers the reads of
+each session and file, and of each session, file, and range, with
+`ROW_NUMBER()`. A read of the same range after the file changed counts as
+a repeat if the line count did not change. A read without a session id is
+neither. The query filters on `path_hash IS NOT NULL` alone (only `read`
+events have one), so SQLite scans the partial index `idx_events_reads`.
+The text table gives each row's tokens as a share of all read tokens.
+Reads are not in `SAVINGS_WHERE`, so the savings totals do not change.
 
 ### 10.4 Index runs (`--index`)
 
 `engraph gain --index` (also in `--all`, `--json` as `index`) gives one
 row for each `filter_id` of the `index` events (§14.5): `auto` (the
 SessionStart refresh), `if_changed` (`--if-changed` by hand), `workspace`,
-or the driver name. Each row has the runs, the total and mean
-`latency_ms`, and the SCIP bytes (the sum of `input_tokens`), from
-`telemetry::gain_index`. The CSV rows (`index,<filter_id>,…`) give the
-runs and the SCIP bytes in `input_tk`, but not the time: the CSV has no
-time column. Index runs are not in `SAVINGS_WHERE`, so the savings totals
+or the driver name. Each row has the runs that produced SCIP
+(`input_tokens > 0`), their total and mean `latency_ms`, the SCIP bytes
+(the sum of `input_tokens`), and the no-op runs, from
+`telemetry::gain_index`. `auto` and `if_changed` record a run with 0 bytes
+when they find nothing to do, are skipped, or fail. These no-op runs show
+how often the refresh fires, and are kept out of the runs and the time, so
+that the mean time is not a mean of change checks. The CSV rows
+(`index,<filter_id>,…`) give the runs and the SCIP bytes in `input_tk`, but
+not the time or the no-op runs: the CSV has no column for them. Index runs are not in `SAVINGS_WHERE`, so the savings totals
 do not change.
 
 ---
@@ -1428,7 +1444,7 @@ but logs a warning if it ever happens.
 | 14 | `relations.line`: the line of the occurrence (call or reference) an edge comes from, NULL for relationship edges, Bazel dependencies, and sources defined in more than one document (a Go package) (§14.4). Clears the commit of every driver run, as v12 does, so the next refresh writes the lines. |
 | 15 | `index_state.go_tags`: the `--go-tags` of the run, so `index --if-changed` gives scip-go the same build tags (§8.0.1). NULL for older rows, which had none; no commit is cleared. |
 | 16 | `index_state.go_tests`: whether the run had `--go-tests`, so `index --if-changed` lets the Bazel Go pass index `_test.go` files again (§8.0.1). Older rows default to 0; no commit is cleared. |
-| 17 | `events.path_hash` + partial index `idx_events_session_path (session_id, path_hash)`: the SHA-256 of the file path of a `read` event (§5.6), so a report can find reads of a file that the session read before. NULL for all other events. |
+| 17 | `events.path_hash` + `events.read_range` + partial index `idx_events_reads (session_id, path_hash, read_range)`: the SHA-256 of the file path of a `read` event and the part of the file it returned (§5.6), so a report can find reads of a file, or of a range of it, that the session read before. NULL for all other events. |
 
 (`SCHEMA_VERSION = 17`; the `MIGRATIONS` array has 17 entries.)
 

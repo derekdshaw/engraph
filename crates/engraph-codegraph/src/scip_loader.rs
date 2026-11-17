@@ -152,12 +152,9 @@ pub(crate) fn pin_go_module_versions(index: &mut Index) {
 /// The first 16 hex digits of the SHA-256 of a project key: a short, fixed
 /// part of a local symbol id that differs between projects.
 fn project_tag(project: &str) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(project.as_bytes())
-        .iter()
-        .take(8)
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    let mut hex = engraph_core::utils::sha256_hex(project.as_bytes());
+    hex.truncate(16);
+    hex
 }
 
 /// `local 7@<tag>:src/a.rs` → `local 7`: a local symbol id as the indexer

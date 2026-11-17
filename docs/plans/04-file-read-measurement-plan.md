@@ -48,20 +48,23 @@ lines that `offset` and `limit` selected. Thus, the hook does not read the
 file again. The hook records one `hook` / `read` event for each read, with
 the token count in `input_tokens`, the read type (`text`, `notebook`,
 `image`, `pdf`) in `filter_id`, and the SHA-256 of the path in
-`events.path_hash` (schema v17). Images and PDFs record 0 tokens. The
+`events.path_hash` and the range that the read returned in
+`events.read_range` (schema v17). Images and PDFs record 0 tokens. The
 tokenizer starts in approximately 70 ms, thus a detached child process
 (`engraph hook record-read`) counts the tokens and records the events. The
 hook does not wait for the child.
 
 Condition (2026-11-16): step 3 is complete. `engraph gain --reads` shows
-the count and tokens of all reads, and of the reads of a file that the
-session read before (at any range, also after the file changed). Step 4
+the count and tokens of all reads, of the repeats (a range of a file that
+the session read before), and of the new ranges (another range of such a
+file). Step 4
 waits until the binary with steps 2 and 3 is installed.
 
 Condition (2026-11-16): step 8 is complete. `engraph gain --index` shows
 one row for each `filter_id` of the `index` events (`auto`, `if_changed`,
 `workspace`, or the driver name): the runs, the total time, the mean time,
-and the SCIP bytes. `--all` and `--json` include the rows. The CSV gives
+and the SCIP bytes of the runs that produced SCIP, and the count of no-op
+runs (nothing to do, skipped, or failed). `--all` and `--json` include the rows. The CSV gives
 the runs and the SCIP bytes, but not the time, because the CSV has no time
 column. The savings totals do not change.
 

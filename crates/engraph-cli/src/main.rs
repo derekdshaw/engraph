@@ -64,6 +64,17 @@ async fn main() -> Result<()> {
     let otel_guard = engraph_core::otel::init_from_env();
 
     let cli = Cli::parse();
+    // Before the database opens: the post-read hook's write to this child's
+    // stdin waits until the child reads it.
+    if let Cmd::Hook {
+        cmd: HookCmd::RecordRead,
+    } = cli.cmd
+    {
+        if let Err(e) = run_record_read() {
+            tracing::warn!(?e, "record-read failed; read not recorded");
+        }
+        return Ok(());
+    }
     let pool = db::open_default_pool()?;
     let conn = pool.get()?;
 
@@ -183,11 +194,7 @@ async fn main() -> Result<()> {
                     tracing::warn!(?e, "post-read hook failed; emitting empty");
                 }
             }
-            HookCmd::RecordRead => {
-                if let Err(e) = run_record_read(&conn) {
-                    tracing::warn!(?e, "record-read failed; read not recorded");
-                }
-            }
+            HookCmd::RecordRead => unreachable!("handled before the database opens"),
             HookCmd::SessionStart { client } => {
                 if let Err(e) = run_session_start_hook(&conn, client) {
                     tracing::warn!(?e, "session-start hook failed; emitting empty");
@@ -1141,6 +1148,7 @@ fn run_gain(conn: &db::PooledConn, fmt: GainFormat, opts: GainOpts) -> Result<()
                 for (key, count, tokens) in [
                     ("all", r.reads, r.read_tokens),
                     ("repeat", r.repeat_reads, r.repeat_tokens),
+                    ("new_range", r.new_range_reads, r.new_range_tokens),
                 ] {
                     println!(
                         "{}",
