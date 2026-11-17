@@ -1,10 +1,11 @@
 //! Stable symbol ids (plan 05, part 1): snapshots of the symbol ids each
 //! fixture repo in `testdata/fixtures` produces.
 //!
-//! `ENGRAPH_UPDATE_SNAPSHOTS=1 cargo test -p engraph-codegraph --test
-//! symbol_snapshots` indexes each fixture whose indexer is installed and
-//! writes `testdata/snapshots/<lang>.json`. Examine the diff before you commit
-//! a new snapshot: a changed id can be a correct change of the indexer, or a
+//! The live test indexes each fixture whose indexer is installed and compares
+//! the result with `testdata/snapshots/<lang>.json`; a missing indexer skips
+//! that fixture, as in `drivers_live.rs`. With `ENGRAPH_UPDATE_SNAPSHOTS=1`
+//! it writes the snapshot files instead. Examine the diff before you commit a
+//! new snapshot: a changed id can be a correct change of the indexer, or a
 //! regression in the loader.
 
 mod common;
@@ -104,11 +105,11 @@ fn snapshot_records_defined_symbols_with_callers_and_callees() {
     assert!(std::fs::read_to_string(&path).unwrap().ends_with("}\n"));
 }
 
+/// Step 10: index each fixture repo and compare the result with its snapshot
+/// file; `ENGRAPH_UPDATE_SNAPSHOTS=1` writes the snapshots instead.
 #[test]
-fn update_snapshots_when_requested() {
-    if std::env::var("ENGRAPH_UPDATE_SNAPSHOTS").as_deref() != Ok("1") {
-        return;
-    }
+fn fixture_ids_match_the_snapshots() {
+    let update = std::env::var("ENGRAPH_UPDATE_SNAPSHOTS").as_deref() == Ok("1");
     isolate_scip_output();
     for fixture in &FIXTURES {
         if !binary_present(fixture.indexer) {
@@ -135,12 +136,29 @@ fn update_snapshots_when_requested() {
             fixture.lang,
             snap.symbols.len()
         );
-        snap.write(&fixture.snapshot_path());
-        eprintln!(
-            "wrote {} ({} symbols, {} {version})",
-            fixture.snapshot_path().display(),
-            snap.symbols.len(),
-            fixture.indexer
-        );
+        if update {
+            snap.write(&fixture.snapshot_path());
+            eprintln!(
+                "wrote {} ({} symbols, {} {version})",
+                fixture.snapshot_path().display(),
+                snap.symbols.len(),
+                fixture.indexer
+            );
+        } else {
+            let want = Snapshot::read(&fixture.snapshot_path());
+            assert_eq!(
+                snap,
+                want,
+                "the {} fixture no longer matches {}",
+                fixture.lang,
+                fixture.snapshot_path().display()
+            );
+            eprintln!(
+                "ok: {} matches its snapshot ({} symbols, {} {version})",
+                fixture.lang,
+                snap.symbols.len(),
+                fixture.indexer
+            );
+        }
     }
 }
