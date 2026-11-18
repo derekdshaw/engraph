@@ -60,6 +60,7 @@ pub struct BazelSymbolStats {
     pub go: Option<LangIndexResult>,
     pub ts: Option<LangIndexResult>,
     pub python: Option<LangIndexResult>,
+    pub rust: Option<LangIndexResult>,
     pub entities_inserted: usize,
     pub relations_inserted: usize,
     pub entities_pruned: usize,
@@ -68,11 +69,11 @@ pub struct BazelSymbolStats {
 }
 
 impl BazelSymbolStats {
-    /// Per-language results in stable order (java, go, ts, python), skipping
-    /// languages that were never attempted (None). After a real run every
-    /// `LANGS` entry is present, including skipped/failed ones.
+    /// Per-language results in stable order (java, go, ts, python, rust),
+    /// skipping languages that were never attempted (None). After a real run
+    /// every `LANGS` entry is present, including skipped/failed ones.
     pub fn results(&self) -> Vec<&LangIndexResult> {
-        [&self.java, &self.go, &self.ts, &self.python]
+        [&self.java, &self.go, &self.ts, &self.python, &self.rust]
             .into_iter()
             .filter_map(|o| o.as_ref())
             .collect()
@@ -194,6 +195,21 @@ const LANGS: &[LangSpec] = &[
         binary: "scip-python",
         rule_kinds: &["py_library", "py_binary", "py_test"],
     },
+    LangSpec {
+        language: "rust",
+        binary: "rust-analyzer",
+        // Named classes, not `rust_.*`: that also counts toolchain rules
+        // (`rust_prost_toolchain`). `rust_library_group` and
+        // `rust_prost_library` cover repos with no top-level `rust_library`.
+        rule_kinds: &[
+            "rust_library",
+            "rust_binary",
+            "rust_test",
+            "rust_proc_macro",
+            "rust_library_group",
+            "rust_prost_library",
+        ],
+    },
 ];
 
 /// What a `--dry-run` reports for one symbol-level language: the language, the
@@ -258,6 +274,7 @@ pub fn index_bazel_symbols(
             "go" => stats.go = Some(result),
             "ts" => stats.ts = Some(result),
             "python" => stats.python = Some(result),
+            "rust" => stats.rust = Some(result),
             _ => unreachable!(),
         }
     }
@@ -1273,6 +1290,34 @@ mod tests {
             .expect("python LangSpec present");
         assert_eq!(py.binary, "scip-python");
         assert!(py.rule_kinds.contains(&"py_library"));
+    }
+
+    #[test]
+    fn langs_includes_rust() {
+        let rust = LANGS
+            .iter()
+            .find(|s| s.language == "rust")
+            .expect("rust LangSpec present");
+        assert_eq!(rust.binary, "rust-analyzer");
+        for kind in [
+            "rust_library",
+            "rust_binary",
+            "rust_test",
+            "rust_proc_macro",
+            "rust_library_group",
+            "rust_prost_library",
+        ] {
+            assert!(rust.rule_kinds.contains(&kind), "missing {kind}");
+        }
+        // `rust_.*` would also count toolchain rules (`rust_prost_toolchain`).
+        assert!(
+            !rust
+                .rule_kinds
+                .iter()
+                .any(|k| k.contains('*') || k.ends_with("_toolchain")),
+            "{:?}",
+            rust.rule_kinds
+        );
     }
 
     #[test]
