@@ -1863,13 +1863,21 @@ extension (`LoadSchemes`). Without that, their `scheme` stayed NULL, which
 `IN_SCOPE` never matches, and the locals outlived the file. None of the
 test projects has such a document.
 
-**ID strategy.** `entities.id` is the raw SCIP moniker
-(`rust-analyzer cargo engraph-core 0.1.0 schema/run_migrations().`).
-Cross-machine moniker normalization has a wire-in hook
-(`scip_loader::normalize_moniker`) which is a pass-through today; see
-§14.7 for the Phase 2.2 stitching that works against
-canonically-published deps without rewrites and the deferred polish
-items (per-indexer rules, symbol-stability test suite).
+**ID strategy.** `entities.id` is the SCIP moniker after
+`scip_loader::normalize_moniker`
+(`rust-analyzer cargo engraph-core 0.0.0 schema/run_migrations().`), so
+an id is the same on each computer and after each commit (plan 05). The
+loader runs one `normalize_index` pass over the parsed index before any
+row is written, so the entity upsert, the placeholder insert, and both
+ends of every relation see the normalized id. The rules, one `match`
+arm per scheme: a `semanticdb` id with the empty package name `.` (a
+Java package symbol) gets the project tag as its version; every other
+`semanticdb` id and every `rust-analyzer` and `scip-typescript` id gets
+the pinned version `0.0.0` (`driver::PINNED_VERSION`), dependencies
+included, so cross-repo references keep connecting. scip-python and
+scip-go ids are already pinned by their drivers. The snapshot test
+suite (`tests/symbol_snapshots.rs`, `testdata/`) locks the resulting
+ids per fixture and indexer version.
 
 ### 14.4 Subgraph query + markdown
 

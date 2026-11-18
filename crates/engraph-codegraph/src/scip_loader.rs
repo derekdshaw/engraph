@@ -1,10 +1,11 @@
 //! Decode a SCIP protobuf blob and load its symbols + occurrences into the
 //! existing `entities` / `relations` tables.
 //!
-//! `entities.id` is the raw SCIP moniker (e.g.
-//! `rust-analyzer cargo engraph-core 0.1.0 schema/run_migrations().`).
-//! Cross-machine normalization of monikers is a Phase 2.2 problem; here we
-//! trust whatever the indexer emits. Re-indexing is idempotent: we replace the
+//! `entities.id` is the SCIP moniker after [`normalize_moniker`] (e.g.
+//! `rust-analyzer cargo engraph-core 0.0.0 schema/run_migrations().`): every
+//! id passes through the plan 05 rules before it reaches a row, so ids are
+//! the same on each computer and after each commit (`normalize_index`).
+//! Re-indexing is idempotent: we replace the
 //! project's SCIP-derived relations, upsert current symbols, and prune stale
 //! unreferenced symbol rows absent from the new SCIP blob, all in one
 //! transaction. Below ~10M edges this is sufficient (the staging-tables-then-swap
@@ -185,19 +186,42 @@ pub(crate) fn pin_go_module_versions(index: &mut Index) {
             );
         }
     }
-    let pin_info = |info: &mut scip::types::SymbolInformation| {
-        pin(&mut info.symbol);
+    visit_symbols(index, pin);
+}
+
+/// Every id the loader writes passes through [`normalize_moniker`] first
+/// (plan 05, part 2, steps 9 and 10): one pass over the index, so the entity
+/// upsert, the placeholder insert, and both ends of every relation all see
+/// the normalized id, and no per-row write can miss the rules.
+fn normalize_index(index: &mut Index, project: &str) {
+    visit_symbols(index, |symbol| {
+        if let Cow::Owned(normalized) = normalize_moniker(symbol, project) {
+            *symbol = normalized;
+        }
+    });
+}
+
+/// Apply `f` to every symbol id in the index: each document's symbols and
+/// their relationships, each occurrence, and the external symbols and their
+/// relationships.
+fn visit_symbols(index: &mut Index, mut f: impl FnMut(&mut String)) {
+    let info = |info: &mut scip::types::SymbolInformation, f: &mut dyn FnMut(&mut String)| {
+        f(&mut info.symbol);
         for rel in &mut info.relationships {
-            pin(&mut rel.symbol);
+            f(&mut rel.symbol);
         }
     };
     for doc in &mut index.documents {
-        doc.symbols.iter_mut().for_each(pin_info);
+        for i in &mut doc.symbols {
+            info(i, &mut f);
+        }
         for occ in &mut doc.occurrences {
-            pin(&mut occ.symbol);
+            f(&mut occ.symbol);
         }
     }
-    index.external_symbols.iter_mut().for_each(pin_info);
+    for i in &mut index.external_symbols {
+        info(i, &mut f);
+    }
 }
 
 /// The first 16 hex digits of the SHA-256 of a project key: a short, fixed
@@ -231,6 +255,7 @@ pub fn load_with_options(
     let mut index = Index::parse_from_bytes(scip_bytes).context("decoding SCIP protobuf")?;
     scope_local_symbols(&mut index, project);
     pin_go_module_versions(&mut index);
+    normalize_index(&mut index, project);
 
     // Pass 1: gather every symbol's Kind across all documents (and the
     // external_symbols list). The CALLS vs REFERENCES distinction is based on

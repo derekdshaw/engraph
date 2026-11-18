@@ -81,13 +81,19 @@ changed after its files were made, also for Java, which CI does not index.
 
 ## Steps, part 2: normalization of symbol ids
 
-Steps 1 to 8 are complete (2026-11-17). Step 1: plan 03, step 7. Steps 2 to
+Steps 1 to 10 are complete (2026-11-17). Step 1: plan 03, step 7. Steps 2 to
 5: the findings, the two tables, and the rules below the steps. Steps 6 and 8:
 R2 and R3 are in `scip_loader::normalize_moniker`, which takes the project
 key; R1 is in `driver::python_project_name`, used by the standalone driver
 and the Bazel Python pass. Step 7 has nothing to do (no absolute paths in
-scip-go ids). `normalize_moniker` has unit tests but no caller yet: steps 9
-and 10 connect it to the loader.
+scip-go ids). Steps 9 and 10: the only functions that write symbol ids are
+the three writers of `scip_loader` (the entity upsert, the placeholder
+insert, and the relation insert; the other `INSERT INTO entities` sites are
+test fixtures, and `bazel.rs` writes Bazel labels, not SCIP ids), and all
+loads go through `load_with_options`, where one `normalize_index` pass
+rewrites every id of the parsed index before any row is written. The rust,
+typescript, and java snapshots changed; go, python, and the prebuilt SCIP
+blobs did not (the fifth test of this plan).
 
 1. In the standalone Go driver, give `--module-version` with the value of
    `SCIP_GO_VERSION` to scip-go. This change replaces all Go symbol ids one

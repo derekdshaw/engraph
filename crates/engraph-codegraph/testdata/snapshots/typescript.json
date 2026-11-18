@@ -4,41 +4,41 @@
   "fixture_hash": "acee2c2c35848eadb5c5c386ef672f98c83a171a7c8e6b2411c058273736f687",
   "symbols": [
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`index.ts`/",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`index.ts`/",
       "name": "index.ts",
       "file_path": "src/index.ts",
       "line_range": "1:1",
       "callers": [],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/averagePages().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/describeAll().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/longestTitle().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/merge().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/scienceBooks().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/starterLibrary().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/summary().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/capitalize().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/initials().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/pluralize().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/slug().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/titleCase().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/truncate()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/averagePages().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/describeAll().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/longestTitle().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/merge().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/scienceBooks().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/starterLibrary().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/summary().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/capitalize().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/initials().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/pluralize().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/slug().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/titleCase().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/truncate()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/",
       "name": "models.ts",
       "file_path": "src/models.ts",
       "line_range": "1:1",
       "callers": [],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/initials().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/pluralize().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/titleCase()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/initials().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/pluralize().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/titleCase()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#",
       "name": "Book",
       "file_path": "src/models.ts",
       "line_range": "17:17",
@@ -46,17 +46,17 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#`<constructor>`().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#`<constructor>`().",
       "name": "<constructor>",
       "file_path": "src/models.ts",
       "line_range": "18:18",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/starterLibrary()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/starterLibrary()."
       ],
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#`<constructor>`().(author)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#`<constructor>`().(author)",
       "name": "author",
       "file_path": "src/models.ts",
       "line_range": "20:20",
@@ -64,7 +64,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#`<constructor>`().(genre)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#`<constructor>`().(genre)",
       "name": "genre",
       "file_path": "src/models.ts",
       "line_range": "22:22",
@@ -72,7 +72,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#`<constructor>`().(pages)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#`<constructor>`().(pages)",
       "name": "pages",
       "file_path": "src/models.ts",
       "line_range": "21:21",
@@ -80,7 +80,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#`<constructor>`().(title)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#`<constructor>`().(title)",
       "name": "title",
       "file_path": "src/models.ts",
       "line_range": "19:19",
@@ -88,19 +88,19 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#describe().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#describe().",
       "name": "describe",
       "file_path": "src/models.ts",
       "line_range": "37:37",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/describeAll()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/describeAll()."
       ],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#label()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#label()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#isLong().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#isLong().",
       "name": "isLong",
       "file_path": "src/models.ts",
       "line_range": "25:25",
@@ -108,30 +108,30 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#label().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#label().",
       "name": "label",
       "file_path": "src/models.ts",
       "line_range": "29:29",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#describe().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/longestTitle()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#describe().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/longestTitle()."
       ],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/titleCase()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/titleCase()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#matches().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#matches().",
       "name": "matches",
       "file_path": "src/models.ts",
       "line_range": "33:33",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#byGenre()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#byGenre()."
       ],
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#matches().(genre)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#matches().(genre)",
       "name": "genre",
       "file_path": "src/models.ts",
       "line_range": "33:33",
@@ -139,7 +139,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Describable#",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Describable#",
       "name": "Describable",
       "file_path": "src/models.ts",
       "line_range": "13:13",
@@ -147,7 +147,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Describable#describe().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Describable#describe().",
       "name": "describe",
       "file_path": "src/models.ts",
       "line_range": "14:14",
@@ -155,7 +155,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Genre#",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Genre#",
       "name": "Genre",
       "file_path": "src/models.ts",
       "line_range": "7:7",
@@ -163,7 +163,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Genre#Fiction.",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Genre#Fiction.",
       "name": "Fiction",
       "file_path": "src/models.ts",
       "line_range": "8:8",
@@ -171,7 +171,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Genre#History.",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Genre#History.",
       "name": "History",
       "file_path": "src/models.ts",
       "line_range": "10:10",
@@ -179,7 +179,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Genre#Science.",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Genre#Science.",
       "name": "Science",
       "file_path": "src/models.ts",
       "line_range": "9:9",
@@ -187,7 +187,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Loan#",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Loan#",
       "name": "Loan",
       "file_path": "src/models.ts",
       "line_range": "89:89",
@@ -195,17 +195,17 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Loan#`<constructor>`().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Loan#`<constructor>`().",
       "name": "<constructor>",
       "file_path": "src/models.ts",
       "line_range": "92:92",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#checkout()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#checkout()."
       ],
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Loan#`<constructor>`().(bookTitle)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Loan#`<constructor>`().(bookTitle)",
       "name": "bookTitle",
       "file_path": "src/models.ts",
       "line_range": "93:93",
@@ -213,7 +213,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Loan#`<constructor>`().(memberId)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Loan#`<constructor>`().(memberId)",
       "name": "memberId",
       "file_path": "src/models.ts",
       "line_range": "94:94",
@@ -221,7 +221,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Loan#daysOut.",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Loan#daysOut.",
       "name": "daysOut",
       "file_path": "src/models.ts",
       "line_range": "90:90",
@@ -229,17 +229,17 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Loan#isOverdue().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Loan#isOverdue().",
       "name": "isOverdue",
       "file_path": "src/models.ts",
       "line_range": "97:97",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#overdue()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#overdue()."
       ],
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Loan#renew().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Loan#renew().",
       "name": "renew",
       "file_path": "src/models.ts",
       "line_range": "101:101",
@@ -247,7 +247,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Member#",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Member#",
       "name": "Member",
       "file_path": "src/models.ts",
       "line_range": "78:78",
@@ -255,17 +255,17 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Member#`<constructor>`().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Member#`<constructor>`().",
       "name": "<constructor>",
       "file_path": "src/models.ts",
       "line_range": "79:79",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/starterLibrary()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/starterLibrary()."
       ],
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Member#`<constructor>`().(id)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Member#`<constructor>`().(id)",
       "name": "id",
       "file_path": "src/models.ts",
       "line_range": "80:80",
@@ -273,7 +273,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Member#`<constructor>`().(name)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Member#`<constructor>`().(name)",
       "name": "name",
       "file_path": "src/models.ts",
       "line_range": "81:81",
@@ -281,17 +281,17 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Member#displayName().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Member#displayName().",
       "name": "displayName",
       "file_path": "src/models.ts",
       "line_range": "84:84",
       "callers": [],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/initials()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/initials()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#",
       "name": "Shelf",
       "file_path": "src/models.ts",
       "line_range": "42:42",
@@ -299,17 +299,17 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#`<constructor>`().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#`<constructor>`().",
       "name": "<constructor>",
       "file_path": "src/models.ts",
       "line_range": "45:45",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/starterLibrary()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/starterLibrary()."
       ],
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#`<constructor>`().(name)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#`<constructor>`().(name)",
       "name": "name",
       "file_path": "src/models.ts",
       "line_range": "45:45",
@@ -317,20 +317,20 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#add().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#add().",
       "name": "add",
       "file_path": "src/models.ts",
       "line_range": "47:47",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/merge().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/starterLibrary()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/merge().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/starterLibrary()."
       ],
       "callees": [
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Array#push()."
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Array#push()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#add().(book)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#add().(book)",
       "name": "book",
       "file_path": "src/models.ts",
       "line_range": "47:47",
@@ -338,7 +338,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#books.",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#books.",
       "name": "books",
       "file_path": "src/models.ts",
       "line_range": "43:43",
@@ -346,20 +346,20 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#byGenre().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#byGenre().",
       "name": "byGenre",
       "file_path": "src/models.ts",
       "line_range": "69:69",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/scienceBooks()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/scienceBooks()."
       ],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#matches().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Array#filter()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#matches().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Array#filter()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#byGenre().(genre)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#byGenre().(genre)",
       "name": "genre",
       "file_path": "src/models.ts",
       "line_range": "69:69",
@@ -367,62 +367,62 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#count().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#count().",
       "name": "count",
       "file_path": "src/models.ts",
       "line_range": "51:51",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#describe().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#bookCount().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/averagePages()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#describe().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#bookCount().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/averagePages()."
       ],
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#describe().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#describe().",
       "name": "describe",
       "file_path": "src/models.ts",
       "line_range": "73:73",
       "callers": [],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#count().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/pluralize()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#count().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/pluralize()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#longest().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#longest().",
       "name": "longest",
       "file_path": "src/models.ts",
       "line_range": "59:59",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/longestTitle()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/longestTitle()."
       ],
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#totalPages().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#totalPages().",
       "name": "totalPages",
       "file_path": "src/models.ts",
       "line_range": "55:55",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/averagePages()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/averagePages()."
       ],
       "callees": [
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Array#reduce()."
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Array#reduce()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/",
       "name": "ops.ts",
       "file_path": "src/ops.ts",
       "line_range": "1:1",
       "callers": [],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/pluralize()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/pluralize()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#",
       "name": "Library",
       "file_path": "src/ops.ts",
       "line_range": "6:6",
@@ -430,19 +430,19 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#addShelf().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#addShelf().",
       "name": "addShelf",
       "file_path": "src/ops.ts",
       "line_range": "11:11",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/starterLibrary()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/starterLibrary()."
       ],
       "callees": [
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Array#push()."
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Array#push()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#addShelf().(shelf)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#addShelf().(shelf)",
       "name": "shelf",
       "file_path": "src/ops.ts",
       "line_range": "11:11",
@@ -450,31 +450,31 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#bookCount().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#bookCount().",
       "name": "bookCount",
       "file_path": "src/ops.ts",
       "line_range": "27:27",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/summary()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/summary()."
       ],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#count().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Array#reduce()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#count().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Array#reduce()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#checkout().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#checkout().",
       "name": "checkout",
       "file_path": "src/ops.ts",
       "line_range": "19:19",
       "callers": [],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Loan#`<constructor>`().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Array#push()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Loan#`<constructor>`().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Array#push()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#checkout().(book)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#checkout().(book)",
       "name": "book",
       "file_path": "src/ops.ts",
       "line_range": "19:19",
@@ -482,7 +482,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#checkout().(member)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#checkout().(member)",
       "name": "member",
       "file_path": "src/ops.ts",
       "line_range": "19:19",
@@ -490,7 +490,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#loans.",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#loans.",
       "name": "loans",
       "file_path": "src/ops.ts",
       "line_range": "9:9",
@@ -498,7 +498,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#members.",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#members.",
       "name": "members",
       "file_path": "src/ops.ts",
       "line_range": "8:8",
@@ -506,30 +506,30 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#overdue().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#overdue().",
       "name": "overdue",
       "file_path": "src/ops.ts",
       "line_range": "23:23",
       "callers": [],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Loan#isOverdue().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Array#filter()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Loan#isOverdue().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Array#filter()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#register().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#register().",
       "name": "register",
       "file_path": "src/ops.ts",
       "line_range": "15:15",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/starterLibrary()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/starterLibrary()."
       ],
       "callees": [
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Array#push()."
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Array#push()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#register().(member)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#register().(member)",
       "name": "member",
       "file_path": "src/ops.ts",
       "line_range": "15:15",
@@ -537,7 +537,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#shelves.",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#shelves.",
       "name": "shelves",
       "file_path": "src/ops.ts",
       "line_range": "7:7",
@@ -545,21 +545,21 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/averagePages().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/averagePages().",
       "name": "averagePages",
       "file_path": "src/ops.ts",
       "line_range": "39:39",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`index.ts`/"
+        "scip-typescript npm engraph-fixture 0.0.0 src/`index.ts`/"
       ],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#count().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#totalPages().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Math#floor()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#count().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#totalPages().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Math#floor()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/averagePages().(shelf)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/averagePages().(shelf)",
       "name": "shelf",
       "file_path": "src/ops.ts",
       "line_range": "39:39",
@@ -567,20 +567,20 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/describeAll().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/describeAll().",
       "name": "describeAll",
       "file_path": "src/ops.ts",
       "line_range": "54:54",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`index.ts`/"
+        "scip-typescript npm engraph-fixture 0.0.0 src/`index.ts`/"
       ],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#describe().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Array#map()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#describe().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Array#map()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/describeAll().(shelf)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/describeAll().(shelf)",
       "name": "shelf",
       "file_path": "src/ops.ts",
       "line_range": "54:54",
@@ -588,20 +588,20 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/longestTitle().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/longestTitle().",
       "name": "longestTitle",
       "file_path": "src/ops.ts",
       "line_range": "46:46",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`index.ts`/"
+        "scip-typescript npm engraph-fixture 0.0.0 src/`index.ts`/"
       ],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#label().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#longest()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#label().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#longest()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/longestTitle().(shelf)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/longestTitle().(shelf)",
       "name": "shelf",
       "file_path": "src/ops.ts",
       "line_range": "46:46",
@@ -609,19 +609,19 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/merge().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/merge().",
       "name": "merge",
       "file_path": "src/ops.ts",
       "line_range": "32:32",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`index.ts`/"
+        "scip-typescript npm engraph-fixture 0.0.0 src/`index.ts`/"
       ],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#add()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#add()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/merge().(a)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/merge().(a)",
       "name": "a",
       "file_path": "src/ops.ts",
       "line_range": "32:32",
@@ -629,7 +629,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/merge().(b)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/merge().(b)",
       "name": "b",
       "file_path": "src/ops.ts",
       "line_range": "32:32",
@@ -637,19 +637,19 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/scienceBooks().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/scienceBooks().",
       "name": "scienceBooks",
       "file_path": "src/ops.ts",
       "line_range": "50:50",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`index.ts`/"
+        "scip-typescript npm engraph-fixture 0.0.0 src/`index.ts`/"
       ],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#byGenre()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#byGenre()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/scienceBooks().(shelf)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/scienceBooks().(shelf)",
       "name": "shelf",
       "file_path": "src/ops.ts",
       "line_range": "50:50",
@@ -657,37 +657,37 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/starterLibrary().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/starterLibrary().",
       "name": "starterLibrary",
       "file_path": "src/ops.ts",
       "line_range": "64:64",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`index.ts`/"
+        "scip-typescript npm engraph-fixture 0.0.0 src/`index.ts`/"
       ],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#`<constructor>`().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Member#`<constructor>`().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#`<constructor>`().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#add().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#addShelf().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#register()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#`<constructor>`().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Member#`<constructor>`().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#`<constructor>`().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#add().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#addShelf().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#register()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/summary().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/summary().",
       "name": "summary",
       "file_path": "src/ops.ts",
       "line_range": "58:58",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`index.ts`/"
+        "scip-typescript npm engraph-fixture 0.0.0 src/`index.ts`/"
       ],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/Library#bookCount().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/pluralize()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/Library#bookCount().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/pluralize()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/summary().(library)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/summary().(library)",
       "name": "library",
       "file_path": "src/ops.ts",
       "line_range": "58:58",
@@ -695,7 +695,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/",
       "name": "text.ts",
       "file_path": "src/text.ts",
       "line_range": "1:1",
@@ -703,21 +703,21 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/capitalize().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/capitalize().",
       "name": "capitalize",
       "file_path": "src/text.ts",
       "line_range": "7:7",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`index.ts`/",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/titleCase()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`index.ts`/",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/titleCase()."
       ],
       "callees": [
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/String#slice().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/String#toUpperCase()."
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/String#slice().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/String#toUpperCase()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/capitalize().(word)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/capitalize().(word)",
       "name": "word",
       "file_path": "src/text.ts",
       "line_range": "7:7",
@@ -725,25 +725,25 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/initials().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/initials().",
       "name": "initials",
       "file_path": "src/text.ts",
       "line_range": "14:14",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`index.ts`/",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Member#displayName()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`index.ts`/",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Member#displayName()."
       ],
       "callees": [
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es2015.symbol.wellknown.d.ts`/String#split().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Array#filter().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Array#join().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Array#map().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/String#split()."
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es2015.symbol.wellknown.d.ts`/String#split().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Array#filter().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Array#join().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Array#map().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/String#split()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/initials().(name)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/initials().(name)",
       "name": "name",
       "file_path": "src/text.ts",
       "line_range": "14:14",
@@ -751,21 +751,21 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/pluralize().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/pluralize().",
       "name": "pluralize",
       "file_path": "src/text.ts",
       "line_range": "22:22",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`index.ts`/",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Shelf#describe().",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`ops.ts`/summary()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`index.ts`/",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Shelf#describe().",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`ops.ts`/summary()."
       ],
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/pluralize().(n)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/pluralize().(n)",
       "name": "n",
       "file_path": "src/text.ts",
       "line_range": "22:22",
@@ -773,7 +773,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/pluralize().(word)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/pluralize().(word)",
       "name": "word",
       "file_path": "src/text.ts",
       "line_range": "22:22",
@@ -781,21 +781,21 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/slug().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/slug().",
       "name": "slug",
       "file_path": "src/text.ts",
       "line_range": "33:33",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`index.ts`/"
+        "scip-typescript npm engraph-fixture 0.0.0 src/`index.ts`/"
       ],
       "callees": [
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es2015.symbol.wellknown.d.ts`/String#replace().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/String#replace().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/String#toLowerCase()."
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es2015.symbol.wellknown.d.ts`/String#replace().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/String#replace().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/String#toLowerCase()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/slug().(s)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/slug().(s)",
       "name": "s",
       "file_path": "src/text.ts",
       "line_range": "33:33",
@@ -803,26 +803,26 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/titleCase().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/titleCase().",
       "name": "titleCase",
       "file_path": "src/text.ts",
       "line_range": "3:3",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`index.ts`/",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/",
-        "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#label()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`index.ts`/",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/",
+        "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#label()."
       ],
       "callees": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/capitalize().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es2015.symbol.wellknown.d.ts`/String#split().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Array#filter().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Array#join().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/Array#map().",
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/String#split()."
+        "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/capitalize().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es2015.symbol.wellknown.d.ts`/String#split().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Array#filter().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Array#join().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/Array#map().",
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/String#split()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/titleCase().(s)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/titleCase().(s)",
       "name": "s",
       "file_path": "src/text.ts",
       "line_range": "3:3",
@@ -830,19 +830,19 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/truncate().",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/truncate().",
       "name": "truncate",
       "file_path": "src/text.ts",
       "line_range": "29:29",
       "callers": [
-        "scip-typescript npm engraph-fixture 0.1.0 src/`index.ts`/"
+        "scip-typescript npm engraph-fixture 0.0.0 src/`index.ts`/"
       ],
       "callees": [
-        "scip-typescript npm typescript 6.0.3 lib/`lib.es5.d.ts`/String#slice()."
+        "scip-typescript npm typescript 0.0.0 lib/`lib.es5.d.ts`/String#slice()."
       ]
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/truncate().(max)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/truncate().(max)",
       "name": "max",
       "file_path": "src/text.ts",
       "line_range": "29:29",
@@ -850,7 +850,7 @@
       "callees": []
     },
     {
-      "id": "scip-typescript npm engraph-fixture 0.1.0 src/`text.ts`/truncate().(s)",
+      "id": "scip-typescript npm engraph-fixture 0.0.0 src/`text.ts`/truncate().(s)",
       "name": "s",
       "file_path": "src/text.ts",
       "line_range": "29:29",

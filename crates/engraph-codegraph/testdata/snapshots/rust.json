@@ -4,7 +4,7 @@
   "fixture_hash": "0c368ef00318ef579a59501d49f71ff2d1fa591197fd49d044b1735566afcedf",
   "symbols": [
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 crate/",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 crate/",
       "name": "crate",
       "file_path": "src/lib.rs",
       "line_range": "1:8",
@@ -12,7 +12,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/",
       "name": "models",
       "file_path": "src/models.rs",
       "line_range": "1:132",
@@ -20,7 +20,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Book#",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Book#",
       "name": "Book",
       "file_path": "src/models.rs",
       "line_range": "11:11",
@@ -28,7 +28,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Book#author.",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Book#author.",
       "name": "author",
       "file_path": "src/models.rs",
       "line_range": "13:13",
@@ -36,7 +36,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Book#genre.",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Book#genre.",
       "name": "genre",
       "file_path": "src/models.rs",
       "line_range": "15:15",
@@ -44,7 +44,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Book#pages.",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Book#pages.",
       "name": "pages",
       "file_path": "src/models.rs",
       "line_range": "14:14",
@@ -52,7 +52,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Book#title.",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Book#title.",
       "name": "title",
       "file_path": "src/models.rs",
       "line_range": "12:12",
@@ -60,7 +60,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Describe#",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Describe#",
       "name": "Describe",
       "file_path": "src/models.rs",
       "line_range": "117:117",
@@ -68,7 +68,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Describe#describe().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Describe#describe().",
       "name": "describe",
       "file_path": "src/models.rs",
       "line_range": "118:118",
@@ -76,7 +76,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Genre#",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Genre#",
       "name": "Genre",
       "file_path": "src/models.rs",
       "line_range": "4:4",
@@ -84,7 +84,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Genre#Fiction#",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Genre#Fiction#",
       "name": "Fiction",
       "file_path": "src/models.rs",
       "line_range": "5:5",
@@ -92,7 +92,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Genre#History#",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Genre#History#",
       "name": "History",
       "file_path": "src/models.rs",
       "line_range": "7:7",
@@ -100,7 +100,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Genre#Science#",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Genre#Science#",
       "name": "Science",
       "file_path": "src/models.rs",
       "line_range": "6:6",
@@ -108,7 +108,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Loan#",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Loan#",
       "name": "Loan",
       "file_path": "src/models.rs",
       "line_range": "93:93",
@@ -116,7 +116,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Loan#book_title.",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Loan#book_title.",
       "name": "book_title",
       "file_path": "src/models.rs",
       "line_range": "94:94",
@@ -124,7 +124,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Loan#days_out.",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Loan#days_out.",
       "name": "days_out",
       "file_path": "src/models.rs",
       "line_range": "96:96",
@@ -132,7 +132,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Loan#member_id.",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Loan#member_id.",
       "name": "member_id",
       "file_path": "src/models.rs",
       "line_range": "95:95",
@@ -140,7 +140,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Member#",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Member#",
       "name": "Member",
       "file_path": "src/models.rs",
       "line_range": "75:75",
@@ -148,7 +148,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Member#id.",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Member#id.",
       "name": "id",
       "file_path": "src/models.rs",
       "line_range": "76:76",
@@ -156,7 +156,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Member#name.",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Member#name.",
       "name": "name",
       "file_path": "src/models.rs",
       "line_range": "77:77",
@@ -164,7 +164,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Shelf#",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Shelf#",
       "name": "Shelf",
       "file_path": "src/models.rs",
       "line_range": "41:41",
@@ -172,7 +172,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Shelf#books.",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Shelf#books.",
       "name": "books",
       "file_path": "src/models.rs",
       "line_range": "43:43",
@@ -180,7 +180,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/Shelf#name.",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/Shelf#name.",
       "name": "name",
       "file_path": "src/models.rs",
       "line_range": "42:42",
@@ -188,90 +188,90 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Book][Describe]describe().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Book][Describe]describe().",
       "name": "describe",
       "file_path": "src/models.rs",
       "line_range": "122:122",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/describe_all()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/describe_all()."
       ],
       "callees": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Book]label()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Book]label()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Book]is_long().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Book]is_long().",
       "name": "is_long",
       "file_path": "src/models.rs",
       "line_range": "28:28",
       "callers": [],
       "callees": [
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core cmp/impls/impl#[u32][`PartialOrd<Self>`]gt()."
+        "rust-analyzer cargo core 0.0.0 cmp/impls/impl#[u32][`PartialOrd<Self>`]gt()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Book]label().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Book]label().",
       "name": "label",
       "file_path": "src/models.rs",
       "line_range": "32:32",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Book][Describe]describe().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/longest_title()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Book][Describe]describe().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/longest_title()."
       ],
       "callees": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 text/title_case()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 text/title_case()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Book]matches().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Book]matches().",
       "name": "matches",
       "file_path": "src/models.rs",
       "line_range": "36:36",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]by_genre()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]by_genre()."
       ],
       "callees": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Genre][`PartialEq<Self>`]eq()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Genre][`PartialEq<Self>`]eq()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Book]new().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Book]new().",
       "name": "new",
       "file_path": "src/models.rs",
       "line_range": "19:19",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/starter_library()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/starter_library()."
       ],
       "callees": [
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc string/impl#[T][ToString]to_string()."
+        "rust-analyzer cargo alloc 0.0.0 string/impl#[T][ToString]to_string()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Loan]is_overdue().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Loan]is_overdue().",
       "name": "is_overdue",
       "file_path": "src/models.rs",
       "line_range": "108:108",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library]overdue()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library]overdue()."
       ],
       "callees": [
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core cmp/impls/impl#[u32][`PartialOrd<Self>`]gt()."
+        "rust-analyzer cargo core 0.0.0 cmp/impls/impl#[u32][`PartialOrd<Self>`]gt()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Loan]new().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Loan]new().",
       "name": "new",
       "file_path": "src/models.rs",
       "line_range": "100:100",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library]checkout()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library]checkout()."
       ],
       "callees": [
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc string/impl#[T][ToString]to_string()."
+        "rust-analyzer cargo alloc 0.0.0 string/impl#[T][ToString]to_string()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Loan]renew().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Loan]renew().",
       "name": "renew",
       "file_path": "src/models.rs",
       "line_range": "112:112",
@@ -279,121 +279,121 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Member]display_name().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Member]display_name().",
       "name": "display_name",
       "file_path": "src/models.rs",
       "line_range": "88:88",
       "callers": [],
       "callees": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 text/initials()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 text/initials()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Member]new().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Member]new().",
       "name": "new",
       "file_path": "src/models.rs",
       "line_range": "81:81",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/starter_library()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/starter_library()."
       ],
       "callees": [
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc string/impl#[T][ToString]to_string()."
+        "rust-analyzer cargo alloc 0.0.0 string/impl#[T][ToString]to_string()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf][Describe]describe().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf][Describe]describe().",
       "name": "describe",
       "file_path": "src/models.rs",
       "line_range": "128:128",
       "callers": [],
       "callees": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]count()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]count()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]add().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]add().",
       "name": "add",
       "file_path": "src/models.rs",
       "line_range": "54:54",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/merge().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/starter_library()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/merge().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/starter_library()."
       ],
       "callees": [
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc vec/impl#[`Vec<T, A>`]push()."
+        "rust-analyzer cargo alloc 0.0.0 vec/impl#[`Vec<T, A>`]push()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]by_genre().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]by_genre().",
       "name": "by_genre",
       "file_path": "src/models.rs",
       "line_range": "70:70",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/science_books()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/science_books()."
       ],
       "callees": [
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#collect().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#filter().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core slice/impl#[`[T]`]iter().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Book]matches()."
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#collect().",
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#filter().",
+        "rust-analyzer cargo core 0.0.0 slice/impl#[`[T]`]iter().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Book]matches()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]count().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]count().",
       "name": "count",
       "file_path": "src/models.rs",
       "line_range": "58:58",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf][Describe]describe().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/average_pages().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library]book_count()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf][Describe]describe().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/average_pages().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library]book_count()."
       ],
       "callees": [
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc vec/impl#[`Vec<T, A>`]len()."
+        "rust-analyzer cargo alloc 0.0.0 vec/impl#[`Vec<T, A>`]len()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]longest().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]longest().",
       "name": "longest",
       "file_path": "src/models.rs",
       "line_range": "66:66",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/longest_title()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/longest_title()."
       ],
       "callees": [
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#max_by_key().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core slice/impl#[`[T]`]iter()."
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#max_by_key().",
+        "rust-analyzer cargo core 0.0.0 slice/impl#[`[T]`]iter()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]new().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]new().",
       "name": "new",
       "file_path": "src/models.rs",
       "line_range": "47:47",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/starter_library()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/starter_library()."
       ],
       "callees": [
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc string/impl#[T][ToString]to_string().",
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc vec/impl#[`Vec<T>`]new()."
+        "rust-analyzer cargo alloc 0.0.0 string/impl#[T][ToString]to_string().",
+        "rust-analyzer cargo alloc 0.0.0 vec/impl#[`Vec<T>`]new()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]total_pages().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]total_pages().",
       "name": "total_pages",
       "file_path": "src/models.rs",
       "line_range": "62:62",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/average_pages()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/average_pages()."
       ],
       "callees": [
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#map().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#sum().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core slice/impl#[`[T]`]iter()."
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#map().",
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#sum().",
+        "rust-analyzer cargo core 0.0.0 slice/impl#[`[T]`]iter()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/",
       "name": "ops",
       "file_path": "src/ops.rs",
       "line_range": "1:92",
@@ -401,7 +401,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/Library#",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/Library#",
       "name": "Library",
       "file_path": "src/ops.rs",
       "line_range": "6:6",
@@ -409,7 +409,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/Library#loans.",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/Library#loans.",
       "name": "loans",
       "file_path": "src/ops.rs",
       "line_range": "9:9",
@@ -417,7 +417,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/Library#members.",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/Library#members.",
       "name": "members",
       "file_path": "src/ops.rs",
       "line_range": "8:8",
@@ -425,7 +425,7 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/Library#shelves.",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/Library#shelves.",
       "name": "shelves",
       "file_path": "src/ops.rs",
       "line_range": "7:7",
@@ -433,180 +433,180 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/average_pages().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/average_pages().",
       "name": "average_pages",
       "file_path": "src/ops.rs",
       "line_range": "55:55",
       "callers": [],
       "callees": [
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core cmp/impls/impl#[usize][`PartialEq<Self>`]eq().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core ops/arith/impl#[u32][`Div<Self>`]div().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]count().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]total_pages()."
+        "rust-analyzer cargo core 0.0.0 cmp/impls/impl#[usize][`PartialEq<Self>`]eq().",
+        "rust-analyzer cargo core 0.0.0 ops/arith/impl#[u32][`Div<Self>`]div().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]count().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]total_pages()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/describe_all().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/describe_all().",
       "name": "describe_all",
       "file_path": "src/ops.rs",
       "line_range": "71:71",
       "callers": [],
       "callees": [
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#collect().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#map().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core slice/impl#[`[T]`]iter().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Book][Describe]describe()."
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#collect().",
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#map().",
+        "rust-analyzer cargo core 0.0.0 slice/impl#[`[T]`]iter().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Book][Describe]describe()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library][Default]default().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library][Default]default().",
       "name": "default",
       "file_path": "src/ops.rs",
       "line_range": "43:43",
       "callers": [],
       "callees": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library]new()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library]new()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library]add_shelf().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library]add_shelf().",
       "name": "add_shelf",
       "file_path": "src/ops.rs",
       "line_range": "21:21",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/starter_library()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/starter_library()."
       ],
       "callees": [
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc vec/impl#[`Vec<T, A>`]push()."
+        "rust-analyzer cargo alloc 0.0.0 vec/impl#[`Vec<T, A>`]push()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library]book_count().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library]book_count().",
       "name": "book_count",
       "file_path": "src/ops.rs",
       "line_range": "37:37",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/summary()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/summary()."
       ],
       "callees": [
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#map().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#sum().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core slice/impl#[`[T]`]iter().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]count()."
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#map().",
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#sum().",
+        "rust-analyzer cargo core 0.0.0 slice/impl#[`[T]`]iter().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]count()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library]checkout().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library]checkout().",
       "name": "checkout",
       "file_path": "src/ops.rs",
       "line_range": "29:29",
       "callers": [],
       "callees": [
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc vec/impl#[`Vec<T, A>`]push().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Loan]new()."
+        "rust-analyzer cargo alloc 0.0.0 vec/impl#[`Vec<T, A>`]push().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Loan]new()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library]new().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library]new().",
       "name": "new",
       "file_path": "src/ops.rs",
       "line_range": "13:13",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library][Default]default().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/starter_library()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library][Default]default().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/starter_library()."
       ],
       "callees": [
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc vec/impl#[`Vec<T>`]new()."
+        "rust-analyzer cargo alloc 0.0.0 vec/impl#[`Vec<T>`]new()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library]overdue().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library]overdue().",
       "name": "overdue",
       "file_path": "src/ops.rs",
       "line_range": "33:33",
       "callers": [],
       "callees": [
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#collect().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#filter().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core slice/impl#[`[T]`]iter().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Loan]is_overdue()."
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#collect().",
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#filter().",
+        "rust-analyzer cargo core 0.0.0 slice/impl#[`[T]`]iter().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Loan]is_overdue()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library]register().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library]register().",
       "name": "register",
       "file_path": "src/ops.rs",
       "line_range": "25:25",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/starter_library()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/starter_library()."
       ],
       "callees": [
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc vec/impl#[`Vec<T, A>`]push()."
+        "rust-analyzer cargo alloc 0.0.0 vec/impl#[`Vec<T, A>`]push()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/longest_title().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/longest_title().",
       "name": "longest_title",
       "file_path": "src/ops.rs",
       "line_range": "63:63",
       "callers": [],
       "callees": [
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core option/impl#[`Option<T>`]map().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Book]label().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]longest()."
+        "rust-analyzer cargo core 0.0.0 option/impl#[`Option<T>`]map().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Book]label().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]longest()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/merge().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/merge().",
       "name": "merge",
       "file_path": "src/ops.rs",
       "line_range": "48:48",
       "callers": [],
       "callees": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]add()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]add()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/science_books().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/science_books().",
       "name": "science_books",
       "file_path": "src/ops.rs",
       "line_range": "67:67",
       "callers": [],
       "callees": [
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc vec/impl#[`Vec<T, A>`]len().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]by_genre()."
+        "rust-analyzer cargo alloc 0.0.0 vec/impl#[`Vec<T, A>`]len().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]by_genre()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/starter_library().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/starter_library().",
       "name": "starter_library",
       "file_path": "src/ops.rs",
       "line_range": "83:83",
       "callers": [],
       "callees": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Book]new().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Member]new().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]add().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Shelf]new().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library]add_shelf().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library]new().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library]register()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Book]new().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Member]new().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]add().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Shelf]new().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library]add_shelf().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library]new().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library]register()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 ops/summary().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 ops/summary().",
       "name": "summary",
       "file_path": "src/ops.rs",
       "line_range": "75:75",
       "callers": [],
       "callees": [
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc vec/impl#[`Vec<T, A>`]len().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/impl#[Library]book_count().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 text/pluralize()."
+        "rust-analyzer cargo alloc 0.0.0 vec/impl#[`Vec<T, A>`]len().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/impl#[Library]book_count().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 text/pluralize()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 text/",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 text/",
       "name": "text",
       "file_path": "src/text.rs",
       "line_range": "1:39",
@@ -614,87 +614,87 @@
       "callees": []
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 text/capitalize().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 text/capitalize().",
       "name": "capitalize",
       "file_path": "src/text.rs",
       "line_range": "10:10",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 text/title_case()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 text/title_case()."
       ],
       "callees": [
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc string/impl#[String]new().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core char/methods/impl#[char]to_uppercase().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#chain().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#collect().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core str/impl#[str]chars().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core str/iter/impl#[`Chars<'a>`][Iterator]next()."
+        "rust-analyzer cargo alloc 0.0.0 string/impl#[String]new().",
+        "rust-analyzer cargo core 0.0.0 char/methods/impl#[char]to_uppercase().",
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#chain().",
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#collect().",
+        "rust-analyzer cargo core 0.0.0 str/impl#[str]chars().",
+        "rust-analyzer cargo core 0.0.0 str/iter/impl#[`Chars<'a>`][Iterator]next()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 text/initials().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 text/initials().",
       "name": "initials",
       "file_path": "src/text.rs",
       "line_range": "18:18",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Member]display_name()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Member]display_name()."
       ],
       "callees": [
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#collect().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#filter_map().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core str/impl#[str]chars().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core str/impl#[str]split_whitespace().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core str/iter/impl#[`Chars<'a>`][Iterator]next()."
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#collect().",
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#filter_map().",
+        "rust-analyzer cargo core 0.0.0 str/impl#[str]chars().",
+        "rust-analyzer cargo core 0.0.0 str/impl#[str]split_whitespace().",
+        "rust-analyzer cargo core 0.0.0 str/iter/impl#[`Chars<'a>`][Iterator]next()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 text/pluralize().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 text/pluralize().",
       "name": "pluralize",
       "file_path": "src/text.rs",
       "line_range": "24:24",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 ops/summary()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 ops/summary()."
       ],
       "callees": [
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core cmp/impls/impl#[usize][`PartialEq<Self>`]eq()."
+        "rust-analyzer cargo core 0.0.0 cmp/impls/impl#[usize][`PartialEq<Self>`]eq()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 text/slug().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 text/slug().",
       "name": "slug",
       "file_path": "src/text.rs",
       "line_range": "36:36",
       "callers": [],
       "callees": [
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc str/impl#[str]replace().",
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc str/impl#[str]to_lowercase()."
+        "rust-analyzer cargo alloc 0.0.0 str/impl#[str]replace().",
+        "rust-analyzer cargo alloc 0.0.0 str/impl#[str]to_lowercase()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 text/title_case().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 text/title_case().",
       "name": "title_case",
       "file_path": "src/text.rs",
       "line_range": "3:3",
       "callers": [
-        "rust-analyzer cargo engraph-fixture 0.1.0 models/impl#[Book]label()."
+        "rust-analyzer cargo engraph-fixture 0.0.0 models/impl#[Book]label()."
       ],
       "callees": [
-        "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc slice/impl#[`[T]`]join().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#collect().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#map().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core str/impl#[str]split_whitespace().",
-        "rust-analyzer cargo engraph-fixture 0.1.0 text/capitalize()."
+        "rust-analyzer cargo alloc 0.0.0 slice/impl#[`[T]`]join().",
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#collect().",
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#map().",
+        "rust-analyzer cargo core 0.0.0 str/impl#[str]split_whitespace().",
+        "rust-analyzer cargo engraph-fixture 0.0.0 text/capitalize()."
       ]
     },
     {
-      "id": "rust-analyzer cargo engraph-fixture 0.1.0 text/truncate().",
+      "id": "rust-analyzer cargo engraph-fixture 0.0.0 text/truncate().",
       "name": "truncate",
       "file_path": "src/text.rs",
       "line_range": "32:32",
       "callers": [],
       "callees": [
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#collect().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core iter/traits/iterator/Iterator#take().",
-        "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core str/impl#[str]chars()."
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#collect().",
+        "rust-analyzer cargo core 0.0.0 iter/traits/iterator/Iterator#take().",
+        "rust-analyzer cargo core 0.0.0 str/impl#[str]chars()."
       ]
     }
   ]
