@@ -81,8 +81,8 @@ changed after its files were made, also for Java, which CI does not index.
 
 ## Steps, part 2: normalization of symbol ids
 
-Steps 1 and 2 are complete. Step 1: plan 03, step 7. Step 2: the findings
-below the steps (2026-11-17).
+Steps 1 to 4 are complete. Step 1: plan 03, step 7. Steps 2 to 4: the
+findings and the two tables below the steps (2026-11-17).
 
 1. In the standalone Go driver, give `--module-version` with the value of
    `SCIP_GO_VERSION` to scip-go. This change replaces all Go symbol ids one
@@ -125,6 +125,40 @@ and Go 1.26.3.
 
 Local symbols (`local <n>`) are 12 to 31 per fixture; the loader gives them a
 tag of the project key (see the condition), and the snapshots leave them out.
+
+### Step 3: the id fields of each indexer (2026-11-17)
+
+A SCIP id is `<scheme> <package manager> <package name> <version>
+<descriptors>`. The sources of the four fields:
+
+| Indexer | Scheme | Package manager | Package name | Version |
+|---|---|---|---|---|
+| rust-analyzer | `rust-analyzer` | `cargo` | `Cargo.toml` `name` (crates); `core`, `alloc`, `std` (standard library) | `Cargo.toml` `version`; a GitHub URL for the standard library |
+| scip-python | `scip-python` | `python` | the basename of the indexed directory (driver `--project-name`); `python-stdlib` (standard library); the pip name (installed packages) | the pin `SCIP_PYTHON_VERSION` = `0.0.0` (driver `--project-version`); the typeshed version in scip-python (standard library); the pip version (installed packages) |
+| scip-go | `scip-go` | `gomod` | the `module` path of `go.mod`; `github.com/golang/go/src` (standard library) | the pin `SCIP_GO_VERSION` = `0.0.0` (driver and loader, part 2 step 1); the `go` directive of `go.mod` (standard library); the `go.sum` version (modules) |
+| scip-typescript | `scip-typescript` | `npm` | `package.json` `name`; `typescript` (compiler library) | `package.json` `version`; the TypeScript version in scip-typescript |
+| scip-java (Maven) | `semanticdb` | `maven` | `maven/<groupId>/<artifactId>`; `jdk` (JDK); empty (package symbols) | the `pom.xml` version; the JDK major of the computer; empty (package symbols) |
+
+### Step 4: the problems for each scheme (2026-11-17)
+
+The categories of the step: empty versions, absolute paths, and versions that
+change. The version that the scip-python and scip-go drivers give stays as it
+is (the step's constraint, and part 2 step 1). Step 5 writes one rule for each
+problem.
+
+| # | Scheme | Problem | Effect |
+|---|---|---|---|
+| P1 | `scip-python` | The package name is the basename of the indexed directory, not a value from the repo. | One repo gives different ids in two checkouts with different directory names. The worktrees of this repo do this today. Also, two repos with the same directory name and the same module paths have the same ids. |
+| P2 | `semanticdb` | Package symbols have an empty package name and an empty version (`semanticdb maven . . fixture/models/`). | The package rows of all repos, and of the JDK, with the same package name are one row in the database. Two repos with the same package names share these rows (the third test of this plan). Only package symbols: classes, methods, and fields carry the Maven coordinates. |
+| P3 | `semanticdb` | JDK ids carry the JDK major of the computer (`jdk 21`). | Two computers with different JDK majors give different ids to the same JDK references. Relations to JDK symbols do not connect between the two. |
+| P4 | `rust-analyzer`, `scip-typescript`, `semanticdb` | The first-party version follows the manifest (`Cargo.toml`, `package.json`, `pom.xml`). A release bump changes every id of the package. | Not "at each commit", but each release churns the repo's graph and breaks relations from other repos. The pins for scip-python and scip-go avoid this for those two schemes. |
+| — | `scip-go` | None. No absolute paths in 0.2.7 (the installed and pinned version), the version is pinned, and the module path is unique. | Step 7 (absolute paths in scip-go ids) has nothing to do. |
+
+Absolute paths occur in no scheme. The standard-library versions of
+scip-python (typeshed) and scip-typescript (bundled TypeScript) follow the
+indexer version, which the test suite of part 1 tracks; the Go standard
+library follows the `go` directive of `go.mod`. These change ids only together
+with a deliberate tool or repo change, so they are not problems in the table.
 
 ## Tests
 
