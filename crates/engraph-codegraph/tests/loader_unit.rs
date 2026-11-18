@@ -1212,3 +1212,67 @@ fn module_level_typescript_code_goes_to_its_file() {
         vec![(module.to_string(), target.to_string())]
     );
 }
+
+#[test]
+fn a_definition_without_symbol_information_can_anchor_a_relation() {
+    // SCIP asks a document to list the symbols it defines, but a blob from
+    // another tool may not. The definition still anchors the call after it,
+    // so the call's source needs a row, or the relation fails the foreign key.
+    let f = "scip-test demo demo 0.0.0 lib/f().";
+    let g = "scip-test demo demo 0.0.0 lib/g().";
+    let mut doc = Document::new();
+    doc.relative_path = "src/lib.rs".to_string();
+    doc.symbols = vec![sym(g, "g", SymKind::Function)];
+    doc.occurrences = vec![
+        occ(f, vec![0, 3, 4], SymbolRole::Definition as i32),
+        occ(g, vec![1, 4, 5], 0),
+        occ(g, vec![5, 3, 4], SymbolRole::Definition as i32),
+    ];
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/demo", &index_of(vec![doc])).unwrap();
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM relations WHERE src_entity = ?1 AND dst_entity = ?2",
+            [f, g],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn a_package_whose_information_comes_in_a_later_document_can_anchor_a_relation() {
+    // A Go package is defined in each of its files, but scip-go lists its
+    // SymbolInformation in one. When a file loaded before that one has a
+    // top-level reference, the package anchors it before its row is written.
+    let pkg = "scip-go gomod demo 0.0.0 `demo`/";
+    let upper = "scip-go gomod std 0.0.0 `strings`/ToUpper().";
+    let mut first = Document::new();
+    first.relative_path = "a.go".to_string();
+    first.occurrences = vec![
+        occ(pkg, vec![0, 8, 12], SymbolRole::Definition as i32),
+        occ(upper, vec![4, 20, 27], 0),
+    ];
+    let mut second = Document::new();
+    second.relative_path = "b.go".to_string();
+    second.symbols = vec![sym(pkg, "demo", SymKind::Package)];
+    second.occurrences = vec![occ(pkg, vec![0, 8, 12], SymbolRole::Definition as i32)];
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/demo", &index_of(vec![first, second])).unwrap();
+    let (path, calls): (String, i64) = conn
+        .query_row(
+            "SELECT e.file_path, (SELECT COUNT(*) FROM relations
+                                  WHERE src_entity = e.id AND dst_entity = ?2)
+             FROM entities e WHERE e.id = ?1",
+            [pkg, upper],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    // The package row is the real one: the later document's information
+    // still fills it in.
+    assert_eq!((path.as_str(), calls), ("a.go", 1));
+}

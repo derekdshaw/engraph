@@ -78,6 +78,9 @@ pub(crate) const SCIP_PYTHON_VERSION: &str = PINNED_VERSION;
 /// clone named `engraph`). `[tool.poetry].name` answers for a Poetry project
 /// without a `[project]` table. Without a `pyproject.toml`, or without a name
 /// in either table, the directory's basename, as before.
+///
+/// This is an id rule: a change to what it returns changes symbol ids and
+/// bumps `scip_loader::NORMALIZATION_VERSION`.
 pub(crate) fn python_project_name(repo: &Path) -> String {
     std::fs::read_to_string(repo.join("pyproject.toml"))
         .ok()
@@ -157,7 +160,7 @@ impl Driver for ScipPython {
 /// every moniker — so without a pin, Go entity IDs churn on each commit. Same
 /// rationale as `SCIP_PYTHON_VERSION`. The loader gives the same version to
 /// the ids scip-go writes with the version `.`
-/// (`scip_loader::pin_go_module_versions`).
+/// (`scip_loader::normalize_moniker`).
 pub(crate) const SCIP_GO_VERSION: &str = PINNED_VERSION;
 
 pub struct ScipGo;

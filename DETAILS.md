@@ -2240,7 +2240,7 @@ flag is still available to opt in on a single-repo run.
   does not list it, as in the driver. A reference into another module of
   the repo that scip-go cannot tie to the run (no `replace`, and the run
   does not start at the go.work root) gets the version `.`; the loader
-  pins it to `0.0.0` (`pin_go_module_versions`), so it matches the
+  pins it to `0.0.0` (`normalize_moniker`), so it matches the
   definition (verified 2026-11-16, scip-go 0.2.7). `--go-tags` reaches
   each module's run the same way as in the driver (`apply_go_tags`).
   `rebase_documents` prepends the module's repo-relative dir to its

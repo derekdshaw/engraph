@@ -100,20 +100,16 @@ impl Snapshot {
     }
 
     /// The differences between `self`, the snapshot, and `actual`, an index
-    /// run, one line each; empty when they are equal. A changed indexer,
-    /// version, or fixture hash comes first, then a count line, then the symbols: `-` only in
+    /// run, one line each; empty when they are equal. A changed indexer or
+    /// fixture hash comes first, then a count line, then the symbols: `-` only in
     /// the snapshot, `+` only in the index run, `~` changed, with the changed
     /// fields indented below it (`callers`/`callees` as the ids that went or
-    /// came).
+    /// came). The indexer version is not compared: a new version that writes
+    /// the same ids is no difference (the caller can warn about it).
     pub fn diff(&self, actual: &Snapshot) -> Vec<String> {
         let mut lines = Vec::new();
         for (name, want, got) in [
             ("indexer", &self.indexer, &actual.indexer),
-            (
-                "indexer_version",
-                &self.indexer_version,
-                &actual.indexer_version,
-            ),
             ("fixture_hash", &self.fixture_hash, &actual.fixture_hash),
         ] {
             if want != got {

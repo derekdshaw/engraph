@@ -47,8 +47,6 @@ fn describe_plan(plan: &engraph_codegraph::IndexPlan, indent: &str) {
     }
 }
 
-/// An index run's target for display: `project`, or `project/subtree` for a
-/// monorepo sub-project run.
 /// The recommendation `engraph index` prints when `stale` (from
 /// `engraph_codegraph::stale_normalization`) names projects whose symbol ids
 /// were written under other normalization rules than the current ones
@@ -71,6 +69,8 @@ pub(crate) fn stale_normalization_note(stale: &[(String, i64)]) -> Option<String
     ))
 }
 
+/// An index run's target for display: `project`, or `project/subtree` for a
+/// monorepo sub-project run.
 pub(crate) fn scope_label(project: &str, subtree: &str) -> String {
     if subtree.is_empty() {
         project.to_string()

@@ -82,9 +82,9 @@ impl Fixture {
         None
     }
 
-    /// Copy the fixture into `into/<lang>` and return that path. The basename
-    /// is kept on purpose: scip-python writes the indexed directory's name
-    /// into every first-party symbol id (`--project-name`).
+    /// Copy the fixture into `into/<lang>` and return that path. The python
+    /// fixture's ids take their package name from its `pyproject.toml`, not
+    /// from this directory name.
     pub fn copy_into(&self, into: &Path) -> PathBuf {
         let dst = into.join(self.lang);
         copy_dir_all(&self.dir(), &dst);
@@ -152,7 +152,12 @@ fn copy_dir_all(src: &Path, dst: &Path) {
 
 /// Whether `bin` is on PATH and answers `--version`.
 pub fn binary_present(bin: &str) -> bool {
-    version_output(bin).is_some()
+    probe(bin, "--version").is_some()
+}
+
+/// Whether `bazel` or `bazelisk` is on PATH.
+pub fn bazel_present() -> bool {
+    ["bazel", "bazelisk"].iter().any(|b| binary_present(b))
 }
 
 /// The build tool scip-java can drive on this machine. scip-java is a
@@ -201,17 +206,13 @@ pub fn normalized_scip(bytes: &[u8]) -> Vec<u8> {
 /// its help text and exits 2 even when installed), so `binary_present` would
 /// call it absent; the probe is the `go version` subcommand, which exits 0.
 pub fn go_toolchain_present() -> bool {
-    Command::new("go")
-        .arg("version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    probe("go", "version").is_some()
 }
 
 /// The first line `bin --version` prints (stdout, else stderr), or `None`
 /// when the binary is absent or the probe fails.
 pub fn indexer_version(bin: &str) -> Option<String> {
-    let out = version_output(bin)?;
+    let out = probe(bin, "--version")?;
     let text = if out.stdout.is_empty() {
         out.stderr
     } else {
@@ -226,9 +227,11 @@ pub fn indexer_version(bin: &str) -> Option<String> {
     Some(line)
 }
 
-fn version_output(bin: &str) -> Option<std::process::Output> {
+/// The output of `bin arg`, or `None` when the binary is absent or exits
+/// with a failure.
+fn probe(bin: &str, arg: &str) -> Option<std::process::Output> {
     Command::new(bin)
-        .arg("--version")
+        .arg(arg)
         .output()
         .ok()
         .filter(|o| o.status.success())

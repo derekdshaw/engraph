@@ -1359,7 +1359,7 @@ mod tests {
         for part in parts {
             // As the loader reads it.
             let mut idx = scip::types::Index::parse_from_bytes(part).unwrap();
-            crate::scip_loader::pin_go_module_versions(&mut idx);
+            crate::scip_loader::normalize_index(&mut idx, "/proj");
             for occ in idx.documents.iter().flat_map(|d| &d.occurrences) {
                 if !occ.symbol.ends_with(suffix) {
                     continue;

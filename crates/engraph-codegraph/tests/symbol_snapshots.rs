@@ -13,8 +13,8 @@ mod common;
 
 use common::snapshot::{Snapshot, SymbolRecord};
 use common::{
-    FIXTURES, binary_present, db_for_test, indexer_version, isolate_scip_output, normalized_scip,
-    tree_hash,
+    FIXTURES, Fixture, binary_present, db_for_test, indexer_version, isolate_scip_output,
+    normalized_scip, tree_hash,
 };
 use engraph_codegraph::{index_repo, load, scip_output_dir};
 use tempfile::tempdir;
@@ -111,7 +111,7 @@ fn snapshot_records_defined_symbols_with_callers_and_callees() {
 }
 
 #[test]
-fn snapshot_diff_lists_changed_versions_and_symbols() {
+fn snapshot_diff_lists_a_changed_hash_and_symbols_not_the_version() {
     let rec = |id: &str, path: &str, callers: &[&str]| SymbolRecord {
         id: id.into(),
         name: id.into(),
@@ -133,7 +133,7 @@ fn snapshot_diff_lists_changed_versions_and_symbols() {
     let run = Snapshot {
         indexer: "x".into(),
         indexer_version: "2".into(),
-        fixture_hash: "h".into(),
+        fixture_hash: "h2".into(),
         symbols: vec![
             rec("a", "a2.rs", &["d"]),
             rec("c", "c.rs", &[]),
@@ -143,7 +143,7 @@ fn snapshot_diff_lists_changed_versions_and_symbols() {
     assert_eq!(
         snapshot.diff(&run),
         [
-            "indexer_version: 1 (snapshot) -> 2 (index run)",
+            "fixture_hash: h (snapshot) -> h2 (index run)",
             "only in the snapshot: 1, only in the index run: 1, changed: 1",
             "- b",
             "+ d",
@@ -154,6 +154,12 @@ fn snapshot_diff_lists_changed_versions_and_symbols() {
         ]
     );
     assert!(snapshot.diff(&snapshot).is_empty());
+    // Another indexer version with the same symbols is no difference.
+    let newer = Snapshot {
+        indexer_version: "2".into(),
+        ..snapshot.clone()
+    };
+    assert!(snapshot.diff(&newer).is_empty());
 }
 
 #[test]
@@ -367,6 +373,31 @@ fn go_ids_are_the_same_at_two_commits() {
     );
 }
 
+/// Compare `actual` with `want`, the fixture's snapshot. Equal: print `ok`
+/// and give `None`. Otherwise the failure, headed `<lang> <what> vs
+/// <snapshot path>`, with the differences and then `note`, if any.
+fn compare(
+    fixture: &Fixture,
+    what: &str,
+    want: &Snapshot,
+    actual: &Snapshot,
+    note: Option<String>,
+    ok: String,
+) -> Option<String> {
+    let mut diff = want.diff(actual);
+    if diff.is_empty() {
+        eprintln!("{ok}");
+        return None;
+    }
+    diff.extend(note);
+    Some(format!(
+        "{} {what} vs {}:\n{}",
+        fixture.lang,
+        fixture.snapshot_path().display(),
+        diff.join("\n")
+    ))
+}
+
 /// Step 16: load each prebuilt `testdata/scip/<lang>.scip` blob and compare
 /// the result with the snapshot file. No indexer runs — the blob is the
 /// indexer's output, committed — so this operates in every CI job and a
@@ -394,28 +425,19 @@ fn prebuilt_scip_blobs_load_to_the_snapshots() {
             &want.indexer_version,
             &fixture.source_hash(),
         );
-        let mut diff = want.diff(&snap);
-        if want.fixture_hash != snap.fixture_hash {
-            diff.push(format!(
+        let note = (want.fixture_hash != snap.fixture_hash).then(|| {
+            format!(
                 "note: the {} fixture sources changed after the snapshot and blob were \
                  made; regenerate with ENGRAPH_UPDATE_SNAPSHOTS=1 on a machine with {}.",
                 fixture.lang, fixture.indexer
-            ));
-        }
-        if diff.is_empty() {
-            eprintln!(
-                "ok: {} blob loads to its snapshot ({} symbols)",
-                fixture.lang,
-                snap.symbols.len()
-            );
-        } else {
-            failures.push(format!(
-                "{} blob vs {}:\n{}",
-                fixture.lang,
-                fixture.snapshot_path().display(),
-                diff.join("\n")
-            ));
-        }
+            )
+        });
+        let ok = format!(
+            "ok: {} blob loads to its snapshot ({} symbols)",
+            fixture.lang,
+            snap.symbols.len()
+        );
+        failures.extend(compare(fixture, "blob", &want, &snap, note, ok));
     }
     assert!(
         failures.is_empty(),
@@ -427,7 +449,8 @@ fn prebuilt_scip_blobs_load_to_the_snapshots() {
 /// Steps 10 to 13: index each fixture repo and compare the result with its
 /// snapshot file, skipping a fixture whose indexer (or its build tool /
 /// toolchain) is not installed, and showing the differences of every fixture
-/// that changed, with both indexer versions when they are not the same;
+/// that changed, with both indexer versions when they are not the same. A
+/// new indexer version that writes the same symbols passes with a warning.
 /// `ENGRAPH_UPDATE_SNAPSHOTS=1` writes the snapshots instead.
 #[test]
 fn fixture_ids_match_the_snapshots() {
@@ -480,31 +503,31 @@ fn fixture_ids_match_the_snapshots() {
             );
         } else {
             let want = Snapshot::read(&fixture.snapshot_path());
-            let mut diff = want.diff(&snap);
-            if !diff.is_empty() && want.indexer_version != version {
-                diff.push(format!(
+            let note = (want.indexer_version != version).then(|| {
+                format!(
                     "note: this machine runs {} {version}; the snapshot was made with \
                      {}. The differences can be correct changes of the indexer \
                      version: examine them, then regenerate with \
                      ENGRAPH_UPDATE_SNAPSHOTS=1.",
                     fixture.indexer, want.indexer_version
-                ));
-            }
-            if diff.is_empty() {
+                )
+            });
+            // CI greps for this line (ci.yml, codegraph-live).
+            let ok = format!(
+                "ok: {} matches its snapshot ({} symbols, {} {version})",
+                fixture.lang,
+                snap.symbols.len(),
+                fixture.indexer
+            );
+            let failure = compare(fixture, "fixture", &want, &snap, note, ok);
+            if failure.is_none() && want.indexer_version != version {
                 eprintln!(
-                    "ok: {} matches its snapshot ({} symbols, {} {version})",
-                    fixture.lang,
-                    snap.symbols.len(),
-                    fixture.indexer
+                    "warning: {} {version} writes the ids the snapshot recorded with {}; \
+                     regenerate with ENGRAPH_UPDATE_SNAPSHOTS=1 to record the new version.",
+                    fixture.indexer, want.indexer_version
                 );
-            } else {
-                failures.push(format!(
-                    "{} fixture vs {}:\n{}",
-                    fixture.lang,
-                    fixture.snapshot_path().display(),
-                    diff.join("\n")
-                ));
             }
+            failures.extend(failure);
         }
     }
     assert!(

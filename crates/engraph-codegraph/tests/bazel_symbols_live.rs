@@ -19,14 +19,10 @@
 
 mod common;
 
-use common::binary_present;
+use common::bazel_present;
 use engraph_codegraph::index_repo;
 use engraph_core::db::open_pool;
 use tempfile::tempdir;
-
-fn bazel_present() -> bool {
-    ["bazel", "bazelisk"].iter().any(|b| binary_present(b))
-}
 
 fn live_gate_set() -> bool {
     std::env::var("ENGRAPH_LIVE_BAZEL_SYMBOLS")

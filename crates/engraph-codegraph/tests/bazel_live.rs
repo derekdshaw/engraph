@@ -9,14 +9,10 @@
 
 mod common;
 
-use common::binary_present;
+use common::bazel_present;
 use engraph_codegraph::{discover_workspace_repos, index_repo};
 use engraph_core::db::open_pool;
 use tempfile::tempdir;
-
-fn bazel_present() -> bool {
-    ["bazel", "bazelisk"].iter().any(|b| binary_present(b))
-}
 
 fn write_fixture(root: &std::path::Path) {
     std::fs::create_dir_all(root.join("foo")).unwrap();
