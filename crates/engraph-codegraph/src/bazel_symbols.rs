@@ -1,7 +1,7 @@
 //! F2 Phase 2.3 #2 — symbol-level Bazel indexing.
 //!
 //! Sits on top of the target-level pass in `bazel.rs`. For each of
-//! {Java, Go, TypeScript, Python} we (a) probe `bazel query` for any target of that
+//! {Java, Go, TypeScript, Python, Rust} we (a) probe `bazel query` for any target of that
 //! language in the workspace; (b) probe PATH for the per-language SCIP
 //! indexer binary; (c) on both-present, run the indexer, capture its SCIP
 //! bytes. We MERGE the per-language SCIP byte streams in memory and call
@@ -34,6 +34,10 @@
 //!   import resolution from the root is best-effort — unresolved cross-package
 //!   imports surface as external symbols rather than edges (analogous to the
 //!   `rules_ts` and multi-`go.mod` caveats above).
+//! - **Rust**: if `ENGRAPH_BAZEL_SCIP_RUST_CMD` is set, delegated exactly like
+//!   Java. Unset → `rust-analyzer scip` on the root `Cargo.toml`, as the
+//!   standalone driver runs it. No root `Cargo.toml` → reported not-configured,
+//!   as Go is with no `go.mod`.
 //!
 //! Off by default (`engraph index --bazel-symbols`); toolchain downloads
 //! and full builds make it heavy. The target-level pass remains the fast
@@ -252,11 +256,13 @@ pub fn index_bazel_symbols(
     for spec in LANGS {
         // Go: delegate if ENGRAPH_BAZEL_SCIP_GO_CMD is set, else the native
         // multi-module pass. Java: always delegated (its SCIP build is
-        // repo-specific). TS / Python: single-shot standalone indexer at the
-        // workspace root.
+        // repo-specific). Rust: delegate if ENGRAPH_BAZEL_SCIP_RUST_CMD is
+        // set, else rust-analyzer on the root Cargo.toml. TS / Python:
+        // single-shot standalone indexer at the workspace root.
         let outcome = match spec.language {
             "go" => run_go(spec, repo, &bazel, &scip_dir, &mut parts, go),
             "java" => run_java(spec, repo, &bazel, &scip_dir, &mut parts),
+            "rust" => run_rust(spec, repo, &bazel, &scip_dir, &mut parts),
             _ => run_language(spec, repo, &bazel, &scip_dir, &mut parts),
         };
         let result = match outcome {
@@ -328,9 +334,23 @@ fn run_language(
     }
 
     let out_path = scip_dir.join(format!("index-{}.scip", spec.language));
-    let _ = std::fs::remove_file(&out_path); // ignore-if-absent
+    let cmd = build_indexer_command(spec, repo, &out_path);
+    run_indexer(spec, cmd, &out_path, parts, start)
+}
 
-    let mut cmd = build_indexer_command(spec, repo, &out_path);
+/// Run one single-shot SCIP indexer `cmd` that writes to `out_path`, and merge
+/// its output: remove any stale `out_path`, spawn, report a non-zero exit as
+/// `Failed` with the stderr tail, else push the SCIP at `out_path` onto
+/// `parts`. `start` is the start of the whole language pass, so `elapsed_ms`
+/// covers the target probe too.
+fn run_indexer(
+    spec: &LangSpec,
+    mut cmd: Command,
+    out_path: &Path,
+    parts: &mut Vec<Vec<u8>>,
+    start: Instant,
+) -> Result<LangIndexResult> {
+    let _ = std::fs::remove_file(out_path); // ignore-if-absent
     tracing::info!(driver = spec.binary, ?cmd, "running symbol-level indexer");
     let output = cmd
         .stdout(Stdio::piped())
@@ -351,7 +371,7 @@ fn run_language(
         });
     }
 
-    let bytes = read_scip_output(spec, &out_path)?;
+    let bytes = read_scip_output(spec, out_path)?;
     let n = bytes.len();
     parts.push(bytes);
     Ok(LangIndexResult {
@@ -500,6 +520,72 @@ fn run_go(
     } else {
         run_go_modules(spec, repo, bazel, scip_dir, parts, go)
     }
+}
+
+/// The command that indexes Rust under Bazel when the root has no `Cargo.toml`
+/// (`run_rust`), and the `env` of the `SkippedNotConfigured` reported then.
+const RUST_CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_RUST_CMD";
+
+/// Rust symbol pass. If `ENGRAPH_BAZEL_SCIP_RUST_CMD` is set, delegate the whole
+/// pass to it (see `run_delegated`). Unset → rust-analyzer on the root
+/// `Cargo.toml`, with the argv of the standalone driver (`driver::RustAnalyzer`).
+/// Without a root `Cargo.toml` rust-analyzer has no project to load, so only a
+/// user-supplied command can reach the targets (for example one that has
+/// `rules_rust` write a `rust-project.json`) — the same state as Go with no
+/// `go.mod`, reported the same way.
+fn run_rust(
+    spec: &LangSpec,
+    repo: &Path,
+    bazel: &Path,
+    scip_dir: &Path,
+    parts: &mut Vec<Vec<u8>>,
+) -> Result<LangIndexResult> {
+    use crate::driver::Driver;
+
+    let configured = std::env::var(RUST_CMD_ENV)
+        .map(|c| !c.trim().is_empty())
+        .unwrap_or(false);
+    if configured {
+        return run_delegated(
+            spec,
+            repo,
+            bazel,
+            scip_dir,
+            parts,
+            RUST_CMD_ENV,
+            "index-rust.scip",
+        );
+    }
+
+    let start = Instant::now();
+    let skip = |status: LangStatus| LangIndexResult {
+        language: spec.language,
+        scip_bytes: 0,
+        elapsed_ms: start.elapsed().as_millis() as i64,
+        status,
+    };
+
+    let targets = bazel_count_targets(bazel, repo, spec.rule_kinds)?;
+    if targets == 0 {
+        return Ok(skip(LangStatus::SkippedNoTargets));
+    }
+    // Before the PATH probe, which starts rust-analyzer: without a Cargo.toml
+    // there is nothing for it to index whether it is installed or not.
+    if !repo.join("Cargo.toml").is_file() {
+        return Ok(skip(LangStatus::SkippedNotConfigured {
+            targets,
+            env: RUST_CMD_ENV,
+        }));
+    }
+    if !indexer_present(spec.binary) {
+        return Ok(skip(LangStatus::SkippedNoIndexer {
+            binary: spec.binary,
+        }));
+    }
+
+    let out_path = scip_dir.join("index-rust.scip");
+    let cmd = crate::driver::RustAnalyzer.command(repo, &out_path);
+    run_indexer(spec, cmd, &out_path, parts, start)
 }
 
 fn build_indexer_command(spec: &LangSpec, repo: &Path, out_path: &Path) -> Command {
@@ -1277,6 +1363,70 @@ mod tests {
         )
         .unwrap();
         unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_GO_CMD") };
+        assert_eq!(r.status, LangStatus::Indexed);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0], scip);
+    }
+
+    #[test]
+    fn run_rust_without_a_root_cargo_toml_is_not_configured() {
+        // rust-analyzer has no project to load without a Cargo.toml, so the
+        // targets are reported as needing a command, like Go with no go.mod.
+        // The result must not depend on rust-analyzer being on PATH.
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = LANGS.iter().find(|s| s.language == "rust").unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 4);
+
+        let _env = cmd_env_lock();
+        // SAFETY: `_env` serializes every test that touches this variable.
+        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_RUST_CMD") };
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_rust(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
+        assert_eq!(
+            r.status,
+            LangStatus::SkippedNotConfigured {
+                targets: 4,
+                env: "ENGRAPH_BAZEL_SCIP_RUST_CMD",
+            }
+        );
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn run_rust_delegates_to_configured_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = LANGS.iter().find(|s| s.language == "rust").unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        // Targets are counted before the delegated branch skips, so it needs a
+        // bazel that reports some.
+        let bazel = fake_bazel(tmp.path(), 2);
+
+        // A fake command that writes a known SCIP to its 2nd arg → delegated
+        // and merged, even with no Cargo.toml at the root (the configured
+        // command wins before the native path looks for one). SAFETY: `_env`
+        // serializes every test that touches this variable.
+        let _env = cmd_env_lock();
+        let scip = make_index(&["src/lib.rs"], &[]);
+        let scip_path = tmp.path().join("fake.scip");
+        std::fs::write(&scip_path, &scip).unwrap();
+        let cmd_path = tmp.path().join("fake-rust-cmd.sh");
+        std::fs::write(
+            &cmd_path,
+            format!("cp \"{}\" \"$2\"\n", scip_path.display()),
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var(
+                "ENGRAPH_BAZEL_SCIP_RUST_CMD",
+                format!("sh \"{}\"", cmd_path.display()),
+            )
+        };
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_rust(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
+        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_RUST_CMD") };
         assert_eq!(r.status, LangStatus::Indexed);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], scip);
