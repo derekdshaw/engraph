@@ -25,10 +25,12 @@
 //!   <dir>` per module, and rebase each module's document paths back to
 //!   repo-root before merging. The native pass can't see `go_library` targets
 //!   without a `go.mod`; that gap is reported via the `go targets` count.
-//! - **TypeScript**: `scip-typescript index` at the workspace root.
-//!   `rules_ts`-based repos may need a prior `bazel build //...` to
-//!   populate `bazel-bin/<pkg>/node_modules` symlinks; documented
-//!   limitation, not addressed here.
+//! - **TypeScript and JavaScript** (language id `ts`): if
+//!   `ENGRAPH_BAZEL_SCIP_TS_CMD` is set, delegated exactly like Java. Unset →
+//!   `scip-typescript index --infer-tsconfig` at the workspace root, with the
+//!   standalone driver's workspace flag. `rules_js` makes `node_modules` under
+//!   `bazel-bin` during a build, not at the root, and scip-typescript fails
+//!   without them, so no root `node_modules` → reported not-configured.
 //! - **Python**: `scip-python index --cwd .` at the workspace root. In a
 //!   Bazel-`rules_python` monorepo the sub-projects share no single venv, so
 //!   import resolution from the root is best-effort — unresolved cross-package
@@ -192,7 +194,16 @@ const LANGS: &[LangSpec] = &[
     LangSpec {
         language: "ts",
         binary: "scip-typescript",
-        rule_kinds: &["ts_project", "ts_library"],
+        // scip-typescript indexes JavaScript too, so the `aspect_rules_js`
+        // source rules count here. `js_run_binary` runs a tool at build time
+        // and is not source.
+        rule_kinds: &[
+            "ts_project",
+            "ts_library",
+            "js_library",
+            "js_binary",
+            "js_test",
+        ],
     },
     LangSpec {
         language: "python",
@@ -256,13 +267,15 @@ pub fn index_bazel_symbols(
     for spec in LANGS {
         // Go: delegate if ENGRAPH_BAZEL_SCIP_GO_CMD is set, else the native
         // multi-module pass. Java: always delegated (its SCIP build is
-        // repo-specific). Rust: delegate if ENGRAPH_BAZEL_SCIP_RUST_CMD is
-        // set, else rust-analyzer on the root Cargo.toml. TS / Python:
-        // single-shot standalone indexer at the workspace root.
+        // repo-specific). Rust / TS: delegate if ENGRAPH_BAZEL_SCIP_RUST_CMD /
+        // ENGRAPH_BAZEL_SCIP_TS_CMD is set, else the indexer on the root
+        // Cargo.toml / node_modules. Python: single-shot standalone indexer
+        // at the workspace root.
         let outcome = match spec.language {
             "go" => run_go(spec, repo, &bazel, &scip_dir, &mut parts, go),
             "java" => run_java(spec, repo, &bazel, &scip_dir, &mut parts),
             "rust" => run_rust(spec, repo, &bazel, &scip_dir, &mut parts),
+            "ts" => run_ts(spec, repo, &bazel, &scip_dir, &mut parts),
             _ => run_language(spec, repo, &bazel, &scip_dir, &mut parts),
         };
         let result = match outcome {
@@ -526,13 +539,16 @@ fn run_go(
 /// (`run_rust`), and the `env` of the `SkippedNotConfigured` reported then.
 const RUST_CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_RUST_CMD";
 
-/// Rust symbol pass. If `ENGRAPH_BAZEL_SCIP_RUST_CMD` is set, delegate the whole
-/// pass to it (see `run_delegated`). Unset → rust-analyzer on the root
-/// `Cargo.toml`, with the argv of the standalone driver (`driver::RustAnalyzer`).
-/// Without a root `Cargo.toml` rust-analyzer has no project to load, so only a
-/// user-supplied command can reach the targets (for example one that has
-/// `rules_rust` write a `rust-project.json`) — the same state as Go with no
-/// `go.mod`, reported the same way.
+/// The command that indexes TypeScript and JavaScript under Bazel when the root
+/// has no `node_modules` (`run_ts`), and the `env` of the
+/// `SkippedNotConfigured` reported then.
+const TS_CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_TS_CMD";
+
+/// Rust symbol pass. Unset `ENGRAPH_BAZEL_SCIP_RUST_CMD` → rust-analyzer on the
+/// root `Cargo.toml`, with the argv of the standalone driver
+/// (`driver::RustAnalyzer`). Without a root `Cargo.toml` rust-analyzer has no
+/// project to load, so only a user-supplied command can reach the targets (for
+/// example one that has `rules_rust` write a `rust-project.json`).
 fn run_rust(
     spec: &LangSpec,
     repo: &Path,
@@ -541,20 +557,66 @@ fn run_rust(
     parts: &mut Vec<Vec<u8>>,
 ) -> Result<LangIndexResult> {
     use crate::driver::Driver;
+    run_rooted_or_delegated(
+        spec,
+        repo,
+        bazel,
+        scip_dir,
+        parts,
+        RUST_CMD_ENV,
+        "Cargo.toml",
+        |out| crate::driver::RustAnalyzer.command(repo, out),
+    )
+}
 
-    let configured = std::env::var(RUST_CMD_ENV)
+/// TypeScript and JavaScript symbol pass. Unset `ENGRAPH_BAZEL_SCIP_TS_CMD` →
+/// scip-typescript at the root (`build_indexer_command`). It needs the
+/// packages installed, and `rules_js` makes `node_modules` under `bazel-bin`
+/// during a build, not at the root; without a root `node_modules`
+/// scip-typescript would fail, so only a user-supplied command (one that
+/// installs the packages first) can reach the targets.
+fn run_ts(
+    spec: &LangSpec,
+    repo: &Path,
+    bazel: &Path,
+    scip_dir: &Path,
+    parts: &mut Vec<Vec<u8>>,
+) -> Result<LangIndexResult> {
+    run_rooted_or_delegated(
+        spec,
+        repo,
+        bazel,
+        scip_dir,
+        parts,
+        TS_CMD_ENV,
+        "node_modules",
+        |out| build_indexer_command(spec, repo, out),
+    )
+}
+
+/// The pass of a language whose native indexer needs `root` (a file or a
+/// directory) at the workspace root. If `cmd_env` is set, delegate the whole
+/// pass to it (see `run_delegated`). Unset → count the targets, and with
+/// targets but no `root`, report `SkippedNotConfigured` naming `cmd_env` — the
+/// same state as Go with no `go.mod`, reported the same way. Else run the
+/// command `command` builds for the output path.
+#[allow(clippy::too_many_arguments)]
+fn run_rooted_or_delegated(
+    spec: &LangSpec,
+    repo: &Path,
+    bazel: &Path,
+    scip_dir: &Path,
+    parts: &mut Vec<Vec<u8>>,
+    cmd_env: &'static str,
+    root: &str,
+    command: impl FnOnce(&Path) -> Command,
+) -> Result<LangIndexResult> {
+    let out_name = format!("index-{}.scip", spec.language);
+    let configured = std::env::var(cmd_env)
         .map(|c| !c.trim().is_empty())
         .unwrap_or(false);
     if configured {
-        return run_delegated(
-            spec,
-            repo,
-            bazel,
-            scip_dir,
-            parts,
-            RUST_CMD_ENV,
-            "index-rust.scip",
-        );
+        return run_delegated(spec, repo, bazel, scip_dir, parts, cmd_env, &out_name);
     }
 
     let start = Instant::now();
@@ -569,12 +631,12 @@ fn run_rust(
     if targets == 0 {
         return Ok(skip(LangStatus::SkippedNoTargets));
     }
-    // Before the PATH probe, which starts rust-analyzer: without a Cargo.toml
-    // there is nothing for it to index whether it is installed or not.
-    if !repo.join("Cargo.toml").is_file() {
+    // Before the PATH probe, which starts the indexer: without `root` there is
+    // nothing for it to index whether it is installed or not.
+    if !repo.join(root).exists() {
         return Ok(skip(LangStatus::SkippedNotConfigured {
             targets,
-            env: RUST_CMD_ENV,
+            env: cmd_env,
         }));
     }
     if !indexer_present(spec.binary) {
@@ -583,19 +645,20 @@ fn run_rust(
         }));
     }
 
-    let out_path = scip_dir.join("index-rust.scip");
-    let cmd = crate::driver::RustAnalyzer.command(repo, &out_path);
+    let out_path = scip_dir.join(out_name);
+    let cmd = command(&out_path);
     run_indexer(spec, cmd, &out_path, parts, start)
 }
 
 fn build_indexer_command(spec: &LangSpec, repo: &Path, out_path: &Path) -> Command {
     match spec.language {
         "ts" => {
-            let mut c = Command::new(spec.binary);
-            c.arg("index")
-                .arg("--output")
-                .arg(out_path)
-                .current_dir(repo);
+            // The standalone driver's command: it adds `--pnpm-workspaces` or
+            // `--yarn-workspaces` for a workspace whose tool is installed.
+            // `--infer-tsconfig` because a Bazel root often has no
+            // tsconfig.json: each `ts_project` names its own.
+            let mut c = crate::driver::typescript_command(repo, out_path, &crate::which::on_path);
+            c.arg("--infer-tsconfig");
             c
         }
         "python" => {
@@ -1387,6 +1450,114 @@ mod tests {
         ] {
             assert!(ts.rule_kinds.contains(&kind), "missing {kind}");
         }
+    }
+
+    #[test]
+    fn run_ts_without_a_root_node_modules_is_not_configured() {
+        // `rules_js` makes node_modules under bazel-bin during a build, not at
+        // the root, and scip-typescript fails without them. The targets are
+        // reported as needing a command, like Go with no go.mod.
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = LANGS.iter().find(|s| s.language == "ts").unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 5);
+
+        // A scip-typescript ahead of the real one on PATH that leaves a
+        // marker, to show that neither the PATH probe nor the index run
+        // starts it. On Windows `Command` does not resolve a script without
+        // `.exe`, so there only the status is checked.
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let marker = tmp.path().join("scip-typescript-ran");
+        #[cfg(not(windows))]
+        write_script(
+            &bin.join("scip-typescript"),
+            &format!("#!/bin/sh\n: > \"{}\"\n", marker.display()),
+        );
+
+        let _env = cmd_env_lock();
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let path =
+            std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&old_path)))
+                .unwrap();
+        // SAFETY: `_env` serializes every test that touches these variables.
+        unsafe {
+            std::env::remove_var("ENGRAPH_BAZEL_SCIP_TS_CMD");
+            std::env::set_var("PATH", &path);
+        }
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_ts(spec, tmp.path(), &bazel, &scip_dir, &mut parts);
+        unsafe { std::env::set_var("PATH", &old_path) };
+        assert_eq!(
+            r.unwrap().status,
+            LangStatus::SkippedNotConfigured {
+                targets: 5,
+                env: "ENGRAPH_BAZEL_SCIP_TS_CMD",
+            }
+        );
+        assert!(!marker.exists(), "scip-typescript must not start");
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn run_ts_delegates_to_configured_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = LANGS.iter().find(|s| s.language == "ts").unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 2);
+
+        // A fake command that writes a known SCIP to its 2nd arg → delegated
+        // and merged, even with no node_modules at the root. SAFETY: `_env`
+        // serializes every test that touches this variable.
+        let _env = cmd_env_lock();
+        let scip = make_index(&["src/app.ts", "src/util.js"], &[]);
+        let scip_path = tmp.path().join("fake.scip");
+        std::fs::write(&scip_path, &scip).unwrap();
+        let cmd_path = tmp.path().join("fake-ts-cmd.sh");
+        std::fs::write(
+            &cmd_path,
+            format!("cp \"{}\" \"$2\"\n", scip_path.display()),
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var(
+                "ENGRAPH_BAZEL_SCIP_TS_CMD",
+                format!("sh \"{}\"", cmd_path.display()),
+            )
+        };
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_ts(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
+        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_TS_CMD") };
+        assert_eq!(r.status, LangStatus::Indexed);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0], scip);
+    }
+
+    #[test]
+    fn build_indexer_command_ts_infers_a_tsconfig() {
+        // A Bazel root often has no tsconfig.json (each ts_project names its
+        // own), and scip-typescript fails without one unless it infers it.
+        // No workspace file here, so no workspace flag and no PATH lookup.
+        let ts = LANGS.iter().find(|s| s.language == "ts").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("index-ts.scip");
+        let cmd = build_indexer_command(ts, tmp.path(), &out);
+        assert_eq!(cmd.get_program(), std::ffi::OsStr::new("scip-typescript"));
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "index".to_string(),
+                "--output".to_string(),
+                out.to_string_lossy().into_owned(),
+                "--infer-tsconfig".to_string(),
+            ]
+        );
     }
 
     #[test]

@@ -383,7 +383,11 @@ impl Driver for ScipJava {
 
 /// The scip-typescript command for `repo`. `on_path` says whether a package
 /// manager is installed.
-fn typescript_command(repo: &Path, out: &Path, on_path: &dyn Fn(&str) -> bool) -> Command {
+pub(crate) fn typescript_command(
+    repo: &Path,
+    out: &Path,
+    on_path: &dyn Fn(&str) -> bool,
+) -> Command {
     // scip-typescript defaults --output to `index.scip` in the cwd; pin it
     // to `out`. Still chdir into the repo so it picks up tsconfig.json.
     let mut c = Command::new("scip-typescript");
