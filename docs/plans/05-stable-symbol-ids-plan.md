@@ -81,7 +81,8 @@ changed after its files were made, also for Java, which CI does not index.
 
 ## Steps, part 2: normalization of symbol ids
 
-Step 1 is complete (plan 03, step 7).
+Steps 1 and 2 are complete. Step 1: plan 03, step 7. Step 2: the findings
+below the steps (2026-11-17).
 
 1. In the standalone Go driver, give `--module-version` with the value of
    `SCIP_GO_VERSION` to scip-go. This change replaces all Go symbol ids one
@@ -106,6 +107,24 @@ Step 1 is complete (plan 03, step 7).
 12. Compare the version in `index_state` with the version of the rules.
 13. If the two versions are different, show a message that recommends a full
     index run.
+
+### Findings of step 2 (2026-11-17)
+
+Source: all symbol ids in the prebuilt SCIP files of the part 1 fixtures
+(`crates/engraph-codegraph/testdata/scip/`): document symbols, occurrences,
+relationships, and external symbols. The computer has Python 3.14, JDK 21,
+and Go 1.26.3.
+
+| Indexer | First-party ids | Dependency and standard library ids | Notes |
+|---|---|---|---|
+| rust-analyzer 1.100.0 | `rust-analyzer cargo <crate name> <Cargo.toml version>` | `rust-analyzer cargo core https://github.com/rust-lang/rust/library/core …`: the version part is a URL, the same on each computer | No absolute paths. A version bump of the crate changes all of its ids. |
+| scip-python 0.6.8 | `scip-python python <project name> 0.0.0`: the project name is the **basename of the indexed directory** (`ScipPython::command`, `--project-name`), the version is the pin `SCIP_PYTHON_VERSION` | `scip-python python python-stdlib 3.11 …`: 3.11 is the typeshed version in scip-python, not the Python of the computer; the same on each computer | The ids of one repo differ between two checkouts with different directory names (a worktree `elm` and a clone `engraph`). Two repos with the same directory name and the same module paths have the same ids. |
+| scip-go 0.2.7 | `scip-go gomod <module path> 0.0.0`: the version is the pin `SCIP_GO_VERSION` | `scip-go gomod github.com/golang/go/src go1.21 …`: the version is the `go` directive of `go.mod`, not the toolchain | **No absolute paths** in 0.2.7: the doubt in the condition is confirmed, and step 7 has nothing to do. |
+| scip-typescript 0.6.0 | `scip-typescript npm <package.json name> <package.json version>` | `scip-typescript npm typescript 6.0.3 …`: the TypeScript in scip-typescript | A version bump of the package changes all of its ids. |
+| scip-java 0.12.3 with Maven | `semanticdb maven maven/<groupId>/<artifactId> <pom version>` for classes, methods, and fields | `semanticdb maven jdk 21 java/lang/String#`: 21 is the **JDK of the computer** | **Package symbols have an empty package and version**: `semanticdb maven . . fixture/models/`, and also `. . java/util/`. They enter the database as placeholder rows (`ensure_placeholder_entity`, from occurrences) and are the same for all repos, and the JDK, with the same package name. Method ids with `. .` also occur in `enclosing_symbol` of local symbols, which the loader does not read. The condition's statement about an empty version for all first-party Java code is not correct: classes and methods have the Maven coordinates and version. |
+
+Local symbols (`local <n>`) are 12 to 31 per fixture; the loader gives them a
+tag of the project key (see the condition), and the snapshots leave them out.
 
 ## Tests
 
