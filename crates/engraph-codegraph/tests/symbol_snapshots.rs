@@ -13,7 +13,8 @@ mod common;
 
 use common::snapshot::{Snapshot, SymbolRecord};
 use common::{
-    FIXTURES, db_for_test, indexer_version, isolate_scip_output, normalized_scip, tree_hash,
+    FIXTURES, binary_present, db_for_test, indexer_version, isolate_scip_output, normalized_scip,
+    tree_hash,
 };
 use engraph_codegraph::{index_repo, load, scip_output_dir};
 use tempfile::tempdir;
@@ -293,6 +294,76 @@ fn snapshot_diff_marks_an_order_only_change() {
             "~ a",
             "    callers: order changed",
         ]
+    );
+}
+
+/// Plan 05 test: two index runs of a Go repo at different commits give the
+/// same Go symbol ids. The driver pins the module version, so nothing from a
+/// commit reaches an id; the ids of the first run are all in the second, and
+/// the second adds only the function the commit added. Skips without
+/// scip-go, the Go toolchain, or git.
+#[test]
+fn go_ids_are_the_same_at_two_commits() {
+    let go = FIXTURES.iter().find(|f| f.lang == "go").unwrap();
+    if let Some(why) = go.missing_tool() {
+        eprintln!("skip: {why}");
+        return;
+    }
+    if !binary_present("git") {
+        eprintln!("skip: git not installed");
+        return;
+    }
+    isolate_scip_output();
+    let dir = tempdir().unwrap();
+    let repo = go.copy_into(dir.path());
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let ids_at = |run: &str| -> std::collections::BTreeSet<String> {
+        let db_dir = dir.path().join(run);
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let pool = db_for_test(&db_dir);
+        let conn = pool.get().unwrap();
+        index_repo(&conn, &repo, None, None, &go.project(), false, false).unwrap();
+        Snapshot::from_db(&conn, &go.project(), go.indexer, "", "")
+            .symbols
+            .into_iter()
+            .map(|s| s.id)
+            .collect()
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "first"]);
+    let first = ids_at("first");
+
+    let text_go = repo.join("text/text.go");
+    let mut text = std::fs::read_to_string(&text_go).unwrap();
+    text.push_str("\nfunc Shout(s string) string {\n\treturn strings.ToUpper(s) + \"!\"\n}\n");
+    std::fs::write(&text_go, text).unwrap();
+    git(&["commit", "-q", "-am", "second"]);
+    let second = ids_at("second");
+
+    assert!(
+        first.is_subset(&second),
+        "ids lost between commits: {:?}",
+        first.difference(&second).collect::<Vec<_>>()
+    );
+    let added: Vec<&String> = second.difference(&first).collect();
+    assert_eq!(added.len(), 1, "{added:?}");
+    assert!(
+        added[0].ends_with("`example.com/engraph/fixture/text`/Shout()."),
+        "{}",
+        added[0]
     );
 }
 
