@@ -19,6 +19,7 @@ use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
 use protobuf::{EnumOrUnknown, Message};
 use scip::types::{Document, Index, SymbolRole, symbol_information::Kind as SymKind};
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use uuid::Uuid;
 
@@ -72,16 +73,66 @@ fn scheme(symbol: &str) -> Option<&str> {
         .filter(|s| *s != "local")
 }
 
-/// Cross-machine moniker normalization. SCIP monikers are stable
-/// cross-machine for canonically-published deps (Cargo, npm, PyPI, Go
-/// modules with proper module paths), but some indexers leak machine-local
-/// noise. Today this is a pass-through; Phase 2.2 work will plug in
-/// per-prefix rewrite rules here (e.g. strip absolute paths from pre-0.7
-/// scip-go monikers). Call this everywhere a moniker enters the DB so the
-/// hook covers all entry points.
-#[inline]
-pub fn normalize_moniker(s: &str) -> &str {
-    s
+/// The id normalization rules of plan 05, part 2 (step 5), one `match` arm
+/// per scheme, so a symbol id is the same on each computer and after each
+/// commit. `project` is the project key of the load, for R2.
+///
+/// - R2: a `semanticdb` id with the empty package name `.` (scip-java writes
+///   package symbols so: `semanticdb maven . . fixture/models/`) gets the
+///   project tag as its version, so the package rows of two repos with the
+///   same package names are two rows.
+/// - R3: every other `semanticdb` id, and every `rust-analyzer` and
+///   `scip-typescript` id, gets `PINNED_VERSION`: the manifest version a
+///   release bumps, the JDK major of the computer, and the standard-library
+///   URL all go, dependencies included, so a reference in one repo and the
+///   definition in another stay one id.
+/// - scip-go and scip-python ids are already pinned by their drivers and
+///   keep their dependency versions; local ids and ids with fewer than four
+///   fields pass through.
+///
+/// Call this everywhere a moniker enters the database so the rules cover
+/// every entry point (steps 9 and 10).
+pub fn normalize_moniker<'a>(s: &'a str, project: &str) -> Cow<'a, str> {
+    let Some([scheme, manager, name, version, descriptors]) = id_fields(s) else {
+        return Cow::Borrowed(s);
+    };
+    let pinned = match scheme {
+        "semanticdb" if name == "." => project_tag(project),
+        "semanticdb" | "rust-analyzer" | "scip-typescript" => {
+            crate::driver::PINNED_VERSION.to_string()
+        }
+        _ => return Cow::Borrowed(s),
+    };
+    if version == pinned {
+        return Cow::Borrowed(s);
+    }
+    Cow::Owned(format!("{scheme} {manager} {name} {pinned} {descriptors}"))
+}
+
+/// The five parts of a global SCIP id — scheme, package manager, package
+/// name, version, and the descriptors — as raw slices: two spaces inside one
+/// of the four fields are one escaped space and stay as they are, so the
+/// parts join back into a valid id. `None` for an id with fewer than four
+/// fields before the descriptors (`local 5`).
+fn id_fields(s: &str) -> Option<[&str; 5]> {
+    let bytes = s.as_bytes();
+    let mut fields: Vec<&str> = Vec::with_capacity(4);
+    let (mut start, mut i) = (0usize, 0usize);
+    while i < bytes.len() && fields.len() < 4 {
+        if bytes[i] == b' ' {
+            if bytes.get(i + 1) == Some(&b' ') {
+                i += 2;
+                continue;
+            }
+            fields.push(&s[start..i]);
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if fields.len() < 4 {
+        return None;
+    }
+    Some([fields[0], fields[1], fields[2], fields[3], &s[start..]])
 }
 
 /// A SCIP local symbol (`local 0`) names a symbol only inside its document,
@@ -1045,22 +1096,9 @@ fn fallback_display_name_textual(moniker: &str) -> String {
 /// spaces together inside a field are one literal space. An id with fewer
 /// fields (`local 5`) gives its last field.
 fn after_package_fields(moniker: &str) -> &str {
-    let bytes = moniker.as_bytes();
-    let (mut fields, mut i) = (0usize, 0usize);
-    while i < bytes.len() && fields < 4 {
-        if bytes[i] == b' ' {
-            if bytes.get(i + 1) == Some(&b' ') {
-                i += 2;
-                continue;
-            }
-            fields += 1;
-        }
-        i += 1;
-    }
-    if fields < 4 {
-        moniker.rsplit(' ').next().unwrap_or(moniker)
-    } else {
-        &moniker[i..]
+    match id_fields(moniker) {
+        Some([_, _, _, _, descriptors]) => descriptors,
+        None => moniker.rsplit(' ').next().unwrap_or(moniker),
     }
 }
 
@@ -1181,6 +1219,93 @@ mod tests {
         // A second pass does not scope an id again.
         scope_local_symbols(&mut index, "/home/me/repo");
         assert_eq!(index.documents[0].symbols[0].symbol, local3);
+    }
+
+    #[test]
+    fn rule_r2_gives_empty_java_packages_the_project_tag() {
+        let before = "semanticdb maven . . fixture/models/";
+        let tag = project_tag("/home/me/repo");
+        assert_eq!(
+            normalize_moniker(before, "/home/me/repo"),
+            format!("semanticdb maven . {tag} fixture/models/")
+        );
+        // Two repos with the same package names: two ids (the third test).
+        assert_ne!(
+            normalize_moniker(before, "/home/me/repo"),
+            normalize_moniker(before, "/home/me/other")
+        );
+        // A JDK package placeholder gets the tag too; harmless.
+        assert_eq!(
+            normalize_moniker("semanticdb maven . . java/util/", "/home/me/repo"),
+            format!("semanticdb maven . {tag} java/util/")
+        );
+    }
+
+    #[test]
+    fn rule_r3_pins_the_version_of_cargo_npm_and_maven_ids() {
+        let p = "/proj";
+        for (before, after) in [
+            (
+                "rust-analyzer cargo engraph-core 0.3.0 schema/run_migrations().",
+                "rust-analyzer cargo engraph-core 0.0.0 schema/run_migrations().",
+            ),
+            (
+                "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core option/Option#",
+                "rust-analyzer cargo core 0.0.0 option/Option#",
+            ),
+            (
+                "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#",
+                "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#",
+            ),
+            (
+                "semanticdb maven maven/engraph/engraph-fixture 0.1.0 fixture/models/Book#",
+                "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#",
+            ),
+            (
+                "semanticdb maven jdk 21 java/lang/String#",
+                "semanticdb maven jdk 0.0.0 java/lang/String#",
+            ),
+            // An escaped space in a field, and a space in a descriptor, stay.
+            (
+                "rust-analyzer cargo my  pkg 1.0 result/impl#[`Result<T, E>`]unwrap().",
+                "rust-analyzer cargo my  pkg 0.0.0 result/impl#[`Result<T, E>`]unwrap().",
+            ),
+        ] {
+            assert_eq!(normalize_moniker(before, p), after, "{before}");
+            // The rule is idempotent and does not allocate the second time.
+            assert!(matches!(normalize_moniker(after, p), Cow::Borrowed(_)));
+        }
+    }
+
+    #[test]
+    fn normalize_moniker_leaves_other_schemes_and_locals_alone() {
+        for id in [
+            "scip-go gomod github.com/x/y v1.2.3 `github.com/x/y`/F().",
+            "scip-go gomod example.com/b 0.0.0 `example.com/b`/Helper().",
+            "scip-python python requests 2.31.0 `requests.api`/get().",
+            "scip-python python python 0.0.0 `engraph_fixture.models`/Book#",
+            "local 5",
+            "local 5@0123456789abcdef:src/a.rs",
+            "not a scip id",
+        ] {
+            assert!(
+                matches!(normalize_moniker(id, "/proj"), Cow::Borrowed(s) if s == id),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn id_fields_splits_the_four_fields_and_keeps_escapes() {
+        assert_eq!(
+            id_fields("rust-analyzer cargo my  pkg 1.0 mod/foo()."),
+            Some(["rust-analyzer", "cargo", "my  pkg", "1.0", "mod/foo()."])
+        );
+        assert_eq!(id_fields("local 5"), None);
+        // Four fields and no descriptors is not an id: the fourth field never
+        // ends, so there are three.
+        assert_eq!(id_fields("a b c d"), None);
+        assert_eq!(id_fields("a b c d e"), Some(["a", "b", "c", "d", "e"]));
     }
 
     #[test]
