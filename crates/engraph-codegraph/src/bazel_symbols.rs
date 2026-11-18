@@ -498,13 +498,11 @@ fn build_indexer_command(spec: &LangSpec, repo: &Path, out_path: &Path) -> Comma
         "python" => {
             // Mirror the standalone scip-python driver (driver.rs): --output is
             // resolved relative to --cwd, so pin --cwd to the repo and pass an
-            // absolute out_path. --project-name defaults to the repo dir name,
-            // and --project-version is pinned (see driver::SCIP_PYTHON_VERSION)
+            // absolute out_path. --project-name comes from pyproject.toml, else
+            // the repo dir name (driver::python_project_name), and
+            // --project-version is pinned (see driver::SCIP_PYTHON_VERSION)
             // to avoid the undefined-version crash and keep entity IDs stable.
-            let project_name = repo
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "project".to_string());
+            let project_name = crate::driver::python_project_name(repo);
             let mut c = Command::new(spec.binary);
             c.arg("index")
                 .arg("--cwd")
@@ -1291,7 +1289,8 @@ mod tests {
         assert!(args.contains(&"--cwd".to_string()));
         assert!(args.contains(&"--output".to_string()));
         assert!(args.contains(&"--project-name".to_string()));
-        // --project-name derives from the repo dir name.
+        // --project-name derives from the repo dir name when there is no
+        // pyproject.toml (driver::python_project_name).
         assert!(args.contains(&"some-repo".to_string()));
         // --project-version is pinned to avoid scip-python's undefined-version crash.
         assert!(args.contains(&"--project-version".to_string()));

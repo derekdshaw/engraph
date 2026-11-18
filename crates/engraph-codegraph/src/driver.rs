@@ -59,11 +59,64 @@ impl Driver for RustAnalyzer {
     }
 }
 
+/// The version every pinned symbol id carries: the scip-python and scip-go
+/// drivers give it to the indexer, and `scip_loader::normalize_moniker` gives
+/// it to rust-analyzer, scip-typescript, and semanticdb ids (plan 05, part 2,
+/// rule R3). One value, so a pinned id looks the same whatever its scheme.
+pub(crate) const PINNED_VERSION: &str = "0.0.0";
+
 /// Fixed `--project-version` passed to scip-python (standalone driver and the
 /// Bazel symbol pass). Intentionally overrides scip-python's resolved version
 /// (git revision / pyproject) — see `ScipPython::command` for the full
 /// rationale (crash avoidance + stable entity IDs).
-pub(crate) const SCIP_PYTHON_VERSION: &str = "0.0.0";
+pub(crate) const SCIP_PYTHON_VERSION: &str = PINNED_VERSION;
+
+/// The `--project-name` for scip-python (plan 05, part 2, rule R1): the
+/// `[project].name` of `pyproject.toml`, so the package name in every
+/// first-party id comes from the repo, not from the name the checkout
+/// directory happens to have (a worktree named `elm` gave other ids than a
+/// clone named `engraph`). Without a `pyproject.toml`, or without a `name` in
+/// its `[project]` table, the directory's basename, as before.
+pub(crate) fn python_project_name(repo: &Path) -> String {
+    std::fs::read_to_string(repo.join("pyproject.toml"))
+        .ok()
+        .and_then(|text| pyproject_name(&text))
+        .unwrap_or_else(|| {
+            repo.file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "project".to_string())
+        })
+}
+
+/// The `name` of the `[project]` table: the key on its own line, quoted with
+/// `"` or `'`. A reader for this one key, not a TOML parser; `[project.urls]`
+/// and `[tool.*]` tables are skipped.
+fn pyproject_name(text: &str) -> Option<String> {
+    let mut in_project = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_project = line == "[project]";
+            continue;
+        }
+        if !in_project {
+            continue;
+        }
+        let Some(value) = line
+            .strip_prefix("name")
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('='))
+        else {
+            continue;
+        };
+        let value = value.trim_start();
+        let quote = value.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+        let inner = &value[1..];
+        let name = &inner[..inner.find(quote)?];
+        return (!name.is_empty()).then(|| name.to_string());
+    }
+    None
+}
 
 pub struct ScipPython;
 impl Driver for ScipPython {
@@ -77,10 +130,7 @@ impl Driver for ScipPython {
         &["py", "pyi"]
     }
     fn command(&self, repo: &Path, out: &Path) -> Command {
-        let project_name = repo
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "project".to_string());
+        let project_name = python_project_name(repo);
         // scip-python's --cwd defaults to the spawning process's CWD, and
         // --output is resolved relative to --cwd. Pin --cwd to the repo (so it
         // indexes the right tree) and --output to `out` (an absolute path
@@ -118,7 +168,7 @@ impl Driver for ScipPython {
 /// rationale as `SCIP_PYTHON_VERSION`. The loader gives the same version to
 /// the ids scip-go writes with the version `.`
 /// (`scip_loader::pin_go_module_versions`).
-pub(crate) const SCIP_GO_VERSION: &str = "0.0.0";
+pub(crate) const SCIP_GO_VERSION: &str = PINNED_VERSION;
 
 pub struct ScipGo;
 impl Driver for ScipGo {
@@ -478,6 +528,32 @@ fn package_json_workspaces(path: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn python_project_name_comes_from_pyproject_else_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("elm");
+        std::fs::create_dir_all(&repo).unwrap();
+        // No pyproject: the directory basename, as before R1.
+        assert_eq!(python_project_name(&repo), "elm");
+        // The [project] name wins over the directory, whatever the quotes,
+        // and a `name` in another table or a `names` key does not count.
+        std::fs::write(
+            repo.join("pyproject.toml"),
+            "[tool.poetry]\nname = \"wrong\"\n[project]\nnames = [\"x\"]\nname = 'engraph-fixture' # the one\n[project.urls]\nname = \"also wrong\"\n",
+        )
+        .unwrap();
+        assert_eq!(python_project_name(&repo), "engraph-fixture");
+        // A [project] table without a name: the directory again.
+        std::fs::write(repo.join("pyproject.toml"), "[project]\nversion = \"1\"\n").unwrap();
+        assert_eq!(python_project_name(&repo), "elm");
+        let cmd = ScipPython.command(&repo, Path::new("/tmp/out/index.scip"));
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"elm".to_string()));
+    }
 
     #[test]
     fn scip_python_command_pins_project_version() {
