@@ -153,6 +153,14 @@ Validation of phase E:
 
 ### Phase B: TypeScript and JavaScript
 
+Status (2026-11-18): steps 1 to 7 are complete. The validation is not done.
+Step 1 decision: the language id stays `ts`. The id is only printed, never
+stored; `ts/js` breaks the output path `index-{language}.scip`; and `js`
+gives an incorrect name to the TypeScript targets. Step 5 uses the command of
+the standalone driver (`driver::typescript_command`): a workspace flag only
+when the package list can be read and `pnpm` or `yarn` is on `PATH`, and the
+root as an argument.
+
 1. Find out if the language id `ts` must change to `js`, or to a label such
    as `ts/js`. The id is in `LangSpec.language`, in the `symbol[…]` output,
    and in `SymbolLangSummary`. Record the decision in the pull request.

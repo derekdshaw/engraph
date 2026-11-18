@@ -41,7 +41,7 @@ Plan: [`docs/plans/04-file-read-measurement-plan.md`](plans/04-file-read-measure
 
 ## 6. Bazel symbols for TypeScript, JavaScript, Python, and Rust
 
-The symbol-level Bazel pass (`--bazel-symbols`) indexes TypeScript, JavaScript, Python, and Rust code. Rust is done (phase E). Today the pass counts no `js_library` target, and fails on TypeScript and Python instead of reporting what a configured command would index.
+The symbol-level Bazel pass (`--bazel-symbols`) indexes TypeScript, JavaScript, Python, and Rust code. Rust (phase E) and TypeScript and JavaScript (phase B) are done. Python (phase D) is open: scip-python runs out of Node heap on a large repo (ray).
 
 Plan: [`docs/plans/06-bazel-typescript-python-symbols-plan.md`](plans/06-bazel-typescript-python-symbols-plan.md)
 

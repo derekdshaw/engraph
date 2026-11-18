@@ -98,7 +98,13 @@ Index runs are serialized per project with an OS file lock on `locks/index-<hash
 
   Any other Java build system plugs in by pointing the same env var at its own SCIP-producing command — engraph stays build-system-agnostic.
 - **Rust** — *delegated when configured.* If **`ENGRAPH_BAZEL_SCIP_RUST_CMD`** is set, engraph runs it as `<cmd> <repo> <out.scip>` (the Java contract). Unset → `rust-analyzer scip` on the root `Cargo.toml`, as the standalone driver runs it. engraph counts `rust_library`, `rust_binary`, `rust_test`, `rust_proc_macro`, `rust_library_group`, and `rust_prost_library` targets (not toolchain rules); with targets but no root `Cargo.toml` it reports `skipped (N targets, set ENGRAPH_BAZEL_SCIP_RUST_CMD to index them)` and does not start rust-analyzer.
-- **TypeScript / Python** — run their standalone indexers against the workspace root (best-effort; `rules_ts` `node_modules` and `rules_python` venv resolution are follow-ups).
+- **TypeScript and JavaScript** (reported as `symbol[ts]`) — *delegated when configured.* engraph counts `ts_project`, `ts_library`, `js_library`, `js_binary`, and `js_test` targets: scip-typescript indexes JavaScript too. If **`ENGRAPH_BAZEL_SCIP_TS_CMD`** is set, engraph runs it as `<cmd> <repo> <out.scip>` (the Java contract). Unset → `scip-typescript index --infer-tsconfig` at the workspace root, with `--pnpm-workspaces` / `--yarn-workspaces` as the standalone driver gives them, when the root has a `node_modules`. `rules_js` makes `node_modules` under `bazel-bin` during a build, not at the root, so without one engraph reports `skipped (N targets, set ENGRAPH_BAZEL_SCIP_TS_CMD to index them)` and does not start scip-typescript. A ready-made driver ships as **`docs/examples/scip-typescript-bazel-index.sh`**: it installs the packages with the package manager of the lock file (`pnpm`, `yarn`, or `npm ci`), which writes `node_modules` into the repo, and then runs the same command:
+
+  ```sh
+  export ENGRAPH_BAZEL_SCIP_TS_CMD="$PWD/docs/examples/scip-typescript-bazel-index.sh"
+  engraph index --bazel-symbols ~/src/monorepo
+  ```
+- **Python** — runs scip-python against the workspace root (best-effort; `rules_python` venv resolution is a follow-up).
 
 ### Hybrid retrieval
 

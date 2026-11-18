@@ -2219,16 +2219,36 @@ Toolchain downloads and full Bazel builds make `--bazel-symbols` heavy
 (5s warm to minutes cold per language); the explicit `--bazel-symbols`
 flag is still available to opt in on a single-repo run.
 
-**Per-language strategy.** Four distinct paths:
+**Per-language strategy.** Rust and TypeScript share one flow
+(`run_rooted_or_delegated`); the other languages each have their own:
 
-- **TypeScript / Python** (`run_language`, single-shot). Gate on a
+- **Python** (`run_language`, single-shot). Gate on a
   `bazel query --output=label_kind` probe for the language's rule
   classes (shared `--output_base` with the target-level pass, so the
   analysis cache stays warm) → `SkippedNoTargets` if empty; gate on
-  `which scip-<lang>` → `SkippedNoIndexer`; then spawn the indexer at the
-  workspace root (`run_indexer`, shared with Rust), SCIP landing under
-  `~/.cache/engraph/bazel-scip-out/<sha>/`. Best-effort: `rules_ts`
-  `node_modules` and `rules_python` venv resolution are unresolved.
+  `which scip-python` → `SkippedNoIndexer`; then spawn the indexer at the
+  workspace root (`run_indexer`, shared with Rust and TypeScript), SCIP
+  landing under `~/.cache/engraph/bazel-scip-out/<sha>/`. Best-effort:
+  `rules_python` venv resolution is unresolved.
+- **TypeScript and JavaScript** (`run_ts`, language id `ts`).
+  scip-typescript indexes JavaScript too, so the count covers `ts_project`,
+  `ts_library`, `js_library`, `js_binary`, and `js_test` (not
+  `js_run_binary`, which runs a tool at build time). The id stays `ts`: it
+  is only printed, never stored, and `ts/js` would break the
+  `index-<language>.scip` output path. When `ENGRAPH_BAZEL_SCIP_TS_CMD` is
+  set the pass delegates to it (`run_delegated`). Unset → with targets and
+  no root `node_modules`, `SkippedNotConfigured { targets, env:
+  "ENGRAPH_BAZEL_SCIP_TS_CMD" }`, before the PATH probe, so scip-typescript
+  does not start: `rules_js` makes `node_modules` under `bazel-bin/<pkg>/`
+  during a build, not at the root, and scip-typescript fails without them.
+  With a root `node_modules`, `scip-typescript index --infer-tsconfig` runs
+  with the standalone driver's command (`driver::typescript_command`, so the
+  same `--pnpm-workspaces` / `--yarn-workspaces <root>` rule, §14.7);
+  `--infer-tsconfig` because a Bazel root often has no `tsconfig.json`. A
+  ready-made driver that installs the packages with the package manager of
+  the lock file (`pnpm install --frozen-lockfile`, `yarn install
+  --immutable`, or `--frozen-lockfile` on yarn 1, `npm ci`) and then runs the
+  same command ships as `docs/examples/scip-typescript-bazel-index.sh`.
 - **Rust** (`run_rust`, Go's shape with one root). When
   `ENGRAPH_BAZEL_SCIP_RUST_CMD` is set the pass delegates to it
   (`run_delegated`, the Java contract). Unset → count the targets of
@@ -2335,12 +2355,14 @@ who exported it sees which rule classes were counted instead of a bare
 "no targets". One variant covers both
 routes into that state — a language always delegated because its build is
 repo-specific (Java), and one whose native pass found no root (Go with no
-`go.mod`, a pure gazelle repo; Rust with no root `Cargo.toml`) — so a new
-delegated language needs no new status:
+`go.mod`, a pure gazelle repo; Rust with no root `Cargo.toml`; TypeScript
+with no root `node_modules`) — so a new delegated language needs no new
+status:
 
 ```
 symbol[go]:   skipped (3 targets, set ENGRAPH_BAZEL_SCIP_GO_CMD to index them)
 symbol[java]: skipped (2 targets, set ENGRAPH_BAZEL_SCIP_JAVA_CMD to index them)
+symbol[ts]:   skipped (5 targets, set ENGRAPH_BAZEL_SCIP_TS_CMD to index them)
 symbol[rust]: skipped (4 targets, set ENGRAPH_BAZEL_SCIP_RUST_CMD to index them)
 ```
 
@@ -2366,7 +2388,13 @@ when the variable is set, without running the command). `run_rust` is
 unit-tested the same way: with targets and no root `Cargo.toml` it reports
 `SkippedNotConfigured` naming `ENGRAPH_BAZEL_SCIP_RUST_CMD`, and a
 configured command is merged even without a `Cargo.toml`. `LANGS` is
-pinned to carry the Rust rule classes and no `rust_.*` pattern. These
+pinned to carry the Rust rule classes and no `rust_.*` pattern. `run_ts`
+is tested the same way; its not-configured test also puts a fake
+`scip-typescript` that leaves a marker ahead of the real one on `PATH`, to
+show that neither the PATH probe nor an index run starts it (unix only:
+on Windows `Command` does not resolve a script without `.exe`). The `ts`
+entry is pinned to count the `js_*` rules, and the `ts` argv to carry
+`--infer-tsconfig`. These
 use a fake `bazel` that answers queries with `label_kind` lines: a shell
 script on unix, a batch file on Windows (`Command` runs a `.cmd` through
 `cmd.exe`). On unix a child process writes the script, so a parallel test's
@@ -2392,9 +2420,10 @@ workload trips them):
   them per repo; `docs/plans/completed/03-all-go-modules-plan.md` describes
   the in-engraph alternative (synthesized go.mod) as an optional step that
   was not done.
-- **scip-typescript + rules_ts node_modules**: cold runs may fail until a
-  prior `bazel build //...` populates the package-local `node_modules`
-  symlinks; likely delegated like Java.
+- **TypeScript without a root `node_modules`**: the native pass needs the
+  packages installed at the root. The example driver installs them, which
+  writes `node_modules` into the repo and runs the packages' install
+  scripts; after that the native pass can run without it.
 - **scip-python rules_python venv**: per-project environment resolution
   is unbuilt (Phase D).
 - **Rust without a root `Cargo.toml`**: only the root is checked; a repo
@@ -2454,4 +2483,4 @@ v18).
 The roadmap (`docs/ROADMAP.md`, one plan per item in `docs/plans/`)
 tracks features that aren't built, ranked by expected impact. The codegraph is shipped (target-level §14.8,
 symbol-level §14.9, stable symbol ids §14.10); its open item there is
-Bazel symbols for TypeScript, JavaScript, and Python (plan 06).
+Bazel symbols for Python (plan 06, phase D).
