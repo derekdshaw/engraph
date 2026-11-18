@@ -1499,6 +1499,9 @@ mod tests {
         let langs: Vec<&str> = plan.iter().map(|p| p.language).collect();
         assert!(langs.contains(&"java"));
         assert!(langs.contains(&"python"));
+        assert!(langs.contains(&"rust"));
+        let rust = plan.iter().find(|p| p.language == "rust").unwrap();
+        assert_eq!(rust.binary, "rust-analyzer");
     }
 
     #[test]

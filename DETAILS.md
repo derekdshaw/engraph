@@ -1640,10 +1640,10 @@ because many services keep per-platform files. A missing symbol in a
 
 scip-java's `index` subcommand auto-detects `{Maven, Gradle, sbt, mill}`
 when invoked standalone (the path covered by `drivers_live.rs`).
-On a Bazel workspace the same binary is driven by the symbol-level
-Bazel pathway (§14.9), where scip-java materializes its own aspect and
-orchestrates Bazel internally — engraph does not reimplement aspect
-dispatch.
+It does not detect Bazel. On a Bazel workspace the symbol-level pass
+(§14.9) does not run scip-java itself: it delegates to the command named
+by `ENGRAPH_BAZEL_SCIP_JAVA_CMD`, and a ready-made SemanticDB-aspect
+driver ships as `docs/examples/scip-java-bazel-index.sh`.
 
 `scripts/install-scip-indexers.sh` is the companion installer: idempotent,
 per-toolchain prerequisite checks, surfaces WSL-specific failure modes
@@ -2201,7 +2201,7 @@ the target-level pass writes `bazel_target` entities and
 `BAZEL_DEPENDS_ON` edges, this module produces per-language SCIP, merges
 it in memory, and loads the result under the same project key. The
 standalone SCIP indexers don't drive Bazel, so each language is handled
-the way that actually works on a real Bazel monorepo — the three paths
+the way that actually works on a real Bazel monorepo — the paths
 diverge (see **Per-language strategy**). The end result: `engraph
 subgraph <name>` carries both a **Calls / References** symbol section
 (from SCIP) and a **Bazel deps** section (from `bazel query`) in one
@@ -2219,16 +2219,32 @@ Toolchain downloads and full Bazel builds make `--bazel-symbols` heavy
 (5s warm to minutes cold per language); the explicit `--bazel-symbols`
 flag is still available to opt in on a single-repo run.
 
-**Per-language strategy.** Three distinct paths:
+**Per-language strategy.** Four distinct paths:
 
 - **TypeScript / Python** (`run_language`, single-shot). Gate on a
   `bazel query --output=label_kind` probe for the language's rule
   classes (shared `--output_base` with the target-level pass, so the
   analysis cache stays warm) → `SkippedNoTargets` if empty; gate on
   `which scip-<lang>` → `SkippedNoIndexer`; then spawn the indexer at the
-  workspace root, SCIP landing under
+  workspace root (`run_indexer`, shared with Rust), SCIP landing under
   `~/.cache/engraph/bazel-scip-out/<sha>/`. Best-effort: `rules_ts`
   `node_modules` and `rules_python` venv resolution are unresolved.
+- **Rust** (`run_rust`, Go's shape with one root). When
+  `ENGRAPH_BAZEL_SCIP_RUST_CMD` is set the pass delegates to it
+  (`run_delegated`, the Java contract). Unset → count the targets of
+  `rust_library`, `rust_binary`, `rust_test`, `rust_proc_macro`,
+  `rust_library_group`, and `rust_prost_library` (named classes, not
+  `rust_.*`, which also counts toolchain rules such as
+  `rust_prost_toolchain`; the group and prost classes cover a repo with no
+  top-level `rust_library`) → `SkippedNoTargets` if none. With targets and
+  no root `Cargo.toml`, rust-analyzer has no project to load →
+  `SkippedNotConfigured { targets, env: "ENGRAPH_BAZEL_SCIP_RUST_CMD" }`.
+  This check comes before the PATH probe, so rust-analyzer does not start
+  and the status is the same whether or not it is installed. With a root
+  `Cargo.toml`, `rust-analyzer scip` runs with the standalone driver's argv
+  (`driver::RustAnalyzer`) through `run_indexer` → `Indexed`. A repo that
+  is also indexed standalone (`engraph index .`) loads under the same
+  project key, so the second load replaces the first.
 - **Go** (`run_go_modules`, multi-module). scip-go needs a module root,
   and Bazel-go repos rarely have one at the workspace root.
   `discover_go_modules` walks for every `go.mod` (pruning symlinked /
@@ -2319,12 +2335,13 @@ who exported it sees which rule classes were counted instead of a bare
 "no targets". One variant covers both
 routes into that state — a language always delegated because its build is
 repo-specific (Java), and one whose native pass found no root (Go with no
-`go.mod`, a pure gazelle repo) — so a new delegated language needs no new
-status:
+`go.mod`, a pure gazelle repo; Rust with no root `Cargo.toml`) — so a new
+delegated language needs no new status:
 
 ```
 symbol[go]:   skipped (3 targets, set ENGRAPH_BAZEL_SCIP_GO_CMD to index them)
 symbol[java]: skipped (2 targets, set ENGRAPH_BAZEL_SCIP_JAVA_CMD to index them)
+symbol[rust]: skipped (4 targets, set ENGRAPH_BAZEL_SCIP_RUST_CMD to index them)
 ```
 
 `SkippedNoIndexer` deliberately carries no count: its remedy is installing
@@ -2345,7 +2362,11 @@ chains after the target-level pass; `driver_name` reports
 command writes a known SCIP, `run_java` merges it; the unconfigured case
 reports `SkippedNotConfigured` with the target count, and a workspace with
 no targets reports `SkippedNoTargets`, or `SkippedNoTargetsForCommand`
-when the variable is set, without running the command). These
+when the variable is set, without running the command). `run_rust` is
+unit-tested the same way: with targets and no root `Cargo.toml` it reports
+`SkippedNotConfigured` naming `ENGRAPH_BAZEL_SCIP_RUST_CMD`, and a
+configured command is merged even without a `Cargo.toml`. `LANGS` is
+pinned to carry the Rust rule classes and no `rust_.*` pattern. These
 use a fake `bazel` that answers queries with `label_kind` lines: a shell
 script on unix, a batch file on Windows (`Command` runs a `.cmd` through
 `cmd.exe`). On unix a child process writes the script, so a parallel test's
@@ -2376,6 +2397,12 @@ workload trips them):
   symlinks; likely delegated like Java.
 - **scip-python rules_python venv**: per-project environment resolution
   is unbuilt (Phase D).
+- **Rust without a root `Cargo.toml`**: only the root is checked; a repo
+  whose Cargo workspaces sit in subdirectories, or that has no Cargo at
+  all, needs `ENGRAPH_BAZEL_SCIP_RUST_CMD`. A command built on `rules_rust`'s
+  `rust-project.json` (`@rules_rust//tools/rust_analyzer:gen_rust_project`),
+  which rust-analyzer accepts in place of Cargo, is the expected route; it
+  is not tested.
 - **Cross-repo moniker collisions**: Java first-party monikers carry a
   constant empty version (`semanticdb maven . . …`) — cross-commit
   stable but cross-repo collision-prone; `scip_loader::normalize_moniker`
@@ -2426,6 +2453,5 @@ v18).
 
 The roadmap (`docs/ROADMAP.md`, one plan per item in `docs/plans/`)
 tracks features that aren't built, ranked by expected impact. The codegraph is shipped (target-level §14.8,
-symbol-level §14.9); its open items there are Bazel
-symbols for TypeScript and Python, and stable symbol ids (normalization
-plus a stability suite).
+symbol-level §14.9, stable symbol ids §14.10); its open item there is
+Bazel symbols for TypeScript, JavaScript, and Python (plan 06).

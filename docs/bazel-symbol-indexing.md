@@ -1,7 +1,7 @@
 # Design: Bazel-resolved symbol indexing
 
-Status: **Phases A (Go) and C (Java) shipped; B (TypeScript and JavaScript),
-D (Python), and E (Rust) open.** Kept as the original design record: the problem, the per-language
+Status: **Phases A (Go), C (Java), and E (Rust) shipped; B (TypeScript and
+JavaScript) and D (Python) open.** Kept as the original design record: the problem, the per-language
 approach, integration points, risks, and the phased plan. Line references and
 the "Problem & evidence" section describe the codebase as of the 2026-06-02
 diagnosis, not today. Current behavior lives in `DETAILS.md` §14.9; remaining
@@ -171,6 +171,9 @@ per-language project, not a tweak.
 - **Phase C — Java.** Bazel SemanticDB build + SCIP gen; target subsetting;
   output_base threading; resolve the config-injection question first.
 - **Phase D — Python (stretch).** Per-project env + scip-python.
+- **Phase E — Rust.** rust-analyzer on the root `Cargo.toml`, else a
+  delegated command (`ENGRAPH_BAZEL_SCIP_RUST_CMD`). Added later in
+  `docs/plans/06-bazel-typescript-python-symbols-plan.md`.
 
 Each phase: stays behind `--bazel-symbols`, reports per-language status, and is
 verified on a real Bazel monorepo (start with a small `//some/subtree/...`

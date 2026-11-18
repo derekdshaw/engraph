@@ -119,6 +119,8 @@ the most difficult.
 
 ### Phase E: Rust
 
+Status (2026-11-18): steps 1 to 5 are complete. The validation is not done.
+
 1. Write a test for `LANGS`: it has an entry with the language `rust`, the
    binary `rust-analyzer`, and rule kinds that include `rust_library`,
    `rust_binary`, `rust_test`, `rust_proc_macro`, `rust_library_group`, and

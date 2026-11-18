@@ -97,6 +97,7 @@ Index runs are serialized per project with an OS file lock on `locks/index-<hash
   ```
 
   Any other Java build system plugs in by pointing the same env var at its own SCIP-producing command — engraph stays build-system-agnostic.
+- **Rust** — *delegated when configured.* If **`ENGRAPH_BAZEL_SCIP_RUST_CMD`** is set, engraph runs it as `<cmd> <repo> <out.scip>` (the Java contract). Unset → `rust-analyzer scip` on the root `Cargo.toml`, as the standalone driver runs it. engraph counts `rust_library`, `rust_binary`, `rust_test`, `rust_proc_macro`, `rust_library_group`, and `rust_prost_library` targets (not toolchain rules); with targets but no root `Cargo.toml` it reports `skipped (N targets, set ENGRAPH_BAZEL_SCIP_RUST_CMD to index them)` and does not start rust-analyzer.
 - **TypeScript / Python** — run their standalone indexers against the workspace root (best-effort; `rules_ts` `node_modules` and `rules_python` venv resolution are follow-ups).
 
 ### Hybrid retrieval
