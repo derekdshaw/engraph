@@ -1035,15 +1035,16 @@ fn is_member(lang: &str, parent: &Path, dir: &Path, installed: &dyn Fn(&str) -> 
     }
 }
 
-/// Whether the `Cargo.toml` in `dir` defines a workspace: a `[workspace]` or
-/// `[workspace.*]` table header. A line scan, not a TOML parse.
+/// Whether the `Cargo.toml` in `dir` defines a workspace: the manifest has a
+/// top-level `workspace` table (`[workspace]`, `[workspace.*]`, or the dotted
+/// form). A manifest that does not parse defines none — cargo would refuse it
+/// too. `workspace = "…"` inside `[package]` points at a root elsewhere and
+/// does not count.
 fn cargo_has_workspace(dir: &Path) -> bool {
-    std::fs::read_to_string(dir.join("Cargo.toml")).is_ok_and(|toml| {
-        toml.lines().any(|l| {
-            let l = l.trim_start();
-            l.starts_with("[workspace]") || l.starts_with("[workspace.")
-        })
-    })
+    std::fs::read_to_string(dir.join("Cargo.toml"))
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .is_some_and(|manifest| manifest.contains_key("workspace"))
 }
 
 /// Whether `parent`'s workspace lists `dir`: a workspace whose packages
@@ -1618,6 +1619,24 @@ mod tests {
         let rec = recursive_roots(root.path());
         assert_eq!(rec.len(), 2, "{rec:?}");
         assert!(rec.contains(&r) && rec.contains(&go), "{rec:?}");
+    }
+
+    #[test]
+    fn cargo_workspace_detection_parses_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let has = |text: &str| {
+            std::fs::write(dir.path().join("Cargo.toml"), text).unwrap();
+            cargo_has_workspace(dir.path())
+        };
+        assert!(has("[workspace]\nmembers = [\"a\"]\n"));
+        assert!(has("[workspace.dependencies]\nserde = \"1\"\n"));
+        // The dotted form also defines the workspace table.
+        assert!(has("workspace.members = [\"a\"]\n"));
+        assert!(!has("[package]\nname = \"x\"\n"));
+        // `workspace = \"..\"` inside [package] points at a root elsewhere;
+        // this manifest defines none.
+        assert!(!has("[package]\nname = \"x\"\nworkspace = \"..\"\n"));
+        assert!(!has("not toml ["));
     }
 
     #[test]

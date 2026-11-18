@@ -75,8 +75,9 @@ pub(crate) const SCIP_PYTHON_VERSION: &str = PINNED_VERSION;
 /// `[project].name` of `pyproject.toml`, so the package name in every
 /// first-party id comes from the repo, not from the name the checkout
 /// directory happens to have (a worktree named `elm` gave other ids than a
-/// clone named `engraph`). Without a `pyproject.toml`, or without a `name` in
-/// its `[project]` table, the directory's basename, as before.
+/// clone named `engraph`). `[tool.poetry].name` answers for a Poetry project
+/// without a `[project]` table. Without a `pyproject.toml`, or without a name
+/// in either table, the directory's basename, as before.
 pub(crate) fn python_project_name(repo: &Path) -> String {
     std::fs::read_to_string(repo.join("pyproject.toml"))
         .ok()
@@ -88,34 +89,23 @@ pub(crate) fn python_project_name(repo: &Path) -> String {
         })
 }
 
-/// The `name` of the `[project]` table: the key on its own line, quoted with
-/// `"` or `'`. A reader for this one key, not a TOML parser; `[project.urls]`
-/// and `[tool.*]` tables are skipped.
+/// The project name in `pyproject.toml` text: `[project].name`, else
+/// `[tool.poetry].name` (a Poetry project without a `[project]` table).
+/// `None` when neither table has a string name, or the text is not TOML.
 fn pyproject_name(text: &str) -> Option<String> {
-    let mut in_project = false;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            in_project = line == "[project]";
-            continue;
-        }
-        if !in_project {
-            continue;
-        }
-        let Some(value) = line
-            .strip_prefix("name")
-            .map(str::trim_start)
-            .and_then(|rest| rest.strip_prefix('='))
-        else {
-            continue;
-        };
-        let value = value.trim_start();
-        let quote = value.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-        let inner = &value[1..];
-        let name = &inner[..inner.find(quote)?];
-        return (!name.is_empty()).then(|| name.to_string());
-    }
-    None
+    let table: toml::Table = text.parse().ok()?;
+    let project = table.get("project").and_then(toml::Value::as_table);
+    let poetry = table
+        .get("tool")
+        .and_then(toml::Value::as_table)
+        .and_then(|tool| tool.get("poetry"))
+        .and_then(toml::Value::as_table);
+    [project, poetry].into_iter().flatten().find_map(|t| {
+        t.get("name")
+            .and_then(toml::Value::as_str)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    })
 }
 
 pub struct ScipPython;
@@ -553,6 +543,38 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert!(args.contains(&"elm".to_string()));
+    }
+
+    #[test]
+    fn pyproject_name_handles_real_toml() {
+        // Shapes a line reader misses: a header with a trailing comment, a
+        // dotted key, an inline table, and a Poetry project without a
+        // [project] table.
+        assert_eq!(
+            pyproject_name("[project]  # metadata\nname = \"a\"\n").as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            pyproject_name("project.name = \"b\"\n").as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            pyproject_name("project = { name = \"c\" }\n").as_deref(),
+            Some("c")
+        );
+        assert_eq!(
+            pyproject_name("[tool.poetry]\nname = \"d\"\n").as_deref(),
+            Some("d")
+        );
+        // A [project] table without a name falls back to Poetry's.
+        assert_eq!(
+            pyproject_name("[project]\nversion = \"1\"\n[tool.poetry]\nname = \"e\"\n").as_deref(),
+            Some("e")
+        );
+        // A top-level name, a non-string name, broken TOML: no name.
+        assert_eq!(pyproject_name("name = \"top\"\n"), None);
+        assert_eq!(pyproject_name("[project]\nname = 3\n"), None);
+        assert_eq!(pyproject_name("[project\nname = \"x\"\n"), None);
     }
 
     #[test]
