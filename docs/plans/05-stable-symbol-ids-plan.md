@@ -81,8 +81,8 @@ changed after its files were made, also for Java, which CI does not index.
 
 ## Steps, part 2: normalization of symbol ids
 
-Steps 1 to 4 are complete. Step 1: plan 03, step 7. Steps 2 to 4: the
-findings and the two tables below the steps (2026-11-17).
+Steps 1 to 5 are complete. Step 1: plan 03, step 7. Steps 2 to 5: the
+findings, the two tables, and the rules below the steps (2026-11-17).
 
 1. In the standalone Go driver, give `--module-version` with the value of
    `SCIP_GO_VERSION` to scip-go. This change replaces all Go symbol ids one
@@ -159,6 +159,27 @@ scip-python (typeshed) and scip-typescript (bundled TypeScript) follow the
 indexer version, which the test suite of part 1 tracks; the Go standard
 library follows the `go` directive of `go.mod`. These change ids only together
 with a deliberate tool or repo change, so they are not problems in the table.
+
+### Step 5: the rules (2026-11-17)
+
+One rule for each problem. The pin value is `0.0.0`, the value the
+scip-python and scip-go drivers already give (`SCIP_PYTHON_VERSION`,
+`SCIP_GO_VERSION`). Each rule changes the ids of its scheme one time; step 11
+to 13 record the rule version and recommend a full index run.
+
+| Rule | For | Statement | Where |
+|---|---|---|---|
+| R1 | P1 | The scip-python driver gives `--project-name` the `[project].name` of `pyproject.toml`. When the repo has no `pyproject.toml` or the table has no `name`, the driver gives the basename of the indexed directory, as before. | `ScipPython::command` (`driver.rs`). The package name comes from the repo, not from the directory, so two checkouts give the same ids. Step 8 finds out how scip-python writes the name (case, `-` and `_`) and records it in the Python snapshot. |
+| R2 | P2 | A `semanticdb` id with the empty package name `.` gets the project tag (the first 16 hex digits of the SHA-256 of the project key, `project_tag`, the tag of local symbols) as its version: `semanticdb maven . . fixture/models/` → `semanticdb maven . <tag> fixture/models/`. | `normalize_moniker`, which gets the project key as a parameter for this rule. Package rows of two repos with the same package names are then two rows (the third test). JDK package rows (`. . java/util/`) become per-project placeholders, which is harmless. R2 applies before R3. |
+| R3 | P3, P4 | The version of each `rust-analyzer`, `scip-typescript`, and `semanticdb` id becomes the pin `0.0.0`: `rust-analyzer cargo engraph-core 0.3.0 …` → `rust-analyzer cargo engraph-core 0.0.0 …`, `semanticdb maven jdk 21 …` → `semanticdb maven jdk 0.0.0 …`. The rule applies to all ids of the scheme, first-party and dependency, so a reference from one repo and the definition in another repo stay one id (the cross-repo test). | `normalize_moniker`, one `match` arm for each scheme. The rust-analyzer standard library URL and the JDK major are also replaced; they said which tool version produced the id, which the `index_state` row of the run records instead. Two versions of one dependency used at the same time become one placeholder row, which has no definition and no location; this is the accepted cost. |
+| — | scip-go | No rule. The driver pins the module version (step 1) and the loader pins the `.` version of sibling modules (`pin_go_module_versions`). | — |
+
+The scip-python and scip-go drivers keep their pinned versions (the
+constraint of step 4). Dependency ids of scip-python (pip version) and scip-go
+(`go.sum` version) keep their versions: those two schemes have the same
+one-sided pin they had before this plan, and a cross-repo reference between
+two Python or two Go repos does not connect; that is a separate problem, not
+in the table.
 
 ## Tests
 
