@@ -49,6 +49,28 @@ fn describe_plan(plan: &engraph_codegraph::IndexPlan, indent: &str) {
 
 /// An index run's target for display: `project`, or `project/subtree` for a
 /// monorepo sub-project run.
+/// The recommendation `engraph index` prints when `stale` (from
+/// `engraph_codegraph::stale_normalization`) names projects whose symbol ids
+/// were written under other normalization rules than the current ones
+/// (plan 05, part 2, step 13). `None` when there are none.
+pub(crate) fn stale_normalization_note(stale: &[(String, i64)]) -> Option<String> {
+    if stale.is_empty() {
+        return None;
+    }
+    let current = engraph_codegraph::NORMALIZATION_VERSION;
+    let list = stale
+        .iter()
+        .map(|(project, version)| format!("  {project} (rules v{version})"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "note: the symbol ids of {} project(s) were written under older normalization \
+         rules than the current v{current}; their ids and the ids of newly indexed code do \
+         not connect. Run a full `engraph index <repo>` of each:\n{list}",
+        stale.len()
+    ))
+}
+
 pub(crate) fn scope_label(project: &str, subtree: &str) -> String {
     if subtree.is_empty() {
         project.to_string()
@@ -496,6 +518,26 @@ pub(crate) fn csv_line(fields: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stale_normalization_note_names_the_projects_and_the_versions() {
+        assert_eq!(super::stale_normalization_note(&[]), None);
+        let note = super::stale_normalization_note(&[
+            ("/home/me/app".to_string(), 0),
+            ("/home/me/lib".to_string(), 0),
+        ])
+        .unwrap();
+        assert!(note.contains("2 project(s)"), "{note}");
+        assert!(
+            note.contains("/home/me/app") && note.contains("/home/me/lib"),
+            "{note}"
+        );
+        assert!(
+            note.contains(&format!("v{}", engraph_codegraph::NORMALIZATION_VERSION)),
+            "{note}"
+        );
+        assert!(note.contains("engraph index"), "{note}");
+    }
+
     use super::*;
 
     fn lang(status: &str) -> engraph_codegraph::SymbolLangSummary {

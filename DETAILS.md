@@ -1445,6 +1445,7 @@ but logs a warning if it ever happens.
 | 15 | `index_state.go_tags`: the `--go-tags` of the run, so `index --if-changed` gives scip-go the same build tags (§8.0.1). NULL for older rows, which had none; no commit is cleared. |
 | 16 | `index_state.go_tests`: whether the run had `--go-tests`, so `index --if-changed` lets the Bazel Go pass index `_test.go` files again (§8.0.1). Older rows default to 0; no commit is cleared. |
 | 17 | `events.path_hash` + `events.read_range` + partial index `idx_events_reads (session_id, path_hash, read_range)`: the SHA-256 of the file path of a `read` event and the part of the file it returned (§5.6), so a report can find reads of a file, or of a range of it, that the session read before. NULL for all other events. |
+| 18 | `index_state.normalization`: the version of the symbol-id normalization rules (`scip_loader::NORMALIZATION_VERSION`) the run's ids were written with. `engraph index` lists the projects whose rows carry another version (NULL, from before the rules, counts as 0) and recommends a full `engraph index <repo>` of each: their ids and newly indexed ids do not connect until then (plan 05, part 2, steps 11 to 13). |
 
 (`SCHEMA_VERSION = 17`; the `MIGRATIONS` array has 17 entries.)
 

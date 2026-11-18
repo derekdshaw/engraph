@@ -690,6 +690,11 @@ async fn main() -> Result<()> {
                     },
                 )?;
             }
+            if let Some(note) =
+                output::stale_normalization_note(&engraph_codegraph::stale_normalization(&conn)?)
+            {
+                eprintln!("{note}");
+            }
         }
         Cmd::Subgraph {
             symbol,

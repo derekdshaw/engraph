@@ -359,6 +359,15 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_events_reads ON events(session_id, path_hash, read_range)
         WHERE path_hash IS NOT NULL;
     "#,
+    // v18 — `index_state.normalization`: the version of the symbol-id
+    // normalization rules (`scip_loader::NORMALIZATION_VERSION`) the run's ids
+    // were written with (plan 05, part 2, step 11). `engraph index` compares
+    // it with the current rules and recommends a full index run of a project
+    // whose rows differ: its ids and those of newly indexed code do not
+    // connect. NULL for rows from before the rules, which counts as older.
+    r#"
+    ALTER TABLE index_state ADD COLUMN normalization INTEGER;
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
@@ -765,6 +774,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, ("abc".into(), false));
+    }
+
+    #[test]
+    fn migrates_through_v18_index_state_normalization() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations_to(&mut conn, 17).unwrap();
+        conn.execute_batch(
+            "INSERT INTO index_state (project, subtree, commit_sha, source) VALUES
+                ('/p', '', 'abc', 'drivers');",
+        )
+        .unwrap();
+        run_migrations_to(&mut conn, 18).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 18);
+        // A row from before the rules has no normalization version.
+        let row: (String, Option<i64>) = conn
+            .query_row(
+                "SELECT commit_sha, normalization FROM index_state WHERE project = '/p'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("abc".into(), None));
     }
 
     #[test]

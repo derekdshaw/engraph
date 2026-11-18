@@ -81,7 +81,7 @@ changed after its files were made, also for Java, which CI does not index.
 
 ## Steps, part 2: normalization of symbol ids
 
-Steps 1 to 10 are complete (2026-11-17). Step 1: plan 03, step 7. Steps 2 to
+Steps 1 to 13 are complete (2026-11-17). Step 1: plan 03, step 7. Steps 2 to
 5: the findings, the two tables, and the rules below the steps. Steps 6 and 8:
 R2 and R3 are in `scip_loader::normalize_moniker`, which takes the project
 key; R1 is in `driver::python_project_name`, used by the standalone driver
@@ -93,7 +93,12 @@ test fixtures, and `bazel.rs` writes Bazel labels, not SCIP ids), and all
 loads go through `load_with_options`, where one `normalize_index` pass
 rewrites every id of the parsed index before any row is written. The rust,
 typescript, and java snapshots changed; go, python, and the prebuilt SCIP
-blobs did not (the fifth test of this plan).
+blobs did not (the fifth test of this plan). Steps 11 to 13:
+`index_state.normalization` (schema v18) records
+`scip_loader::NORMALIZATION_VERSION` (1) with each run;
+`index::stale_normalization` lists the projects with rows under another
+version (NULL, from before the rules, counts as 0); `engraph index` prints a
+note that names them and recommends a full `engraph index <repo>` of each.
 
 1. In the standalone Go driver, give `--module-version` with the value of
    `SCIP_GO_VERSION` to scip-go. This change replaces all Go symbol ids one

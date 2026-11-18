@@ -74,6 +74,17 @@ fn scheme(symbol: &str) -> Option<&str> {
         .filter(|s| *s != "local")
 }
 
+/// The version of the rules in [`normalize_moniker`]: `index_state` records
+/// it with each run (`index::record_indexed_commit`), and `engraph index`
+/// recommends a full index run of a project whose rows carry another version
+/// (`index::stale_normalization`), since the ids of the two runs do not
+/// connect. Bump it whenever a rule changes the ids it produces.
+///
+/// 1: R2 (project tag for `semanticdb` ids with the empty package name) and
+///    R3 (the pinned version for `rust-analyzer`, `scip-typescript`, and
+///    `semanticdb` ids), 2026-11-17.
+pub const NORMALIZATION_VERSION: i64 = 1;
+
 /// The id normalization rules of plan 05, part 2 (step 5), one `match` arm
 /// per scheme, so a symbol id is the same on each computer and after each
 /// commit. `project` is the project key of the load, for R2.
