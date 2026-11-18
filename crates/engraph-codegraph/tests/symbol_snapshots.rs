@@ -12,7 +12,9 @@
 mod common;
 
 use common::snapshot::{Snapshot, SymbolRecord};
-use common::{FIXTURES, db_for_test, indexer_version, isolate_scip_output, normalized_scip};
+use common::{
+    FIXTURES, db_for_test, indexer_version, isolate_scip_output, normalized_scip, tree_hash,
+};
 use engraph_codegraph::{index_repo, load, scip_output_dir};
 use tempfile::tempdir;
 
@@ -71,9 +73,10 @@ fn snapshot_records_defined_symbols_with_callers_and_callees() {
         .unwrap();
     }
 
-    let snap = Snapshot::from_db(&conn, p, "x", "x 1.0");
+    let snap = Snapshot::from_db(&conn, p, "x", "x 1.0", "h");
     assert_eq!(snap.indexer, "x");
     assert_eq!(snap.indexer_version, "x 1.0");
+    assert_eq!(snap.fixture_hash, "h");
     // Sorted by id; the undefined type, the local, the external placeholder,
     // and the other project's symbol are left out.
     assert_eq!(
@@ -119,6 +122,7 @@ fn snapshot_diff_lists_changed_versions_and_symbols() {
     let snapshot = Snapshot {
         indexer: "x".into(),
         indexer_version: "1".into(),
+        fixture_hash: "h".into(),
         symbols: vec![
             rec("a", "a.rs", &["c"]),
             rec("b", "b.rs", &[]),
@@ -128,6 +132,7 @@ fn snapshot_diff_lists_changed_versions_and_symbols() {
     let run = Snapshot {
         indexer: "x".into(),
         indexer_version: "2".into(),
+        fixture_hash: "h".into(),
         symbols: vec![
             rec("a", "a2.rs", &["d"]),
             rec("c", "c.rs", &[]),
@@ -188,12 +193,90 @@ fn normalized_scip_keeps_only_machine_free_metadata() {
 }
 
 #[test]
+fn normalized_scip_sorts_the_set_like_lists() {
+    use protobuf::Message;
+    // scip-go writes a document's symbols in Go map order and scip-java its
+    // documents in directory order: the same index, differently ordered,
+    // must normalize to the same bytes.
+    let info = |symbol: &str, rels: &[&str]| {
+        let mut i = scip::types::SymbolInformation::new();
+        i.symbol = symbol.into();
+        for r in rels {
+            let mut rel = scip::types::Relationship::new();
+            rel.symbol = r.to_string();
+            i.relationships.push(rel);
+        }
+        i
+    };
+    let doc = |path: &str, symbols: Vec<scip::types::SymbolInformation>| {
+        let mut d = scip::types::Document::new();
+        d.relative_path = path.into();
+        d.symbols = symbols;
+        d
+    };
+    let index_of = |docs: Vec<scip::types::Document>,
+                    external: Vec<scip::types::SymbolInformation>| {
+        let mut index = scip::types::Index::new();
+        index.documents = docs;
+        index.external_symbols = external;
+        index.write_to_bytes().unwrap()
+    };
+    let one = index_of(
+        vec![
+            doc("b.go", vec![info("s2", &[]), info("s1", &["r2", "r1"])]),
+            doc("a.go", vec![]),
+        ],
+        vec![info("e2", &[]), info("e1", &[])],
+    );
+    let other = index_of(
+        vec![
+            doc("a.go", vec![]),
+            doc("b.go", vec![info("s1", &["r1", "r2"]), info("s2", &[])]),
+        ],
+        vec![info("e1", &[]), info("e2", &[])],
+    );
+    assert_eq!(normalized_scip(&one), normalized_scip(&other));
+    let sorted = scip::types::Index::parse_from_bytes(&normalized_scip(&one)).unwrap();
+    assert_eq!(sorted.documents[0].relative_path, "a.go");
+    assert_eq!(sorted.documents[1].symbols[0].symbol, "s1");
+    assert_eq!(sorted.documents[1].symbols[0].relationships[0].symbol, "r1");
+    assert_eq!(sorted.external_symbols[0].symbol, "e1");
+}
+
+#[test]
+fn tree_hash_follows_the_sources_and_ignores_build_output() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), "fn a() {}").unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]").unwrap();
+    let before = tree_hash(root);
+    assert_eq!(before.len(), 64);
+    assert_eq!(tree_hash(root), before, "deterministic");
+    // Build output does not count.
+    std::fs::create_dir_all(root.join("target/debug")).unwrap();
+    std::fs::write(root.join("target/debug/x"), "junk").unwrap();
+    std::fs::write(root.join("Cargo.lock"), "lock").unwrap();
+    assert_eq!(tree_hash(root), before);
+    // A changed byte, a new file, and a rename each count.
+    std::fs::write(root.join("src/a.rs"), "fn a() { }").unwrap();
+    let edited = tree_hash(root);
+    assert_ne!(edited, before);
+    std::fs::write(root.join("src/b.rs"), "").unwrap();
+    let added = tree_hash(root);
+    assert_ne!(added, edited);
+    std::fs::rename(root.join("src/b.rs"), root.join("src/c.rs")).unwrap();
+    assert_ne!(tree_hash(root), added);
+}
+
+#[test]
 fn snapshot_diff_marks_an_order_only_change() {
     // The same ids in a different order: the record differs, but no id went
     // or came, so the set-style caller lines would say nothing at all.
     let rec = |callers: &[&str]| Snapshot {
         indexer: "x".into(),
         indexer_version: "1".into(),
+        fixture_hash: "h".into(),
         symbols: vec![SymbolRecord {
             id: "a".into(),
             name: "a".into(),
@@ -218,7 +301,9 @@ fn snapshot_diff_marks_an_order_only_change() {
 /// indexer's output, committed — so this operates in every CI job and a
 /// difference can only come from a change to the loader (or a blob committed
 /// without its snapshot). The indexer name and version come from the snapshot
-/// itself, so only the symbols can differ.
+/// itself, so only the symbols can differ — and the fixture hash, which says
+/// the sources changed and both files are stale (a fixture whose indexer CI
+/// does not install, like Java, has no other guard).
 #[test]
 fn prebuilt_scip_blobs_load_to_the_snapshots() {
     let mut failures = Vec::new();
@@ -236,8 +321,16 @@ fn prebuilt_scip_blobs_load_to_the_snapshots() {
             &fixture.project(),
             &want.indexer,
             &want.indexer_version,
+            &fixture.source_hash(),
         );
-        let diff = want.diff(&snap);
+        let mut diff = want.diff(&snap);
+        if want.fixture_hash != snap.fixture_hash {
+            diff.push(format!(
+                "note: the {} fixture sources changed after the snapshot and blob were \
+                 made; regenerate with ENGRAPH_UPDATE_SNAPSHOTS=1 on a machine with {}.",
+                fixture.lang, fixture.indexer
+            ));
+        }
         if diff.is_empty() {
             eprintln!(
                 "ok: {} blob loads to its snapshot ({} symbols)",
@@ -288,7 +381,13 @@ fn fixture_ids_match_the_snapshots() {
             },
         );
         let version = indexer_version(fixture.indexer).unwrap();
-        let snap = Snapshot::from_db(&conn, &fixture.project(), fixture.indexer, &version);
+        let snap = Snapshot::from_db(
+            &conn,
+            &fixture.project(),
+            fixture.indexer,
+            &version,
+            &fixture.source_hash(),
+        );
         assert!(
             snap.symbols.len() >= MIN_SYMBOLS,
             "{} fixture defines {} symbols, want at least {MIN_SYMBOLS}",

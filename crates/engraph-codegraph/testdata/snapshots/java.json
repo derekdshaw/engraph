@@ -1,6 +1,7 @@
 {
   "indexer": "scip-java",
   "indexer_version": "0.12.3",
+  "fixture_hash": "85e69d41192256c26aa708fb95eb6f4c1c28fe1ddf17d4f50d6344bffb633eae",
   "symbols": [
     {
       "id": "semanticdb maven maven/engraph/engraph-fixture 0.1.0 fixture/models/Book#",

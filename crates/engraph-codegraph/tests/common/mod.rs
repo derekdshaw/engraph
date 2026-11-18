@@ -57,6 +57,11 @@ impl Fixture {
         testdata().join("scip").join(format!("{}.scip", self.lang))
     }
 
+    /// `tree_hash` of the fixture's sources as they are in the repo now.
+    pub fn source_hash(&self) -> String {
+        tree_hash(&self.dir())
+    }
+
     /// The project key the fixture is indexed under in a test database.
     pub fn project(&self) -> String {
         format!("/fixtures/{}", self.lang)
@@ -92,6 +97,46 @@ pub fn testdata() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata")
 }
 
+/// One SHA-256 over every file under `dir` — its path relative to `dir` and
+/// its bytes, in path order — so any edit, rename, or added file changes it.
+/// Build output that an in-place `cargo check` or `npm` run would leave
+/// behind (`target`, `node_modules`, `__pycache__`, `Cargo.lock`) is skipped,
+/// so only the sources count.
+pub fn tree_hash(dir: &Path) -> String {
+    fn visit(dir: &Path, root: &Path, buf: &mut Vec<u8>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            let name = path.file_name().unwrap().to_string_lossy();
+            if matches!(
+                name.as_ref(),
+                "target" | "node_modules" | "__pycache__" | "Cargo.lock"
+            ) {
+                continue;
+            }
+            if path.is_dir() {
+                visit(&path, root, buf);
+            } else {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                buf.extend_from_slice(rel.as_bytes());
+                buf.push(0);
+                buf.extend_from_slice(&std::fs::read(&path).unwrap());
+                buf.push(0);
+            }
+        }
+    }
+    let mut buf = Vec::new();
+    visit(dir, dir, &mut buf);
+    engraph_core::utils::sha256_hex(&buf)
+}
+
 fn copy_dir_all(src: &Path, dst: &Path) {
     std::fs::create_dir_all(dst).unwrap();
     for entry in std::fs::read_dir(src).unwrap() {
@@ -124,12 +169,31 @@ pub fn java_build_tool() -> Option<&'static str> {
 /// and output paths) is cleared. Everything else — documents, symbols,
 /// occurrences — holds only repo-relative paths, so the result is the same on
 /// every machine; the indexer's name and version stay.
+///
+/// The documents, each document's symbols and their relationships, and the
+/// external symbols are sorted too. SCIP treats them as sets, but scip-go
+/// writes symbols in Go map order and scip-java writes documents in directory
+/// order, so two runs of one fixture give the same bytes only after sorting.
+/// Occurrences keep the indexer's (source) order.
 pub fn normalized_scip(bytes: &[u8]) -> Vec<u8> {
     use protobuf::Message;
     let mut index = scip::types::Index::parse_from_bytes(bytes).unwrap();
     let metadata = index.metadata.mut_or_insert_default();
     metadata.project_root = "file:///fixture".into();
     metadata.tool_info.mut_or_insert_default().arguments = Vec::new();
+    let sort_infos = |infos: &mut Vec<scip::types::SymbolInformation>| {
+        infos.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        for info in infos {
+            info.relationships.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        }
+    };
+    index
+        .documents
+        .sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    for doc in &mut index.documents {
+        sort_infos(&mut doc.symbols);
+    }
+    sort_infos(&mut index.external_symbols);
     index.write_to_bytes().unwrap()
 }
 

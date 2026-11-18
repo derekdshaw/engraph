@@ -17,6 +17,10 @@ use std::path::Path;
 pub struct Snapshot {
     pub indexer: String,
     pub indexer_version: String,
+    /// `tree_hash` of the fixture sources the snapshot (and its prebuilt SCIP
+    /// blob) were made from, so a test with no indexer can still tell that
+    /// the fixture changed and both files are stale.
+    pub fixture_hash: String,
     pub symbols: Vec<SymbolRecord>,
 }
 
@@ -38,6 +42,7 @@ impl Snapshot {
         project: &str,
         indexer: &str,
         indexer_version: &str,
+        fixture_hash: &str,
     ) -> Snapshot {
         let mut defs = conn
             .prepare(
@@ -89,13 +94,14 @@ impl Snapshot {
         Snapshot {
             indexer: indexer.to_string(),
             indexer_version: indexer_version.to_string(),
+            fixture_hash: fixture_hash.to_string(),
             symbols,
         }
     }
 
     /// The differences between `self`, the snapshot, and `actual`, an index
-    /// run, one line each; empty when they are equal. A changed indexer or
-    /// version comes first, then a count line, then the symbols: `-` only in
+    /// run, one line each; empty when they are equal. A changed indexer,
+    /// version, or fixture hash comes first, then a count line, then the symbols: `-` only in
     /// the snapshot, `+` only in the index run, `~` changed, with the changed
     /// fields indented below it (`callers`/`callees` as the ids that went or
     /// came).
@@ -108,6 +114,7 @@ impl Snapshot {
                 &self.indexer_version,
                 &actual.indexer_version,
             ),
+            ("fixture_hash", &self.fixture_hash, &actual.fixture_hash),
         ] {
             if want != got {
                 lines.push(format!("{name}: {want} (snapshot) -> {got} (index run)"));

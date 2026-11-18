@@ -1,6 +1,7 @@
 {
   "indexer": "rust-analyzer",
   "indexer_version": "rust-analyzer 1.100.0 (0ef1bc3 2026-11-09)",
+  "fixture_hash": "0c368ef00318ef579a59501d49f71ff2d1fa591197fd49d044b1735566afcedf",
   "symbols": [
     {
       "id": "rust-analyzer cargo engraph-fixture 0.1.0 crate/",

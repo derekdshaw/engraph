@@ -1,6 +1,7 @@
 {
   "indexer": "scip-python",
   "indexer_version": "0.6.8",
+  "fixture_hash": "797ca1057e2ad891b458c9f76eed2150f8da6bb02247d64518f04e301a4cb95b",
   "symbols": [
     {
       "id": "scip-python python python 0.0.0 `engraph_fixture.models`/Book#",

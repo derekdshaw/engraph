@@ -1,6 +1,7 @@
 {
   "indexer": "scip-go",
   "indexer_version": "0.2.7",
+  "fixture_hash": "fa09a5e085399a41c2fc1e08e76dc10e0ce11a37f269d6913f094a0ce974cc1f",
   "symbols": [
     {
       "id": "scip-go gomod example.com/engraph/fixture 0.0.0 `example.com/engraph/fixture/models`/",

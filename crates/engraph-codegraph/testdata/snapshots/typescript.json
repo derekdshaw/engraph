@@ -1,6 +1,7 @@
 {
   "indexer": "scip-typescript",
   "indexer_version": "0.6.0",
+  "fixture_hash": "acee2c2c35848eadb5c5c386ef672f98c83a171a7c8e6b2411c058273736f687",
   "symbols": [
     {
       "id": "scip-typescript npm engraph-fixture 0.1.0 src/`index.ts`/",

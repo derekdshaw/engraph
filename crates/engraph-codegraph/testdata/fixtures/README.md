@@ -8,7 +8,8 @@ helpers both use. Each defines 50+ symbols (functions, types, methods).
 The symbol ids these repos produce are recorded in `../snapshots/<lang>.json`
 (`tests/common/snapshot.rs` gives the format): every defined non-local symbol
 with its name, file path, line range, callers and callees, plus the indexer
-version. `../scip/<lang>.scip` keeps each fixture's prebuilt SCIP blob
+version and a hash of the fixture sources, so a stale snapshot shows even where
+the indexer is not installed. `../scip/<lang>.scip` keeps each fixture's prebuilt SCIP blob
 (machine paths normalized away) for the loader-only test. Any rename or move
 here changes the recorded ids on purpose, so edit these fixtures only together
 with their snapshots and blobs:
