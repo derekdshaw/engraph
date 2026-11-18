@@ -36,6 +36,11 @@ indexer changes the ids or the relations of known symbols.
 
 ## Steps, part 1: test suite for stable symbol ids
 
+Part 1 is complete (2026-11-17). The fixtures are in
+`crates/engraph-codegraph/testdata/fixtures/`, the snapshot files and prebuilt
+SCIP files in `testdata/snapshots/` and `testdata/scip/`, and the tests in
+`crates/engraph-codegraph/tests/symbol_snapshots.rs`.
+
 1. Make a small fixture repo for each language: Rust, Python, Go, TypeScript,
    and Java.
 2. Use specified versions of all dependencies in each fixture repo.
@@ -67,12 +72,12 @@ indexer changes the ids or the relations of known symbols.
 Note for steps 17 and 18 (2026-11-17): the snapshot files record the indexer
 versions of the computer that made them (rust-analyzer 1.100.0, scip-python
 0.6.8, scip-go 0.2.7, scip-typescript 0.6.0, scip-java 0.12.3), and the
-comparison of step 10 includes the version. The CI job installs the indexers
-without a version (`npm install -g …`, `go install …@latest`), and its
-rust-analyzer is the one of the `stable` toolchain. Thus the test of step 10
-fails in CI until step 18 installs the versions in the snapshot files, or
-until the snapshot files are made again with the versions that CI installs.
-Steps 17 and 18 must do one of these two.
+comparison of step 10 includes the version. Step 18 pins the CI job to these
+versions: the toolchain 1.100.0 (rust-analyzer comes with it), scip-python
+0.6.8, scip-typescript 0.6.0, and scip-go v0.2.7. A new indexer version needs
+a new pin and a new snapshot file together. The snapshot files also record a
+hash of the fixture sources, so the test of step 16 shows a fixture that
+changed after its files were made, also for Java, which CI does not index.
 
 ## Steps, part 2: normalization of symbol ids
 
