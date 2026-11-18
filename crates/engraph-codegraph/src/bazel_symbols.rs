@@ -1369,6 +1369,27 @@ mod tests {
     }
 
     #[test]
+    fn langs_ts_counts_the_js_rules() {
+        // scip-typescript indexes JavaScript too: a repo with only
+        // `aspect_rules_js` targets must not report "no targets", and a repo
+        // with both must count both.
+        let ts = LANGS
+            .iter()
+            .find(|s| s.language == "ts")
+            .expect("ts LangSpec present");
+        assert_eq!(ts.binary, "scip-typescript");
+        for kind in [
+            "ts_project",
+            "ts_library",
+            "js_library",
+            "js_binary",
+            "js_test",
+        ] {
+            assert!(ts.rule_kinds.contains(&kind), "missing {kind}");
+        }
+    }
+
+    #[test]
     fn run_rust_without_a_root_cargo_toml_is_not_configured() {
         // rust-analyzer has no project to load without a Cargo.toml, so the
         // targets are reported as needing a command, like Go with no go.mod.
