@@ -12,6 +12,8 @@ of the plans.
   for example the Go build cache.
 - A refresh of a subtree keeps the symbols of the projects below it that
   `--recursive` indexed on their own.
+- A symbol that a SCIP document defines without a `SymbolInformation` has
+  its file and line range in the code graph.
 
 ## Condition at this time (2026-11-03)
 
@@ -27,6 +29,7 @@ at the end).
 | 16. A failed driver of a multi-manifest repo is not in the summary | `indexed … driver=scip-typescript`, as if the repo had no Python; the reason only in a `WARN` line |
 | 20. Go test runs put symbols of the Go build cache in the code graph | `main`, `init`, `tests`, `benchmarks`, … with a `file_path` of `../../../../../../home/<user>/.cache/go-build/…` |
 | 21. A refresh of a subtree removes the symbols of a nested project | after `index --recursive`, `index --if-changed` re-indexes only `""`, prints `5 pruned`, and the symbols of the nested Go module are gone |
+| 22. A definition without a `SymbolInformation` has no location | `subgraph` shows the symbol and its edges, but no file and no line range |
 
 ### Bug 16: a failed driver of a multi-manifest repo is not in the summary
 
@@ -143,6 +146,42 @@ member of the root, the run of `svc` (subtree `svc`) prunes the symbols of
 `svc/api`, because they are below `svc/`. This was tested on 2026-11-16: the
 symbols of `svc/api` were gone after `index --recursive`.
 
+### Bug 22: a definition without a `SymbolInformation` has no location
+
+**Found on 2026-11-18**, in the review of the plan 05 commits.
+
+SCIP asks a document to list the symbols that it defines in
+`Document.symbols`, but a SCIP file from another tool (`--scip`) can have a
+definition occurrence without a `SymbolInformation` in any document. The
+loader writes an entity row only for each `SymbolInformation`. Before
+2026-11-18, the load stopped with `FOREIGN KEY constraint failed` when such a
+definition was the source of a relation. The correction gives the source a
+placeholder row before the relation
+(`crates/engraph-codegraph/src/scip_loader.rs:678-681`):
+
+```rust
+        if !listed.contains(src_sym.as_str()) && !unlisted_with_row.contains(&src_sym) {
+            ensure_placeholder_entity(conn, &src_sym, project, doc_scheme)?;
+            unlisted_with_row.insert(src_sym.clone());
+        }
+```
+
+When a later document has the `SymbolInformation` (scip-go lists a Go
+package in one of its files), that document fills in the row. When no
+document has it, the row stays a placeholder: it has no `file_path` and no
+`line_range`, and its name comes from the id
+(`ensure_placeholder_entity`, `scip_loader.rs:821`). The load and the edges
+are correct; only the location is missing.
+
+The five indexers of the plan 05 fixtures do not cause this: each non-local
+definition has a `SymbolInformation` in a document.
+
+Repro: the test
+`a_definition_without_symbol_information_can_anchor_a_relation`
+(`crates/engraph-codegraph/tests/loader_unit.rs`) loads a document that
+defines `f` without a `SymbolInformation`. The row of `f` has a `NULL`
+`file_path`.
+
 ## Steps
 
 Do each part on its own branch. The parts do not depend on each other. Each
@@ -252,6 +291,23 @@ Validation of part 21:
 1. Do the repro of bug 21 with the `main` binary: `S` is gone.
 2. Do it with the binary of the part: `S` and `S2` are in the graph.
 
+### Part 22: a location for a definition without a `SymbolInformation` (bug 22)
+
+1. Before the documents load (after `normalize_index`), find each non-local
+   definition occurrence whose symbol has no `SymbolInformation` in any
+   document. Add a `SymbolInformation` with only the symbol to the first
+   document that defines it. The rows, the kinds, and the prune set
+   (`current_symbols`) then include it without other changes.
+2. Extend the test of bug 22: the row of `f` has the `file_path` and the
+   `line_range` of its definition.
+3. Make sure that the snapshots of plan 05 do not change.
+
+Validation of part 22:
+
+1. Load a SCIP file with a definition without a `SymbolInformation` with
+   the `main` binary: `subgraph` shows no file and no line for it.
+2. Do it with the binary of the part: `subgraph` shows them.
+
 ## Tests
 
 - A failed driver of a multi-manifest repo is named in the summary with its
@@ -260,6 +316,8 @@ Validation of part 21:
   load removes the rows of such a document from an earlier load (part 20).
 - A refresh of a subtree keeps the rows of a nested project, and a
   `go.work` member below an unlisted module is indexed once (part 21).
+- A definition without a `SymbolInformation` has a row with its location
+  (part 22).
 
 ## Risks
 
@@ -282,6 +340,8 @@ Part 20 adds one filter in the loader and two tests.
 Part 21 changes the prune scope of a load and of `gc_pass`, the subtree
 selection of `--if-changed`, and the `go.work` member rule, with two
 integration tests. It is the largest part of this plan.
+
+Part 22 adds one pass over the index in the loader and extends one test.
 
 ## Plan management
 

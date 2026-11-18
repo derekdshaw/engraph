@@ -9,37 +9,14 @@
 //! Soft-skips when rust-analyzer isn't installed so this file is safe to run
 //! on any machine.
 
+mod common;
+
+use common::{binary_present, isolate_scip_output};
 use engraph_codegraph::{
     Discovery, DiscoveryFilter, GoOptions, format_markdown, index_workspace, subgraph_for,
 };
 use engraph_core::db::open_pool;
-use std::process::Command;
 use tempfile::tempdir;
-
-fn rust_analyzer_present() -> bool {
-    Command::new("rust-analyzer")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Redirect the SCIP scratch file off the user's real data dir and into OS
-/// temp so the suite doesn't accumulate `index.scip` files there. Set once via
-/// `Once` (see drivers_live.rs for the thread-safety rationale).
-fn isolate_scip_output() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        // SAFETY: `Once` serializes the write before any indexing test runs.
-        unsafe {
-            std::env::set_var(
-                "ENGRAPH_SCIP_OUTPUT_DIR",
-                std::env::temp_dir().join("engraph-test-scip"),
-            );
-        }
-    });
-}
 
 fn write_fixture(root: &std::path::Path) {
     let lib_a = root.join("lib_a");
@@ -84,7 +61,7 @@ path = "src/lib.rs"
 
 #[test]
 fn workspace_links_app_b_caller_to_lib_a_foo() {
-    if !rust_analyzer_present() {
+    if !binary_present("rust-analyzer") {
         eprintln!("skip: rust-analyzer not installed");
         return;
     }

@@ -1,0 +1,8 @@
+[package]
+name = "engraph-fixture"
+version = "0.1.0"
+edition = "2021"
+
+# Not a member of the engraph workspace: indexing this fixture in place must
+# resolve it as its own root.
+[workspace]

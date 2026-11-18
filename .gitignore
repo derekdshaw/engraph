@@ -2,6 +2,8 @@ target/
 *.swp
 .DS_Store
 *.scip
+# ... but the checked-in fixture blobs for the stable-symbol-id tests.
+!crates/engraph-codegraph/testdata/scip/*.scip
 .fastembed_cache/
 .claude/
 .orca/

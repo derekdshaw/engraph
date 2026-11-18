@@ -1445,6 +1445,7 @@ but logs a warning if it ever happens.
 | 15 | `index_state.go_tags`: the `--go-tags` of the run, so `index --if-changed` gives scip-go the same build tags (§8.0.1). NULL for older rows, which had none; no commit is cleared. |
 | 16 | `index_state.go_tests`: whether the run had `--go-tests`, so `index --if-changed` lets the Bazel Go pass index `_test.go` files again (§8.0.1). Older rows default to 0; no commit is cleared. |
 | 17 | `events.path_hash` + `events.read_range` + partial index `idx_events_reads (session_id, path_hash, read_range)`: the SHA-256 of the file path of a `read` event and the part of the file it returned (§5.6), so a report can find reads of a file, or of a range of it, that the session read before. NULL for all other events. |
+| 18 | `index_state.normalization`: the version of the symbol-id normalization rules (`scip_loader::NORMALIZATION_VERSION`) the run's ids were written with. `engraph index` lists the projects whose rows carry another version (NULL, from before the rules, counts as 0) and recommends a full `engraph index <repo>` of each: their ids and newly indexed ids do not connect until then (plan 05, part 2, steps 11 to 13). |
 
 (`SCHEMA_VERSION = 17`; the `MIGRATIONS` array has 17 entries.)
 
@@ -1607,7 +1608,7 @@ crate that does cross-file `who-calls` across Rust/Python/Go/TS/Java.
 | Driver | `detect()` trigger | `command()` |
 |---|---|---|
 | `RustAnalyzer` | `Cargo.toml` | `rust-analyzer scip <repo> --output <out>` (chdir into repo) |
-| `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <out> --project-name <basename> --project-version 0.0.0` |
+| `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <out> --project-name <name> --project-version 0.0.0`, where `<name>` is `[project].name` of `pyproject.toml`, else `[tool.poetry].name`, else the repo's basename (`python_project_name`; plan 05 rule R1, so the ids do not depend on the checkout directory) |
 | `ScipGo` | `go.mod` or `go.work` | `scip-go --module-root <repo> --module-version 0.0.0 --output <out>` (chdir into repo); with a `go.work`, also one `./<dir>/...` package pattern per `use` directory, since scip-go's default `./...` covers only the root module; `GOWORK=off` when the nearest `go.work` above the repo does not list it (`outside_its_go_work`), since Go then builds nothing there; with `--go-tags <a,b>`, `GOFLAGS="$GOFLAGS -tags=a,b"` (`apply_go_tags`; scip-go has no tags flag, but its package loader reads `GOFLAGS`, and the last `-tags` wins) |
 | `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index --output <out>` (chdir into repo); in a pnpm or yarn workspace (`TsWorkspace`), also `--pnpm-workspaces` / `--yarn-workspaces <repo>` |
 | `ScipJava` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java index --output <out>` (chdir into repo) |
@@ -1863,13 +1864,21 @@ extension (`LoadSchemes`). Without that, their `scheme` stayed NULL, which
 `IN_SCOPE` never matches, and the locals outlived the file. None of the
 test projects has such a document.
 
-**ID strategy.** `entities.id` is the raw SCIP moniker
-(`rust-analyzer cargo engraph-core 0.1.0 schema/run_migrations().`).
-Cross-machine moniker normalization has a wire-in hook
-(`scip_loader::normalize_moniker`) which is a pass-through today; see
-§14.7 for the Phase 2.2 stitching that works against
-canonically-published deps without rewrites and the deferred polish
-items (per-indexer rules, symbol-stability test suite).
+**ID strategy.** `entities.id` is the SCIP moniker after
+`scip_loader::normalize_moniker`
+(`rust-analyzer cargo engraph-core 0.0.0 schema/run_migrations().`), so
+an id is the same on each computer and after each commit (plan 05). The
+loader runs one `normalize_index` pass over the parsed index before any
+row is written, so the entity upsert, the placeholder insert, and both
+ends of every relation see the normalized id. The rules, one `match`
+arm per scheme: a `semanticdb` id with the empty package name `.` (a
+Java package symbol) gets the project tag as its version; every other
+`semanticdb` id and every `rust-analyzer` and `scip-typescript` id gets
+the pinned version `0.0.0` (`driver::PINNED_VERSION`), dependencies
+included, so cross-repo references keep connecting. scip-python and
+scip-go ids are already pinned by their drivers. The snapshot test
+suite (`tests/symbol_snapshots.rs`, `testdata/`) locks the resulting
+ids per fixture and indexer version.
 
 ### 14.4 Subgraph query + markdown
 
@@ -2098,12 +2107,9 @@ to `lib_foo` with `src.project != dst.project`, and (3) the rendered
 markdown contains the `repo:lib_a` annotation. Soft-skips when
 rust-analyzer is absent.
 
-**What Phase 2.2 explicitly does NOT do.** The roadmap names two items
-this session leaves for later: per-driver moniker normalization rules
-(only the hook is in place; no rewrites land today) and a
-symbol-stability test suite (a snapshot of 50 known monikers across
-indexer versions). Both pay back only once there's drift in practice —
-add them when telemetry shows a real failure mode.
+**What Phase 2.2 left for later.** Per-driver moniker normalization
+rules and a symbol-stability test suite were deferred here; plan 05
+delivered both (§14.10).
 
 ### 14.8 Phase 2.3 #1/#3 — target-level Bazel via `bazel query`
 
@@ -2234,7 +2240,7 @@ flag is still available to opt in on a single-repo run.
   does not list it, as in the driver. A reference into another module of
   the repo that scip-go cannot tie to the run (no `replace`, and the run
   does not start at the go.work root) gets the version `.`; the loader
-  pins it to `0.0.0` (`pin_go_module_versions`), so it matches the
+  pins it to `0.0.0` (`normalize_moniker`), so it matches the
   definition (verified 2026-11-16, scip-go 0.2.7). `--go-tags` reaches
   each module's run the same way as in the driver (`apply_go_tags`).
   `rebase_documents` prepends the module's repo-relative dir to its
@@ -2376,6 +2382,45 @@ workload trips them):
   is a no-op today.
 
 ---
+
+### 14.10 Stable symbol ids (plan 05)
+
+A symbol id is the same on each computer and after each commit, and a
+test shows when engraph or an indexer changes the ids of known symbols.
+
+**Test suite.** `crates/engraph-codegraph/testdata/fixtures/<lang>/` holds
+one small, dependency-free repo per indexer (Rust, Python, Go, TypeScript,
+Java), each with 50+ symbols across three modules; `testdata/snapshots/
+<lang>.json` records every defined non-local symbol (id, name, file path,
+line range, `CALLS` callers and callees), the indexer version, and a hash
+of the fixture sources; `testdata/scip/<lang>.scip` keeps the indexer's
+blob with the machine paths normalized away and its set-like lists sorted
+(`tests/common/mod.rs`). `tests/symbol_snapshots.rs` compares a live index
+run of each fixture with its snapshot (skipping a fixture whose indexer,
+build tool, or toolchain is absent, and printing a per-symbol diff with
+both indexer versions on a mismatch), compares the prebuilt blob loaded
+through the loader alone with the snapshot in every CI job, and regenerates
+all of it with `ENGRAPH_UPDATE_SNAPSHOTS=1`. The `codegraph-live` CI job
+pins the indexer versions the snapshots were made with. `testdata/` is a
+name discovery prunes, so a dogfooded `engraph index .` never descends into
+the fixture manifests.
+
+**Rules.** `driver::python_project_name` gives scip-python `--project-name`
+from `pyproject.toml` (`[project].name`, else `[tool.poetry].name`), not
+the checkout directory's name. `scip_loader::normalize_moniker` applies, in
+one pass over the parsed index before any row is written: the project tag
+as version for a `semanticdb` id with the empty package name (Java package
+symbols, otherwise one row for every repo with that package name), and the
+pinned version `0.0.0` for every other `semanticdb`, `rust-analyzer`, and
+`scip-typescript` id, dependencies included, so a release bump, the
+machine's JDK major, or a differing dependency version never splits a
+reference from its definition. scip-go and scip-python are pinned by their
+drivers. A symbol defined in several documents (a Go package) records the
+location of its lexicographically smallest document, not the last one the
+indexer happened to write. `index_state.normalization` records the rule
+version of each run, and `engraph index` names the projects indexed under
+older rules and recommends a full `engraph index <repo>` of each (§12.1
+v18).
 
 ## 15. Forward pointers
 

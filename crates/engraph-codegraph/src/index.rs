@@ -176,8 +176,8 @@ pub fn record_indexed_commit(
         // seconds — too coarse for a file created moments after the index.
         conn.execute(
             "INSERT INTO index_state (project, subtree, commit_sha, source, lang, bazel_symbols, \
-             go_tags, go_tests, indexed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, strftime('%Y-%m-%d %H:%M:%f','now'))",
+             go_tags, go_tests, normalization, indexed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, strftime('%Y-%m-%d %H:%M:%f','now'))",
             rusqlite::params![
                 project,
                 subtree,
@@ -186,11 +186,32 @@ pub fn record_indexed_commit(
                 mode.lang,
                 mode.bazel_symbols,
                 mode.go_tags,
-                mode.go_tests
+                mode.go_tests,
+                crate::scip_loader::NORMALIZATION_VERSION
             ],
         )?;
     }
     Ok(())
+}
+
+/// The projects with an `index_state` row written under other symbol-id
+/// normalization rules than the current `NORMALIZATION_VERSION` — a row from
+/// before the rules (NULL) counts as version 0 — each with the oldest version
+/// among its rows, by project (plan 05, part 2, step 12). Their ids and the
+/// ids of a current run do not connect, so `engraph index` recommends a full
+/// index run of each (step 13); a full run replaces all of a project's rows.
+pub fn stale_normalization(conn: &PooledConn) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT project, MIN(COALESCE(normalization, 0)) FROM index_state
+         WHERE normalization IS NULL OR normalization != ?1
+         GROUP BY project ORDER BY project",
+    )?;
+    let rows = stmt
+        .query_map([crate::scip_loader::NORMALIZATION_VERSION], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 /// `(subtree, commit)` for each part of `project` with a recorded index commit.
@@ -579,7 +600,7 @@ fn parse_manifest_line(
 /// `~/.local/share/engraph/scip/` (alongside the DB); `ENGRAPH_SCIP_OUTPUT_DIR`
 /// overrides the base. Either way a per-repo `<hash>` subdir is appended so
 /// concurrent indexes of different repos don't clobber each other's file.
-fn scip_output_dir(repo: &Path) -> PathBuf {
+pub fn scip_output_dir(repo: &Path) -> PathBuf {
     let base = std::env::var("ENGRAPH_SCIP_OUTPUT_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -1035,15 +1056,16 @@ fn is_member(lang: &str, parent: &Path, dir: &Path, installed: &dyn Fn(&str) -> 
     }
 }
 
-/// Whether the `Cargo.toml` in `dir` defines a workspace: a `[workspace]` or
-/// `[workspace.*]` table header. A line scan, not a TOML parse.
+/// Whether the `Cargo.toml` in `dir` defines a workspace: the manifest has a
+/// top-level `workspace` table (`[workspace]`, `[workspace.*]`, or the dotted
+/// form). A manifest that does not parse defines none — cargo would refuse it
+/// too. `workspace = "…"` inside `[package]` points at a root elsewhere and
+/// does not count.
 fn cargo_has_workspace(dir: &Path) -> bool {
-    std::fs::read_to_string(dir.join("Cargo.toml")).is_ok_and(|toml| {
-        toml.lines().any(|l| {
-            let l = l.trim_start();
-            l.starts_with("[workspace]") || l.starts_with("[workspace.")
-        })
-    })
+    std::fs::read_to_string(dir.join("Cargo.toml"))
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .is_some_and(|manifest| manifest.contains_key("workspace"))
 }
 
 /// Whether `parent`'s workspace lists `dir`: a workspace whose packages
@@ -1366,6 +1388,50 @@ mod tests {
     }
 
     #[test]
+    fn record_indexed_commit_writes_the_normalization_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = engraph_core::db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        record_indexed_commit(&conn, "/p", "", Some("abc"), &IndexMode::default()).unwrap();
+        let v: Option<i64> = conn
+            .query_row(
+                "SELECT normalization FROM index_state WHERE project = '/p'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, Some(crate::scip_loader::NORMALIZATION_VERSION));
+    }
+
+    #[test]
+    fn stale_normalization_lists_projects_indexed_under_other_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = engraph_core::db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        // Current rules: not stale. Pre-rules (NULL) and an older version:
+        // stale, once per project with the oldest version, by project.
+        record_indexed_commit(&conn, "/fresh", "", Some("a"), &IndexMode::default()).unwrap();
+        conn.execute_batch(
+            "INSERT INTO index_state (project, subtree, commit_sha, normalization) VALUES
+                ('/old', '', 'b', NULL),
+                ('/old', 'svc', 'c', 0),
+                ('/half', '', 'd', NULL);",
+        )
+        .unwrap();
+        record_indexed_commit(&conn, "/half", "svc", Some("e"), &IndexMode::default()).unwrap();
+        assert_eq!(
+            stale_normalization(&conn).unwrap(),
+            vec![("/half".to_string(), 0), ("/old".to_string(), 0)]
+        );
+        // A full run of a stale project clears it.
+        record_indexed_commit(&conn, "/old", "", Some("f"), &IndexMode::default()).unwrap();
+        assert_eq!(
+            stale_normalization(&conn).unwrap(),
+            vec![("/half".to_string(), 0)]
+        );
+    }
+
+    #[test]
     fn plan_repo_bazel_wins_over_lang_markers() {
         let dir = tempfile::tempdir().unwrap();
         touch(dir.path(), "MODULE.bazel");
@@ -1618,6 +1684,24 @@ mod tests {
         let rec = recursive_roots(root.path());
         assert_eq!(rec.len(), 2, "{rec:?}");
         assert!(rec.contains(&r) && rec.contains(&go), "{rec:?}");
+    }
+
+    #[test]
+    fn cargo_workspace_detection_parses_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let has = |text: &str| {
+            std::fs::write(dir.path().join("Cargo.toml"), text).unwrap();
+            cargo_has_workspace(dir.path())
+        };
+        assert!(has("[workspace]\nmembers = [\"a\"]\n"));
+        assert!(has("[workspace.dependencies]\nserde = \"1\"\n"));
+        // The dotted form also defines the workspace table.
+        assert!(has("workspace.members = [\"a\"]\n"));
+        assert!(!has("[package]\nname = \"x\"\n"));
+        // `workspace = \"..\"` inside [package] points at a root elsewhere;
+        // this manifest defines none.
+        assert!(!has("[package]\nname = \"x\"\nworkspace = \"..\"\n"));
+        assert!(!has("not toml ["));
     }
 
     #[test]

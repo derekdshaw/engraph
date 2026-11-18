@@ -7,24 +7,12 @@
 //!
 //! Soft-skips when neither `bazel` nor `bazelisk` is on PATH.
 
+mod common;
+
+use common::bazel_present;
 use engraph_codegraph::{discover_workspace_repos, index_repo};
 use engraph_core::db::open_pool;
-use std::process::Command;
 use tempfile::tempdir;
-
-fn bazel_present() -> bool {
-    for bin in &["bazel", "bazelisk"] {
-        if Command::new(bin)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            return true;
-        }
-    }
-    false
-}
 
 fn write_fixture(root: &std::path::Path) {
     std::fs::create_dir_all(root.join("foo")).unwrap();

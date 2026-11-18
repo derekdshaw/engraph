@@ -69,11 +69,11 @@ not the sequence of the work. Some plans must wait for other plans:
    at the same time.
 2. Do [plan 02](completed/02-deeper-workspace-discovery-plan.md) (deeper workspace discovery) before [plan 03](completed/03-all-go-modules-plan.md) (all Go modules).
    [Plan 03](completed/03-all-go-modules-plan.md) uses the member rules of [plan 02](completed/02-deeper-workspace-discovery-plan.md).
-3. In [plan 05](05-stable-symbol-ids-plan.md) (stable symbol ids), do part 1 (test suite) before part 2
+3. In [plan 05](completed/05-stable-symbol-ids-plan.md) (stable symbol ids), do part 1 (test suite) before part 2
    (normalization). Part 2 changes symbol ids. The test suite shows if a change
    to the ids causes problems. Step 1 of part 2 is a bug fix. You can do it
    before part 1.
-4. Do step 1 of part 2 of [plan 05](05-stable-symbol-ids-plan.md) (stable Go
+4. Do step 1 of part 2 of [plan 05](completed/05-stable-symbol-ids-plan.md) (stable Go
    symbol ids) before [plan 10](10-worktree-overlays-plan.md) (separate code
    graphs for worktrees). Plan 10 needs symbol ids that do not change between
    commits.

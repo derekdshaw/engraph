@@ -39,12 +39,6 @@ Telemetry shows the tokens that file reads use. It also shows the tokens of read
 
 Plan: [`docs/plans/04-file-read-measurement-plan.md`](plans/04-file-read-measurement-plan.md)
 
-## 5. Stable symbol ids
-
-A symbol id is the same on each computer and after each commit. Two different symbols do not have the same id. A test shows when a change to engraph or to an indexer changes the ids or the relations of known symbols.
-
-Plan: [`docs/plans/05-stable-symbol-ids-plan.md`](plans/05-stable-symbol-ids-plan.md)
-
 ## 6. Bazel symbols for TypeScript, JavaScript, Python, and Rust
 
 The symbol-level Bazel pass (`--bazel-symbols`) indexes TypeScript, JavaScript, Python, and Rust code. Today it does not consider Rust at all, counts no `js_library` target, and fails on TypeScript and Python instead of reporting what a configured command would index.

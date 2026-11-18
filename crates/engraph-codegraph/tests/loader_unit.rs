@@ -766,7 +766,7 @@ fn a_load_of_another_indexer_keeps_the_locals() {
     load(&conn, "/proj/demo", &index_of(vec![pkg_doc(), a])).unwrap();
     assert_eq!(local_rows(&conn), (1, 1));
 
-    let other = "other-indexer npm demo 1.0.0 src/`x.ts`/g().";
+    let other = "other-indexer npm demo 0.0.0 src/`x.ts`/g().";
     let mut doc = Document::new();
     doc.relative_path = "src/x.ts".to_string();
     doc.symbols = vec![
@@ -831,7 +831,7 @@ fn a_local_only_document_takes_the_scheme_of_its_extension_in_a_merged_load() {
     let dir = tempdir().unwrap();
     let pool = open_pool(&dir.path().join("t.db")).unwrap();
     let conn = pool.get().unwrap();
-    let other = "other-indexer npm demo 1.0.0 src/`x.ts`/g().";
+    let other = "other-indexer npm demo 0.0.0 src/`x.ts`/g().";
     let mut x = Document::new();
     x.relative_path = "src/x.ts".to_string();
     x.symbols = vec![sym(other, "g", SymKind::Function)];
@@ -953,6 +953,152 @@ fn an_anchor_defined_in_several_documents_records_no_line() {
     assert_eq!(lines, vec![None, None]);
 }
 
+#[test]
+fn the_loader_normalizes_every_id_it_writes() {
+    // Steps 9 and 10: rule R3 reaches the entity row of a definition, the
+    // placeholder row of a reference, and both ends of the relation — no id
+    // with a manifest version reaches the database.
+    let caller = "rust-analyzer cargo demo 0.3.0 app/main().";
+    let callee = "rust-analyzer cargo dep 1.2.3 lib/helper().";
+    let mut doc = Document::new();
+    doc.relative_path = "src/main.rs".to_string();
+    doc.symbols = vec![sym(caller, "main", SymKind::Function)];
+    doc.occurrences = vec![
+        occ(caller, vec![0, 0, 0, 4], SymbolRole::Definition as i32),
+        occ(callee, vec![1, 4, 1, 10], 0),
+    ];
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/demo", &index_of(vec![doc])).unwrap();
+
+    let ids: Vec<String> = conn
+        .prepare("SELECT id FROM entities ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "rust-analyzer cargo demo 0.0.0 app/main().",
+            "rust-analyzer cargo dep 0.0.0 lib/helper().",
+        ]
+    );
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM relations WHERE kind = 'CALLS'
+               AND src_entity = 'rust-analyzer cargo demo 0.0.0 app/main().'
+               AND dst_entity = 'rust-analyzer cargo dep 0.0.0 lib/helper().'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn two_java_repos_with_the_same_packages_get_different_package_rows() {
+    // The plan's third test, through rule R2: the package symbol of two repos
+    // with the same package names is two rows, versioned with each project's
+    // tag; the classes keep their Maven coordinates (pinned by R3).
+    let package = "semanticdb maven . . fixture/models/";
+    let class_of =
+        |artifact: &str| format!("semanticdb maven maven/g/{artifact} 1.0 fixture/models/Book#");
+    let doc_of = |artifact: &str| {
+        let class = class_of(artifact);
+        let mut doc = Document::new();
+        doc.relative_path = "src/main/java/fixture/models/Book.java".to_string();
+        doc.symbols = vec![
+            sym(package, "models", SymKind::Package),
+            sym(&class, "Book", SymKind::Class),
+        ];
+        doc.occurrences = vec![
+            occ(package, vec![0, 8, 0, 22], SymbolRole::Definition as i32),
+            occ(&class, vec![2, 13, 2, 17], SymbolRole::Definition as i32),
+        ];
+        doc
+    };
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/repo/a", &index_of(vec![doc_of("a")])).unwrap();
+    load(&conn, "/repo/b", &index_of(vec![doc_of("b")])).unwrap();
+
+    let package_rows: Vec<String> = conn
+        .prepare(
+            "SELECT id FROM entities WHERE id LIKE 'semanticdb maven . %fixture/models/' ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        package_rows.len(),
+        2,
+        "one package row per repo: {package_rows:?}"
+    );
+    assert_ne!(package_rows[0], package_rows[1]);
+    for id in &package_rows {
+        assert!(!id.contains(" . . "), "the empty version got a tag: {id}");
+    }
+    // The classes stay under their own coordinates, one row each.
+    for artifact in ["a", "b"] {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entities WHERE id = ?1",
+                [format!(
+                    "semanticdb maven maven/g/{artifact} 0.0.0 fixture/models/Book#"
+                )],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "class row of {artifact}");
+    }
+}
+
+#[test]
+fn a_symbol_defined_in_several_documents_gets_one_location() {
+    // Whatever order the indexer wrote the documents in, the entity row of a
+    // multi-document symbol (a Go package) records the lexicographically
+    // smallest defining document and the definition range there. Without one
+    // rule, the last document in the SCIP blob would win, and that order is
+    // the indexer's to change.
+    let pkg = "scip-go gomod demo v1 `demo`/";
+    let doc = |path: &str| {
+        let def_line = if path == "a.go" { 2 } else { 0 };
+        let mut d = Document::new();
+        d.relative_path = path.to_string();
+        d.symbols = vec![sym(pkg, "demo", SymKind::Package)];
+        d.occurrences = vec![occ(
+            pkg,
+            vec![def_line, 8, def_line, 12],
+            SymbolRole::Definition as i32,
+        )];
+        d
+    };
+    for order in [["a.go", "b.go"], ["b.go", "a.go"]] {
+        let dir = tempdir().unwrap();
+        let pool = open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        load(&conn, "/proj/demo", &index_of(order.map(doc).into())).unwrap();
+        let (path, lines): (String, String) = conn
+            .query_row(
+                "SELECT file_path, line_range FROM entities WHERE id = ?1",
+                [pkg],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (path.as_str(), lines.as_str()),
+            ("a.go", "3:3"),
+            "document order {order:?}"
+        );
+    }
+}
+
 // A definition's `enclosing_range` is the whole function or class. The
 // document models (0-based lines):
 //
@@ -1041,9 +1187,9 @@ fn module_level_typescript_code_goes_to_its_file() {
     // scip-typescript gives a module the kind File, with a range over the
     // whole file. A call after a function's range (a `describe` callback)
     // goes to the file, not to the function above it.
-    let module = "scip-typescript npm demo 1.0.0 src/`a.test.ts`/";
-    let make = "scip-typescript npm demo 1.0.0 src/`a.test.ts`/makeContext().";
-    let target = "scip-typescript npm demo 1.0.0 src/`a.ts`/handle().";
+    let module = "scip-typescript npm demo 0.0.0 src/`a.test.ts`/";
+    let make = "scip-typescript npm demo 0.0.0 src/`a.test.ts`/makeContext().";
+    let target = "scip-typescript npm demo 0.0.0 src/`a.ts`/handle().";
     let mut doc = Document::new();
     doc.relative_path = "src/a.test.ts".to_string();
     doc.symbols = vec![
@@ -1065,4 +1211,68 @@ fn module_level_typescript_code_goes_to_its_file() {
         callers_by_line(&conn, target),
         vec![(module.to_string(), target.to_string())]
     );
+}
+
+#[test]
+fn a_definition_without_symbol_information_can_anchor_a_relation() {
+    // SCIP asks a document to list the symbols it defines, but a blob from
+    // another tool may not. The definition still anchors the call after it,
+    // so the call's source needs a row, or the relation fails the foreign key.
+    let f = "scip-test demo demo 0.0.0 lib/f().";
+    let g = "scip-test demo demo 0.0.0 lib/g().";
+    let mut doc = Document::new();
+    doc.relative_path = "src/lib.rs".to_string();
+    doc.symbols = vec![sym(g, "g", SymKind::Function)];
+    doc.occurrences = vec![
+        occ(f, vec![0, 3, 4], SymbolRole::Definition as i32),
+        occ(g, vec![1, 4, 5], 0),
+        occ(g, vec![5, 3, 4], SymbolRole::Definition as i32),
+    ];
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/demo", &index_of(vec![doc])).unwrap();
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM relations WHERE src_entity = ?1 AND dst_entity = ?2",
+            [f, g],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn a_package_whose_information_comes_in_a_later_document_can_anchor_a_relation() {
+    // A Go package is defined in each of its files, but scip-go lists its
+    // SymbolInformation in one. When a file loaded before that one has a
+    // top-level reference, the package anchors it before its row is written.
+    let pkg = "scip-go gomod demo 0.0.0 `demo`/";
+    let upper = "scip-go gomod std 0.0.0 `strings`/ToUpper().";
+    let mut first = Document::new();
+    first.relative_path = "a.go".to_string();
+    first.occurrences = vec![
+        occ(pkg, vec![0, 8, 12], SymbolRole::Definition as i32),
+        occ(upper, vec![4, 20, 27], 0),
+    ];
+    let mut second = Document::new();
+    second.relative_path = "b.go".to_string();
+    second.symbols = vec![sym(pkg, "demo", SymKind::Package)];
+    second.occurrences = vec![occ(pkg, vec![0, 8, 12], SymbolRole::Definition as i32)];
+    let dir = tempdir().unwrap();
+    let pool = open_pool(&dir.path().join("t.db")).unwrap();
+    let conn = pool.get().unwrap();
+    load(&conn, "/proj/demo", &index_of(vec![first, second])).unwrap();
+    let (path, calls): (String, i64) = conn
+        .query_row(
+            "SELECT e.file_path, (SELECT COUNT(*) FROM relations
+                                  WHERE src_entity = e.id AND dst_entity = ?2)
+             FROM entities e WHERE e.id = ?1",
+            [pkg, upper],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    // The package row is the real one: the later document's information
+    // still fills it in.
+    assert_eq!((path.as_str(), calls), ("a.go", 1));
 }

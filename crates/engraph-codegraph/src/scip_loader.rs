@@ -1,10 +1,11 @@
 //! Decode a SCIP protobuf blob and load its symbols + occurrences into the
 //! existing `entities` / `relations` tables.
 //!
-//! `entities.id` is the raw SCIP moniker (e.g.
-//! `rust-analyzer cargo engraph-core 0.1.0 schema/run_migrations().`).
-//! Cross-machine normalization of monikers is a Phase 2.2 problem; here we
-//! trust whatever the indexer emits. Re-indexing is idempotent: we replace the
+//! `entities.id` is the SCIP moniker after [`normalize_moniker`] (e.g.
+//! `rust-analyzer cargo engraph-core 0.0.0 schema/run_migrations().`): every
+//! id passes through the plan 05 rules before it reaches a row, so ids are
+//! the same on each computer and after each commit (`normalize_index`).
+//! Re-indexing is idempotent: we replace the
 //! project's SCIP-derived relations, upsert current symbols, and prune stale
 //! unreferenced symbol rows absent from the new SCIP blob, all in one
 //! transaction. Below ~10M edges this is sufficient (the staging-tables-then-swap
@@ -19,6 +20,7 @@ use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
 use protobuf::{EnumOrUnknown, Message};
 use scip::types::{Document, Index, SymbolRole, symbol_information::Kind as SymKind};
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use uuid::Uuid;
 
@@ -72,16 +74,90 @@ fn scheme(symbol: &str) -> Option<&str> {
         .filter(|s| *s != "local")
 }
 
-/// Cross-machine moniker normalization. SCIP monikers are stable
-/// cross-machine for canonically-published deps (Cargo, npm, PyPI, Go
-/// modules with proper module paths), but some indexers leak machine-local
-/// noise. Today this is a pass-through; Phase 2.2 work will plug in
-/// per-prefix rewrite rules here (e.g. strip absolute paths from pre-0.7
-/// scip-go monikers). Call this everywhere a moniker enters the DB so the
-/// hook covers all entry points.
-#[inline]
-pub fn normalize_moniker(s: &str) -> &str {
-    s
+/// The version of the rules in [`normalize_moniker`]: `index_state` records
+/// it with each run (`index::record_indexed_commit`), and `engraph index`
+/// recommends a full index run of a project whose rows carry another version
+/// (`index::stale_normalization`), since the ids of the two runs do not
+/// connect. Bump it whenever a rule changes the ids it produces: the rules
+/// here, and the scip-python project name (`driver::python_project_name`).
+///
+/// 1: R2 (project tag for `semanticdb` ids with the empty package name) and
+///    R3 (the pinned version for `rust-analyzer`, `scip-typescript`, and
+///    `semanticdb` ids), 2026-11-17.
+pub const NORMALIZATION_VERSION: i64 = 1;
+
+/// The id normalization rules of plan 05, part 2 (step 5), one `match` arm
+/// per scheme, so a symbol id is the same on each computer and after each
+/// commit. `project` is the project key of the load, for R2.
+///
+/// - R2: a `semanticdb` id with the empty package name `.` (scip-java writes
+///   package symbols so: `semanticdb maven . . fixture/models/`) gets the
+///   project tag as its version, so the package rows of two repos with the
+///   same package names are two rows.
+/// - R3: every other `semanticdb` id, and every `rust-analyzer` and
+///   `scip-typescript` id, gets `PINNED_VERSION`: the manifest version a
+///   release bumps, the JDK major of the computer, and the standard-library
+///   URL all go, dependencies included, so a reference in one repo and the
+///   definition in another stay one id.
+/// - A `scip-go gomod` id with the version `.` gets `driver::SCIP_GO_VERSION`.
+///   scip-go writes `.` for a module of the same repo that it cannot tie to
+///   the indexed one (no `replace`, and the run does not start at the go.work
+///   root), but the module's own run defines its symbols with the pinned
+///   version; without the pin, the reference and the definition are two ids
+///   and the relation ends at a placeholder. This rule predates the
+///   versioned ones, so rows from before them already have it; a change to
+///   it bumps `NORMALIZATION_VERSION` like any other rule.
+/// - Other scip-go ids and all scip-python ids are already pinned by their
+///   drivers and keep their dependency versions (a published Go module keeps
+///   its real version); local ids and ids with fewer than four fields pass
+///   through.
+///
+/// Call this everywhere a moniker enters the database so the rules cover
+/// every entry point (steps 9 and 10).
+pub fn normalize_moniker<'a>(s: &'a str, project: &str) -> Cow<'a, str> {
+    let Some([scheme, manager, name, version, descriptors]) = id_fields(s) else {
+        return Cow::Borrowed(s);
+    };
+    let pinned = match scheme {
+        "semanticdb" if name == "." => project_tag(project),
+        "semanticdb" | "rust-analyzer" | "scip-typescript" => {
+            crate::driver::PINNED_VERSION.to_string()
+        }
+        "scip-go" if manager == "gomod" && version == "." => {
+            crate::driver::SCIP_GO_VERSION.to_string()
+        }
+        _ => return Cow::Borrowed(s),
+    };
+    if version == pinned {
+        return Cow::Borrowed(s);
+    }
+    Cow::Owned(format!("{scheme} {manager} {name} {pinned} {descriptors}"))
+}
+
+/// The five parts of a global SCIP id — scheme, package manager, package
+/// name, version, and the descriptors — as raw slices: two spaces inside one
+/// of the four fields are one escaped space and stay as they are, so the
+/// parts join back into a valid id. `None` for an id with fewer than four
+/// fields before the descriptors (`local 5`).
+fn id_fields(s: &str) -> Option<[&str; 5]> {
+    let bytes = s.as_bytes();
+    let mut fields: Vec<&str> = Vec::with_capacity(4);
+    let (mut start, mut i) = (0usize, 0usize);
+    while i < bytes.len() && fields.len() < 4 {
+        if bytes[i] == b' ' {
+            if bytes.get(i + 1) == Some(&b' ') {
+                i += 2;
+                continue;
+            }
+            fields.push(&s[start..i]);
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if fields.len() < 4 {
+        return None;
+    }
+    Some([fields[0], fields[1], fields[2], fields[3], &s[start..]])
 }
 
 /// A SCIP local symbol (`local 0`) names a symbol only inside its document,
@@ -112,41 +188,84 @@ fn scope_local_symbols(index: &mut Index, project: &str) {
     }
 }
 
-/// Give the version `.` of each scip-go module id the pinned version
-/// (`driver::SCIP_GO_VERSION`). scip-go writes `.` for a module of the same
-/// repo that it cannot tie to the indexed one (no `replace`, and the run does
-/// not start at the go.work root), but the module's own run defines its
-/// symbols with the pinned version. Without the pin, the reference and the
-/// definition are two ids, and the relation ends at a placeholder. A
-/// published module has a real version, which stays.
-pub(crate) fn pin_go_module_versions(index: &mut Index) {
-    fn pin(symbol: &mut String) {
-        let Some(rest) = symbol.strip_prefix("scip-go gomod ") else {
-            return;
-        };
-        let Some((module, after)) = rest.split_once(' ') else {
-            return;
-        };
-        if let Some(descriptors) = after.strip_prefix(". ") {
-            *symbol = format!(
-                "scip-go gomod {module} {} {descriptors}",
-                crate::driver::SCIP_GO_VERSION
-            );
+/// Every id the loader writes passes through [`normalize_moniker`] first
+/// (plan 05, part 2, steps 9 and 10): one pass over the index, so the entity
+/// upsert, the placeholder insert, and both ends of every relation all see
+/// the normalized id, and no per-row write can miss the rules.
+pub(crate) fn normalize_index(index: &mut Index, project: &str) {
+    visit_symbols(index, |symbol| {
+        if let Cow::Owned(normalized) = normalize_moniker(symbol, project) {
+            *symbol = normalized;
+        }
+    });
+}
+
+/// The packages `index` defines symbols in that another project already
+/// defines symbols in, each as `(package, those projects)`, the package being
+/// the four fields before the descriptors. Two unrelated projects with one
+/// package name write the same ids (the version is pinned), so the last load
+/// takes over the rows they share — their `project` and `file_path`. Read it
+/// after `normalize_index` and before the load writes anything.
+fn shared_packages(
+    conn: &PooledConn,
+    index: &Index,
+    project: &str,
+) -> Result<Vec<(String, Vec<String>)>> {
+    let mut packages = BTreeSet::new();
+    for doc in &index.documents {
+        for occ in &doc.occurrences {
+            if occ.symbol.starts_with("local ")
+                || !role_set(occ.symbol_roles, SymbolRole::Definition)
+            {
+                continue;
+            }
+            if let Some([scheme, manager, name, version, _]) = id_fields(&occ.symbol) {
+                packages.insert(format!("{scheme} {manager} {name} {version} "));
+            }
         }
     }
-    let pin_info = |info: &mut scip::types::SymbolInformation| {
-        pin(&mut info.symbol);
+    // A placeholder (no file_path) is a reference, not a definition.
+    let mut stmt = conn.prepare_cached(
+        "SELECT DISTINCT project FROM entities
+         WHERE id >= ?1 AND id < ?2 AND project != ?3 AND file_path IS NOT NULL
+         ORDER BY project",
+    )?;
+    let mut shared = Vec::new();
+    for prefix in packages {
+        // Every id that starts with `prefix`, as a range on the primary key:
+        // `!` is the byte after the space that ends the prefix.
+        let end = format!("{}!", &prefix[..prefix.len() - 1]);
+        let others = stmt
+            .query_map(rusqlite::params![prefix, end, project], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        if !others.is_empty() {
+            shared.push((prefix.trim_end().to_string(), others));
+        }
+    }
+    Ok(shared)
+}
+
+/// Apply `f` to every symbol id in the index: each document's symbols and
+/// their relationships, each occurrence, and the external symbols and their
+/// relationships.
+fn visit_symbols(index: &mut Index, mut f: impl FnMut(&mut String)) {
+    let info = |info: &mut scip::types::SymbolInformation, f: &mut dyn FnMut(&mut String)| {
+        f(&mut info.symbol);
         for rel in &mut info.relationships {
-            pin(&mut rel.symbol);
+            f(&mut rel.symbol);
         }
     };
     for doc in &mut index.documents {
-        doc.symbols.iter_mut().for_each(pin_info);
+        for i in &mut doc.symbols {
+            info(i, &mut f);
+        }
         for occ in &mut doc.occurrences {
-            pin(&mut occ.symbol);
+            f(&mut occ.symbol);
         }
     }
-    index.external_symbols.iter_mut().for_each(pin_info);
+    for i in &mut index.external_symbols {
+        info(i, &mut f);
+    }
 }
 
 /// The first 16 hex digits of the SHA-256 of a project key: a short, fixed
@@ -179,7 +298,16 @@ pub fn load_with_options(
 ) -> Result<LoadStats> {
     let mut index = Index::parse_from_bytes(scip_bytes).context("decoding SCIP protobuf")?;
     scope_local_symbols(&mut index, project);
-    pin_go_module_versions(&mut index);
+    normalize_index(&mut index, project);
+    for (package, others) in shared_packages(conn, &index, project)? {
+        tracing::warn!(
+            project,
+            package = %package,
+            others = %others.join(", "),
+            "another project defines symbols in this package too; their symbol ids are \
+             the same, so this load takes over the rows they share",
+        );
+    }
 
     // Pass 1: gather every symbol's Kind across all documents (and the
     // external_symbols list). The CALLS vs REFERENCES distinction is based on
@@ -203,7 +331,7 @@ pub fn load_with_options(
                 .or_insert_with(|| enum_or_unspecified(&s.kind));
         }
     }
-    let multi_document = defined_in_several_documents(&index);
+    let multi_document = MultiDocument::of(&index);
     let schemes = LoadSchemes::of(&index, &current_symbols);
 
     // One transaction for the whole load: atomic swap from the reader's POV.
@@ -329,7 +457,7 @@ fn load_document(
     project: &str,
     doc: &Document,
     sym_kind: &HashMap<String, SymKind>,
-    multi_document: &HashSet<String>,
+    multi_document: &MultiDocument,
     schemes: &LoadSchemes,
     stats: &mut LoadStats,
 ) -> Result<()> {
@@ -389,12 +517,20 @@ fn load_document(
         } else {
             names.name
         };
-        let (file_path, line_range) = match def_loc.get(&s.symbol) {
-            Some((start, end)) => (
-                Some(doc.relative_path.clone()),
+        let (file_path, line_range) = match multi_document.location(&s.symbol) {
+            // A multi-document symbol gets its one canonical location,
+            // whichever of its documents this is.
+            Some((path, (start, end))) => (
+                Some(path.clone()),
                 Some(format!("{}:{}", start + 1, end + 1)),
             ),
-            None => (Some(doc.relative_path.clone()), None),
+            None => match def_loc.get(&s.symbol) {
+                Some((start, end)) => (
+                    Some(doc.relative_path.clone()),
+                    Some(format!("{}:{}", start + 1, end + 1)),
+                ),
+                None => (Some(doc.relative_path.clone()), None),
+            },
         };
         let signature = signature_text(s);
         entity_insert.execute(rusqlite::params![
@@ -477,6 +613,12 @@ fn load_document(
         })
         .collect();
     def_anchors.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    // An anchor comes from a definition occurrence, but the rows above come
+    // from `doc.symbols`. A definition this document does not list (no
+    // SymbolInformation anywhere, or, for a Go package, in a document loaded
+    // later) needs a row before it can be a relation's source.
+    let listed: HashSet<&str> = doc.symbols.iter().map(|s| s.symbol.as_str()).collect();
+    let mut unlisted_with_row: HashSet<String> = HashSet::new();
 
     for occ in &doc.occurrences {
         if occ.symbol.is_empty() {
@@ -533,6 +675,10 @@ fn load_document(
         // anchor's one `file_path`. A Go package is defined in each of its
         // files, so its line would point into the wrong file.
         let line = (!multi_document.contains(&src_sym)).then_some(start_line + 1);
+        if !listed.contains(src_sym.as_str()) && !unlisted_with_row.contains(&src_sym) {
+            ensure_placeholder_entity(conn, &src_sym, project, doc_scheme)?;
+            unlisted_with_row.insert(src_sym.clone());
+        }
         insert_relation(conn, &src_sym, &occ.symbol, rel_kind, provenance, line)?;
         stats.relations_inserted += 1;
     }
@@ -540,22 +686,68 @@ fn load_document(
     Ok(())
 }
 
-/// Symbols with a definition in more than one document (a Go package, which
-/// each of its files defines).
-fn defined_in_several_documents(index: &Index) -> HashSet<String> {
-    let mut first_doc: HashMap<&str, usize> = HashMap::new();
-    let mut several = HashSet::new();
-    for (i, doc) in index.documents.iter().enumerate() {
-        for occ in &doc.occurrences {
-            if occ.symbol.is_empty() || !role_set(occ.symbol_roles, SymbolRole::Definition) {
-                continue;
-            }
-            if *first_doc.entry(occ.symbol.as_str()).or_insert(i) != i {
-                several.insert(occ.symbol.clone());
+/// The symbols with a definition in more than one document (a Go package,
+/// which each of its files defines), each with one canonical location: the
+/// lexicographically smallest defining document path, and the smallest
+/// definition range there. The entity row gets this location, and a relation
+/// from such a source gets no line — otherwise both would follow the order of
+/// the documents in the SCIP blob, which is the indexer's to change, so the
+/// same repo could index differently on two machines.
+struct MultiDocument {
+    location: HashMap<String, (String, (i32, i32))>,
+}
+
+impl MultiDocument {
+    fn of(index: &Index) -> Self {
+        // What one pass over the definitions knows of a symbol, borrowed from
+        // the index; only the multi-document symbols are copied out.
+        struct Def<'a> {
+            first_doc: usize,
+            several: bool,
+            best: (&'a str, (i32, i32)),
+        }
+        let mut defs: HashMap<&str, Def> = HashMap::new();
+        for (i, doc) in index.documents.iter().enumerate() {
+            for occ in &doc.occurrences {
+                if occ.symbol.is_empty() || !role_set(occ.symbol_roles, SymbolRole::Definition) {
+                    continue;
+                }
+                let here = (doc.relative_path.as_str(), decode_range(&occ.range));
+                defs.entry(occ.symbol.as_str())
+                    .and_modify(|d| {
+                        d.several |= d.first_doc != i;
+                        d.best = d.best.min(here);
+                    })
+                    .or_insert(Def {
+                        first_doc: i,
+                        several: false,
+                        best: here,
+                    });
             }
         }
+        let location = defs
+            .into_iter()
+            .filter(|(_, d)| d.several)
+            .map(
+                |(
+                    symbol,
+                    Def {
+                        best: (path, range),
+                        ..
+                    },
+                )| { (symbol.to_string(), (path.to_string(), range)) },
+            )
+            .collect();
+        Self { location }
     }
-    several
+
+    fn contains(&self, symbol: &str) -> bool {
+        self.location.contains_key(symbol)
+    }
+
+    fn location(&self, symbol: &str) -> Option<&(String, (i32, i32))> {
+        self.location.get(symbol)
+    }
 }
 
 fn nearest_enclosing(
@@ -1001,22 +1193,9 @@ fn fallback_display_name_textual(moniker: &str) -> String {
 /// spaces together inside a field are one literal space. An id with fewer
 /// fields (`local 5`) gives its last field.
 fn after_package_fields(moniker: &str) -> &str {
-    let bytes = moniker.as_bytes();
-    let (mut fields, mut i) = (0usize, 0usize);
-    while i < bytes.len() && fields < 4 {
-        if bytes[i] == b' ' {
-            if bytes.get(i + 1) == Some(&b' ') {
-                i += 2;
-                continue;
-            }
-            fields += 1;
-        }
-        i += 1;
-    }
-    if fields < 4 {
-        moniker.rsplit(' ').next().unwrap_or(moniker)
-    } else {
-        &moniker[i..]
+    match id_fields(moniker) {
+        Some([_, _, _, _, descriptors]) => descriptors,
+        None => moniker.rsplit(' ').next().unwrap_or(moniker),
     }
 }
 
@@ -1050,6 +1229,68 @@ mod tests {
 
     fn fallback_display_name(moniker: &str) -> String {
         symbol_names(moniker).name
+    }
+
+    #[test]
+    fn shared_packages_names_other_projects_defining_the_package() {
+        // One document defining `defs` and referencing `refs`.
+        let index_of = |defs: &[&str], refs: &[&str]| {
+            let mut doc = Document::new();
+            doc.relative_path = "src/lib.rs".into();
+            for id in defs {
+                let mut info = scip::types::SymbolInformation::new();
+                info.symbol = id.to_string();
+                info.kind = SymKind::Function.into();
+                doc.symbols.push(info);
+            }
+            for (line, (id, role)) in defs
+                .iter()
+                .map(|d| (d, SymbolRole::Definition as i32))
+                .chain(refs.iter().map(|r| (r, 0)))
+                .enumerate()
+            {
+                let mut occ = scip::types::Occurrence::new();
+                occ.symbol = id.to_string();
+                occ.range = vec![line as i32, 0, 4];
+                occ.symbol_roles = role;
+                doc.occurrences.push(occ);
+            }
+            let mut index = Index::new();
+            index.documents.push(doc);
+            index
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let pool = engraph_core::db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let app = "rust-analyzer cargo app 0.1.0 main().";
+        let load_index = |project: &str, index: Index| {
+            load(&conn, project, &index.write_to_bytes().unwrap()).unwrap();
+        };
+        load_index("/a", index_of(&[app], &[]));
+        // A package whose name starts with `app` is another package; a
+        // reference to `app` (a placeholder row) is not a definition.
+        load_index(
+            "/d",
+            index_of(&["rust-analyzer cargo app2 0.1.0 f()."], &[]),
+        );
+        load_index(
+            "/c",
+            index_of(&["rust-analyzer cargo c 0.1.0 g()."], &[app]),
+        );
+
+        let mut b = index_of(&[app, "rust-analyzer cargo b 0.2.0 h()."], &[]);
+        normalize_index(&mut b, "/b");
+        assert_eq!(
+            shared_packages(&conn, &b, "/b").unwrap(),
+            vec![(
+                "rust-analyzer cargo app 0.0.0".to_string(),
+                vec!["/a".to_string()]
+            )]
+        );
+        // A project's own earlier rows are not another project's.
+        let mut a = index_of(&[app], &[]);
+        normalize_index(&mut a, "/a");
+        assert!(shared_packages(&conn, &a, "/a").unwrap().is_empty());
     }
 
     #[test]
@@ -1140,11 +1381,99 @@ mod tests {
     }
 
     #[test]
+    fn rule_r2_gives_empty_java_packages_the_project_tag() {
+        let before = "semanticdb maven . . fixture/models/";
+        let tag = project_tag("/home/me/repo");
+        assert_eq!(
+            normalize_moniker(before, "/home/me/repo"),
+            format!("semanticdb maven . {tag} fixture/models/")
+        );
+        // Two repos with the same package names: two ids (the third test).
+        assert_ne!(
+            normalize_moniker(before, "/home/me/repo"),
+            normalize_moniker(before, "/home/me/other")
+        );
+        // A JDK package placeholder gets the tag too; harmless.
+        assert_eq!(
+            normalize_moniker("semanticdb maven . . java/util/", "/home/me/repo"),
+            format!("semanticdb maven . {tag} java/util/")
+        );
+    }
+
+    #[test]
+    fn rule_r3_pins_the_version_of_cargo_npm_and_maven_ids() {
+        let p = "/proj";
+        for (before, after) in [
+            (
+                "rust-analyzer cargo engraph-core 0.3.0 schema/run_migrations().",
+                "rust-analyzer cargo engraph-core 0.0.0 schema/run_migrations().",
+            ),
+            (
+                "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core option/Option#",
+                "rust-analyzer cargo core 0.0.0 option/Option#",
+            ),
+            (
+                "scip-typescript npm engraph-fixture 0.1.0 src/`models.ts`/Book#",
+                "scip-typescript npm engraph-fixture 0.0.0 src/`models.ts`/Book#",
+            ),
+            (
+                "semanticdb maven maven/engraph/engraph-fixture 0.1.0 fixture/models/Book#",
+                "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#",
+            ),
+            (
+                "semanticdb maven jdk 21 java/lang/String#",
+                "semanticdb maven jdk 0.0.0 java/lang/String#",
+            ),
+            // An escaped space in a field, and a space in a descriptor, stay.
+            (
+                "rust-analyzer cargo my  pkg 1.0 result/impl#[`Result<T, E>`]unwrap().",
+                "rust-analyzer cargo my  pkg 0.0.0 result/impl#[`Result<T, E>`]unwrap().",
+            ),
+        ] {
+            assert_eq!(normalize_moniker(before, p), after, "{before}");
+            // The rule is idempotent and does not allocate the second time.
+            assert!(matches!(normalize_moniker(after, p), Cow::Borrowed(_)));
+        }
+    }
+
+    #[test]
+    fn normalize_moniker_leaves_other_schemes_and_locals_alone() {
+        for id in [
+            "scip-go gomod github.com/x/y v1.2.3 `github.com/x/y`/F().",
+            "scip-go gomod example.com/b 0.0.0 `example.com/b`/Helper().",
+            "scip-python python requests 2.31.0 `requests.api`/get().",
+            "scip-python python python 0.0.0 `engraph_fixture.models`/Book#",
+            "local 5",
+            "local 5@0123456789abcdef:src/a.rs",
+            "not a scip id",
+        ] {
+            assert!(
+                matches!(normalize_moniker(id, "/proj"), Cow::Borrowed(s) if s == id),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn id_fields_splits_the_four_fields_and_keeps_escapes() {
+        assert_eq!(
+            id_fields("rust-analyzer cargo my  pkg 1.0 mod/foo()."),
+            Some(["rust-analyzer", "cargo", "my  pkg", "1.0", "mod/foo()."])
+        );
+        assert_eq!(id_fields("local 5"), None);
+        // Four fields and no descriptors is not an id: the fourth field never
+        // ends, so there are three.
+        assert_eq!(id_fields("a b c d"), None);
+        assert_eq!(id_fields("a b c d e"), Some(["a", "b", "c", "d", "e"]));
+    }
+
+    #[test]
     fn go_module_versions_pin_only_the_unknown_version() {
         let sibling = "scip-go gomod example.com/b . `example.com/b`/Helper().";
         let pinned = "scip-go gomod example.com/b 0.0.0 `example.com/b`/Helper().";
         let published = "scip-go gomod github.com/x/y v1.2.3 `github.com/x/y`/F().";
-        let other = "rust-analyzer cargo a . a/f().";
+        // Another scheme's `.` version is not the Go rule's to pin.
+        let other = "scip-python python a . a/f().";
         let mut info = scip::types::SymbolInformation::new();
         info.symbol = sibling.into();
         let mut rel = scip::types::Relationship::new();
@@ -1163,7 +1492,7 @@ mod tests {
         index.documents.push(doc);
         index.external_symbols.push(ext);
 
-        pin_go_module_versions(&mut index);
+        normalize_index(&mut index, "/proj");
         let doc = &index.documents[0];
         assert_eq!(doc.symbols[0].symbol, pinned);
         assert_eq!(doc.symbols[0].relationships[0].symbol, pinned);

@@ -17,24 +17,12 @@
 //! Any failure that smells like a transient cold-cache issue soft-skips with a
 //! diagnostic rather than failing the suite.
 
+mod common;
+
+use common::bazel_present;
 use engraph_codegraph::index_repo;
 use engraph_core::db::open_pool;
-use std::process::Command;
 use tempfile::tempdir;
-
-fn bazel_present() -> bool {
-    for bin in &["bazel", "bazelisk"] {
-        if Command::new(bin)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            return true;
-        }
-    }
-    false
-}
 
 fn live_gate_set() -> bool {
     std::env::var("ENGRAPH_LIVE_BAZEL_SYMBOLS")

@@ -1,0 +1,774 @@
+{
+  "indexer": "scip-java",
+  "indexer_version": "0.12.3",
+  "fixture_hash": "85e69d41192256c26aa708fb95eb6f4c1c28fe1ddf17d4f50d6344bffb633eae",
+  "symbols": [
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#",
+      "name": "Book",
+      "file_path": "src/main/java/fixture/models/Book.java",
+      "line_range": "9:9",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#`<init>`().",
+      "name": "<init>",
+      "file_path": "src/main/java/fixture/models/Book.java",
+      "line_range": "15:15",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#starterLibrary()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#author().",
+      "name": "author",
+      "file_path": "src/main/java/fixture/models/Book.java",
+      "line_range": "26:26",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#author.",
+      "name": "author",
+      "file_path": "src/main/java/fixture/models/Book.java",
+      "line_range": "11:11",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#describe().",
+      "name": "describe",
+      "file_path": "src/main/java/fixture/models/Book.java",
+      "line_range": "47:47",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#describeAll()."
+      ],
+      "callees": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#label()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#genre.",
+      "name": "genre",
+      "file_path": "src/main/java/fixture/models/Book.java",
+      "line_range": "13:13",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#isLong().",
+      "name": "isLong",
+      "file_path": "src/main/java/fixture/models/Book.java",
+      "line_range": "34:34",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#label().",
+      "name": "label",
+      "file_path": "src/main/java/fixture/models/Book.java",
+      "line_range": "38:38",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#describe().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#longestTitle()."
+      ],
+      "callees": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/text/Text#titleCase()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#matches().",
+      "name": "matches",
+      "file_path": "src/main/java/fixture/models/Book.java",
+      "line_range": "42:42",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#byGenre()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#pages().",
+      "name": "pages",
+      "file_path": "src/main/java/fixture/models/Book.java",
+      "line_range": "30:30",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#longest().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#totalPages()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#pages.",
+      "name": "pages",
+      "file_path": "src/main/java/fixture/models/Book.java",
+      "line_range": "12:12",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#title().",
+      "name": "title",
+      "file_path": "src/main/java/fixture/models/Book.java",
+      "line_range": "22:22",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#checkout()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#title.",
+      "name": "title",
+      "file_path": "src/main/java/fixture/models/Book.java",
+      "line_range": "10:10",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Describable#",
+      "name": "Describable",
+      "file_path": "src/main/java/fixture/models/Describable.java",
+      "line_range": "3:3",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Describable#describe().",
+      "name": "describe",
+      "file_path": "src/main/java/fixture/models/Describable.java",
+      "line_range": "4:4",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Genre#",
+      "name": "Genre",
+      "file_path": "src/main/java/fixture/models/Genre.java",
+      "line_range": "3:3",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Genre#FICTION.",
+      "name": "FICTION",
+      "file_path": "src/main/java/fixture/models/Genre.java",
+      "line_range": "4:4",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Genre#HISTORY.",
+      "name": "HISTORY",
+      "file_path": "src/main/java/fixture/models/Genre.java",
+      "line_range": "6:6",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Genre#SCIENCE.",
+      "name": "SCIENCE",
+      "file_path": "src/main/java/fixture/models/Genre.java",
+      "line_range": "5:5",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Genre#`<init>`().",
+      "name": "<init>",
+      "file_path": "src/main/java/fixture/models/Genre.java",
+      "line_range": "3:3",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Loan#",
+      "name": "Loan",
+      "file_path": "src/main/java/fixture/models/Loan.java",
+      "line_range": "3:3",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Loan#`<init>`().",
+      "name": "<init>",
+      "file_path": "src/main/java/fixture/models/Loan.java",
+      "line_range": "8:8",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#checkout()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Loan#bookTitle().",
+      "name": "bookTitle",
+      "file_path": "src/main/java/fixture/models/Loan.java",
+      "line_range": "14:14",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Loan#bookTitle.",
+      "name": "bookTitle",
+      "file_path": "src/main/java/fixture/models/Loan.java",
+      "line_range": "4:4",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Loan#daysOut.",
+      "name": "daysOut",
+      "file_path": "src/main/java/fixture/models/Loan.java",
+      "line_range": "6:6",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Loan#isOverdue().",
+      "name": "isOverdue",
+      "file_path": "src/main/java/fixture/models/Loan.java",
+      "line_range": "22:22",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#overdue()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Loan#memberId().",
+      "name": "memberId",
+      "file_path": "src/main/java/fixture/models/Loan.java",
+      "line_range": "18:18",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Loan#memberId.",
+      "name": "memberId",
+      "file_path": "src/main/java/fixture/models/Loan.java",
+      "line_range": "5:5",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Loan#renew().",
+      "name": "renew",
+      "file_path": "src/main/java/fixture/models/Loan.java",
+      "line_range": "26:26",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Member#",
+      "name": "Member",
+      "file_path": "src/main/java/fixture/models/Member.java",
+      "line_range": "5:5",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Member#`<init>`().",
+      "name": "<init>",
+      "file_path": "src/main/java/fixture/models/Member.java",
+      "line_range": "9:9",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#starterLibrary()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Member#displayName().",
+      "name": "displayName",
+      "file_path": "src/main/java/fixture/models/Member.java",
+      "line_range": "22:22",
+      "callers": [],
+      "callees": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/text/Text#initials()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Member#id().",
+      "name": "id",
+      "file_path": "src/main/java/fixture/models/Member.java",
+      "line_range": "14:14",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#checkout()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Member#id.",
+      "name": "id",
+      "file_path": "src/main/java/fixture/models/Member.java",
+      "line_range": "6:6",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Member#name().",
+      "name": "name",
+      "file_path": "src/main/java/fixture/models/Member.java",
+      "line_range": "18:18",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Member#name.",
+      "name": "name",
+      "file_path": "src/main/java/fixture/models/Member.java",
+      "line_range": "7:7",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#",
+      "name": "Shelf",
+      "file_path": "src/main/java/fixture/models/Shelf.java",
+      "line_range": "8:8",
+      "callers": [],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/util/ArrayList#`<init>`(+1)."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#`<init>`().",
+      "name": "<init>",
+      "file_path": "src/main/java/fixture/models/Shelf.java",
+      "line_range": "12:12",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#starterLibrary()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#add().",
+      "name": "add",
+      "file_path": "src/main/java/fixture/models/Shelf.java",
+      "line_range": "24:24",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#merge().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#starterLibrary()."
+      ],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/util/List#add()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#books().",
+      "name": "books",
+      "file_path": "src/main/java/fixture/models/Shelf.java",
+      "line_range": "20:20",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#describeAll().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#merge()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#books.",
+      "name": "books",
+      "file_path": "src/main/java/fixture/models/Shelf.java",
+      "line_range": "10:10",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#byGenre().",
+      "name": "byGenre",
+      "file_path": "src/main/java/fixture/models/Shelf.java",
+      "line_range": "50:50",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#scienceBooks()."
+      ],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/util/ArrayList#`<init>`(+1).",
+        "semanticdb maven jdk 0.0.0 java/util/List#add().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#matches()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#count().",
+      "name": "count",
+      "file_path": "src/main/java/fixture/models/Shelf.java",
+      "line_range": "28:28",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#describe().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#bookCount().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#averagePages()."
+      ],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/util/List#size()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#describe().",
+      "name": "describe",
+      "file_path": "src/main/java/fixture/models/Shelf.java",
+      "line_range": "61:61",
+      "callers": [],
+      "callees": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#count().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/text/Text#pluralize()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#longest().",
+      "name": "longest",
+      "file_path": "src/main/java/fixture/models/Shelf.java",
+      "line_range": "40:40",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#longestTitle()."
+      ],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/util/Optional#ofNullable().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#pages()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#name().",
+      "name": "name",
+      "file_path": "src/main/java/fixture/models/Shelf.java",
+      "line_range": "16:16",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#name.",
+      "name": "name",
+      "file_path": "src/main/java/fixture/models/Shelf.java",
+      "line_range": "9:9",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#totalPages().",
+      "name": "totalPages",
+      "file_path": "src/main/java/fixture/models/Shelf.java",
+      "line_range": "32:32",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#averagePages()."
+      ],
+      "callees": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#pages()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#",
+      "name": "Library",
+      "file_path": "src/main/java/fixture/ops/Library.java",
+      "line_range": "10:10",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#`<init>`().",
+      "name": "<init>",
+      "file_path": "src/main/java/fixture/ops/Library.java",
+      "line_range": "10:10",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#starterLibrary()."
+      ],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/util/ArrayList#`<init>`(+1)."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#addShelf().",
+      "name": "addShelf",
+      "file_path": "src/main/java/fixture/ops/Library.java",
+      "line_range": "19:19",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#starterLibrary()."
+      ],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/util/List#add()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#bookCount().",
+      "name": "bookCount",
+      "file_path": "src/main/java/fixture/ops/Library.java",
+      "line_range": "41:41",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#summary()."
+      ],
+      "callees": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#count()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#checkout().",
+      "name": "checkout",
+      "file_path": "src/main/java/fixture/ops/Library.java",
+      "line_range": "27:27",
+      "callers": [],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/util/List#add().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#title().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Loan#`<init>`().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Member#id()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#loans.",
+      "name": "loans",
+      "file_path": "src/main/java/fixture/ops/Library.java",
+      "line_range": "13:13",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#members.",
+      "name": "members",
+      "file_path": "src/main/java/fixture/ops/Library.java",
+      "line_range": "12:12",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#overdue().",
+      "name": "overdue",
+      "file_path": "src/main/java/fixture/ops/Library.java",
+      "line_range": "31:31",
+      "callers": [],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/util/ArrayList#`<init>`(+1).",
+        "semanticdb maven jdk 0.0.0 java/util/List#add().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Loan#isOverdue()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#register().",
+      "name": "register",
+      "file_path": "src/main/java/fixture/ops/Library.java",
+      "line_range": "23:23",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#starterLibrary()."
+      ],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/util/List#add()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#shelves().",
+      "name": "shelves",
+      "file_path": "src/main/java/fixture/ops/Library.java",
+      "line_range": "15:15",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#summary()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#shelves.",
+      "name": "shelves",
+      "file_path": "src/main/java/fixture/ops/Library.java",
+      "line_range": "11:11",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#",
+      "name": "Ops",
+      "file_path": "src/main/java/fixture/ops/Ops.java",
+      "line_range": "12:12",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#`<init>`().",
+      "name": "<init>",
+      "file_path": "src/main/java/fixture/ops/Ops.java",
+      "line_range": "13:13",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#averagePages().",
+      "name": "averagePages",
+      "file_path": "src/main/java/fixture/ops/Ops.java",
+      "line_range": "22:22",
+      "callers": [],
+      "callees": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#count().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#totalPages()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#describeAll().",
+      "name": "describeAll",
+      "file_path": "src/main/java/fixture/ops/Ops.java",
+      "line_range": "37:37",
+      "callers": [],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/util/ArrayList#`<init>`(+1).",
+        "semanticdb maven jdk 0.0.0 java/util/List#add().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#describe().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#books()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#longestTitle().",
+      "name": "longestTitle",
+      "file_path": "src/main/java/fixture/ops/Ops.java",
+      "line_range": "29:29",
+      "callers": [],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/util/Optional#map().",
+        "semanticdb maven jdk 0.0.0 java/util/Optional#orElse().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#label().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#longest()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#merge().",
+      "name": "merge",
+      "file_path": "src/main/java/fixture/ops/Ops.java",
+      "line_range": "15:15",
+      "callers": [],
+      "callees": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#add().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#books()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#scienceBooks().",
+      "name": "scienceBooks",
+      "file_path": "src/main/java/fixture/ops/Ops.java",
+      "line_range": "33:33",
+      "callers": [],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/util/List#size().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#byGenre()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#starterLibrary().",
+      "name": "starterLibrary",
+      "file_path": "src/main/java/fixture/ops/Ops.java",
+      "line_range": "51:51",
+      "callers": [],
+      "callees": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#`<init>`().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Member#`<init>`().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#`<init>`().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#add().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#`<init>`().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#addShelf().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#register()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#summary().",
+      "name": "summary",
+      "file_path": "src/main/java/fixture/ops/Ops.java",
+      "line_range": "45:45",
+      "callers": [],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/util/List#size().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#bookCount().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Library#shelves().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/text/Text#pluralize()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/text/Text#",
+      "name": "Text",
+      "file_path": "src/main/java/fixture/text/Text.java",
+      "line_range": "6:6",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/text/Text#`<init>`().",
+      "name": "<init>",
+      "file_path": "src/main/java/fixture/text/Text.java",
+      "line_range": "7:7",
+      "callers": [],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/text/Text#capitalize().",
+      "name": "capitalize",
+      "file_path": "src/main/java/fixture/text/Text.java",
+      "line_range": "17:17",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/text/Text#titleCase()."
+      ],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/lang/Character#toUpperCase().",
+        "semanticdb maven jdk 0.0.0 java/lang/String#charAt().",
+        "semanticdb maven jdk 0.0.0 java/lang/String#isEmpty().",
+        "semanticdb maven jdk 0.0.0 java/lang/String#substring()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/text/Text#initials().",
+      "name": "initials",
+      "file_path": "src/main/java/fixture/text/Text.java",
+      "line_range": "24:24",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Member#displayName()."
+      ],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/lang/String#charAt().",
+        "semanticdb maven jdk 0.0.0 java/lang/String#isEmpty().",
+        "semanticdb maven jdk 0.0.0 java/lang/String#split(+3).",
+        "semanticdb maven jdk 0.0.0 java/lang/String#trim().",
+        "semanticdb maven jdk 0.0.0 java/lang/StringBuilder#`<init>`().",
+        "semanticdb maven jdk 0.0.0 java/lang/StringBuilder#append(+8).",
+        "semanticdb maven jdk 0.0.0 java/lang/StringBuilder#toString()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/text/Text#pluralize().",
+      "name": "pluralize",
+      "file_path": "src/main/java/fixture/text/Text.java",
+      "line_range": "34:34",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Shelf#describe().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/ops/Ops#summary()."
+      ],
+      "callees": []
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/text/Text#slug().",
+      "name": "slug",
+      "file_path": "src/main/java/fixture/text/Text.java",
+      "line_range": "45:45",
+      "callers": [],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/lang/String#replace(+1).",
+        "semanticdb maven jdk 0.0.0 java/lang/String#toLowerCase(+1)."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/text/Text#titleCase().",
+      "name": "titleCase",
+      "file_path": "src/main/java/fixture/text/Text.java",
+      "line_range": "9:9",
+      "callers": [
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/models/Book#label()."
+      ],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/lang/String#split(+3).",
+        "semanticdb maven jdk 0.0.0 java/lang/String#trim().",
+        "semanticdb maven jdk 0.0.0 java/util/StringJoiner#`<init>`().",
+        "semanticdb maven jdk 0.0.0 java/util/StringJoiner#add().",
+        "semanticdb maven jdk 0.0.0 java/util/StringJoiner#toString().",
+        "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/text/Text#capitalize()."
+      ]
+    },
+    {
+      "id": "semanticdb maven maven/engraph/engraph-fixture 0.0.0 fixture/text/Text#truncate().",
+      "name": "truncate",
+      "file_path": "src/main/java/fixture/text/Text.java",
+      "line_range": "41:41",
+      "callers": [],
+      "callees": [
+        "semanticdb maven jdk 0.0.0 java/lang/Math#min().",
+        "semanticdb maven jdk 0.0.0 java/lang/String#length().",
+        "semanticdb maven jdk 0.0.0 java/lang/String#substring(+1)."
+      ]
+    }
+  ]
+}

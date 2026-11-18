@@ -51,22 +51,31 @@ jobs:
 
   codegraph-live:
     # Exercise the real SCIP-driver code paths (drivers_live.rs,
-    # workspace_cross_repo.rs) on one Linux leg. Those tests soft-skip when the
-    # indexer binary is absent, so the main `test` matrix only covers them where
-    # a runner happens to ship the tool. Here we install the indexers and then
-    # HARD-verify each is runnable, so a silent install failure fails CI instead
-    # of letting the tests skip green. 
+    # workspace_cross_repo.rs, symbol_snapshots.rs) on one Linux leg. Those
+    # tests soft-skip when the indexer binary is absent, so the main `test`
+    # matrix only covers them where a runner happens to ship the tool. Here we
+    # install the indexers and then HARD-verify each is runnable, so a silent
+    # install failure fails CI instead of letting the tests skip green.
     # NOTE: scip-java is intentionally omitted — its Coursier + Maven build is
     # slow and network-flaky; the other four cover the driver argv/output-path
     # contract this job exists to protect.
+    # The indexer versions (and the toolchain, for rust-analyzer) are PINNED to
+    # the ones the stable-symbol-id snapshots were made with — each
+    # crates/engraph-codegraph/testdata/snapshots/<lang>.json records its
+    # indexer_version. A different version can change symbol ids and fails
+    # symbol_snapshots.rs; bump the pins together with a regenerated snapshot
+    # (plan 05, part 1, step 18).
     name: Codegraph live drivers (linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust toolchain (+ rust-analyzer)
+      - name: Install Rust toolchain 1.100.0 (+ rust-analyzer)
+        # rust-analyzer ships with the toolchain, so pinning the toolchain pins
+        # it: the rust snapshot was made with rust-analyzer 1.100.0.
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.100.0
           components: rust-analyzer
 
       - name: Cache cargo
@@ -83,8 +92,8 @@ jobs:
         # rust-analyzer comes from the rustup component above. Node (scip-python,
         # scip-typescript) and Go (scip-go) are preinstalled on ubuntu-latest.
         run: |
-          npm install -g @sourcegraph/scip-python @sourcegraph/scip-typescript
-          go install github.com/scip-code/scip-go/cmd/scip-go@latest
+          npm install -g @sourcegraph/scip-python@0.6.8 @sourcegraph/scip-typescript@0.6.0
+          go install github.com/scip-code/scip-go/cmd/scip-go@v0.2.7
           echo "$(npm config get prefix)/bin" >> "$GITHUB_PATH"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
@@ -103,8 +112,27 @@ jobs:
           done
           exit $fail
 
+      - name: Stable symbol ids — index each fixture and compare with its snapshot
+        # Plan 05, part 1, step 17. Run on its own so the per-fixture `ok:` /
+        # `skip:` lines are visible, then require that none of the four
+        # installed indexers skipped: a skipped fixture passes silently. Java
+        # skips by design (scip-java is not installed here).
+        shell: bash
+        run: |
+          cargo test -p engraph-codegraph --test symbol_snapshots fixture_ids_match_the_snapshots -- --nocapture 2>&1 | tee symbol-snapshots.log
+          fail=0
+          for lang in rust python go typescript; do
+            if ! grep -q "ok: $lang matches its snapshot" symbol-snapshots.log; then
+              echo "::error::the $lang fixture was not compared with its snapshot (skipped?)"
+              fail=1
+            fi
+          done
+          exit $fail
+
       - name: Run codegraph tests (live drivers)
-        run: cargo test -p engraph-codegraph --verbose
+        # The snapshot comparison already ran above; skip it here so the
+        # fixtures are not indexed twice.
+        run: cargo test -p engraph-codegraph --verbose -- --skip fixture_ids_match_the_snapshots
 
   otel-build:
     # The `otel` feature (OpenTelemetry metrics export) is off by default, so the
