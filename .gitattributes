@@ -1,1 +1,6 @@
 crates/engraph-compress/tests/fixtures/*.txt text eol=lf
+
+# The stable-symbol-id fixtures are hashed byte for byte (tests/common/mod.rs
+# tree_hash); a CRLF checkout on Windows would change every hash.
+crates/engraph-codegraph/testdata/fixtures/** text eol=lf
+crates/engraph-codegraph/testdata/scip/*.scip binary
