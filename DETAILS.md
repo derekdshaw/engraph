@@ -2107,12 +2107,9 @@ to `lib_foo` with `src.project != dst.project`, and (3) the rendered
 markdown contains the `repo:lib_a` annotation. Soft-skips when
 rust-analyzer is absent.
 
-**What Phase 2.2 explicitly does NOT do.** The roadmap names two items
-this session leaves for later: per-driver moniker normalization rules
-(only the hook is in place; no rewrites land today) and a
-symbol-stability test suite (a snapshot of 50 known monikers across
-indexer versions). Both pay back only once there's drift in practice —
-add them when telemetry shows a real failure mode.
+**What Phase 2.2 left for later.** Per-driver moniker normalization
+rules and a symbol-stability test suite were deferred here; plan 05
+delivered both (§14.10).
 
 ### 14.8 Phase 2.3 #1/#3 — target-level Bazel via `bazel query`
 
@@ -2385,6 +2382,45 @@ workload trips them):
   is a no-op today.
 
 ---
+
+### 14.10 Stable symbol ids (plan 05)
+
+A symbol id is the same on each computer and after each commit, and a
+test shows when engraph or an indexer changes the ids of known symbols.
+
+**Test suite.** `crates/engraph-codegraph/testdata/fixtures/<lang>/` holds
+one small, dependency-free repo per indexer (Rust, Python, Go, TypeScript,
+Java), each with 50+ symbols across three modules; `testdata/snapshots/
+<lang>.json` records every defined non-local symbol (id, name, file path,
+line range, `CALLS` callers and callees), the indexer version, and a hash
+of the fixture sources; `testdata/scip/<lang>.scip` keeps the indexer's
+blob with the machine paths normalized away and its set-like lists sorted
+(`tests/common/mod.rs`). `tests/symbol_snapshots.rs` compares a live index
+run of each fixture with its snapshot (skipping a fixture whose indexer,
+build tool, or toolchain is absent, and printing a per-symbol diff with
+both indexer versions on a mismatch), compares the prebuilt blob loaded
+through the loader alone with the snapshot in every CI job, and regenerates
+all of it with `ENGRAPH_UPDATE_SNAPSHOTS=1`. The `codegraph-live` CI job
+pins the indexer versions the snapshots were made with. `testdata/` is a
+name discovery prunes, so a dogfooded `engraph index .` never descends into
+the fixture manifests.
+
+**Rules.** `driver::python_project_name` gives scip-python `--project-name`
+from `pyproject.toml` (`[project].name`, else `[tool.poetry].name`), not
+the checkout directory's name. `scip_loader::normalize_moniker` applies, in
+one pass over the parsed index before any row is written: the project tag
+as version for a `semanticdb` id with the empty package name (Java package
+symbols, otherwise one row for every repo with that package name), and the
+pinned version `0.0.0` for every other `semanticdb`, `rust-analyzer`, and
+`scip-typescript` id, dependencies included, so a release bump, the
+machine's JDK major, or a differing dependency version never splits a
+reference from its definition. scip-go and scip-python are pinned by their
+drivers. A symbol defined in several documents (a Go package) records the
+location of its lexicographically smallest document, not the last one the
+indexer happened to write. `index_state.normalization` records the rule
+version of each run, and `engraph index` names the projects indexed under
+older rules and recommends a full `engraph index <repo>` of each (§12.1
+v18).
 
 ## 15. Forward pointers
 

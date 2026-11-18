@@ -1,6 +1,6 @@
 # Plan 05: Stable symbol ids
 
-Read [the general information for all plans](00-general-info-plan.md)
+Read [the general information for all plans](../00-general-info-plan.md)
 before you use this plan. It gives the rules for the work and the sequence
 of the plans.
 
