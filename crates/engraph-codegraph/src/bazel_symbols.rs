@@ -569,6 +569,58 @@ fn run_rust(
     )
 }
 
+/// The two configs `--infer-tsconfig` writes verbatim (scip-typescript's
+/// `inferTsconfig.ts`). Only a new file whose content is exactly one of them
+/// is removed after a ts run.
+const INFERRED_TSCONFIGS: [&str; 2] = ["{}", r#"{"compilerOptions":{"allowJs":true}}"#];
+
+/// Every `tsconfig.json` under `repo`, pruning `node_modules`, `bazel-*`,
+/// hidden directories, and symlinked trees.
+fn tsconfig_paths(repo: &Path) -> std::collections::BTreeSet<PathBuf> {
+    fn walk(dir: &Path, out: &mut std::collections::BTreeSet<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == "node_modules" || name.starts_with('.') || name.starts_with("bazel-") {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_symlink() {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, out);
+            } else if name == "tsconfig.json" {
+                out.insert(path);
+            }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(repo, &mut out);
+    out
+}
+
+/// Remove the `tsconfig.json` files a ts run created: `--infer-tsconfig`
+/// writes one into each project that has none and leaves it in the repo. Only
+/// a file that `before` does not have, with exactly an inferred content
+/// (`INFERRED_TSCONFIGS`), goes.
+fn remove_inferred_tsconfigs(repo: &Path, before: &std::collections::BTreeSet<PathBuf>) {
+    for path in tsconfig_paths(repo).difference(before) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if INFERRED_TSCONFIGS.contains(&text.trim()) && std::fs::remove_file(path).is_ok() {
+            tracing::info!(
+                path = %path.display(),
+                "removed a tsconfig.json that --infer-tsconfig wrote"
+            );
+        }
+    }
+}
+
 /// TypeScript and JavaScript symbol pass. Unset `ENGRAPH_BAZEL_SCIP_TS_CMD` →
 /// scip-typescript at the root (`build_indexer_command`). It needs the
 /// packages installed, and `rules_js` makes `node_modules` under `bazel-bin`
@@ -576,6 +628,77 @@ fn run_rust(
 /// scip-typescript would fail, so only a user-supplied command (one that
 /// installs the packages first) can reach the targets.
 fn run_ts(
+    spec: &LangSpec,
+    repo: &Path,
+    bazel: &Path,
+    scip_dir: &Path,
+    parts: &mut Vec<Vec<u8>>,
+) -> Result<LangIndexResult> {
+    // `--infer-tsconfig` writes into the repo; sweep what this run created,
+    // whichever branch ran and however it ended.
+    let before = tsconfig_paths(repo);
+    let mut result = run_ts_inner(spec, repo, bazel, scip_dir, parts);
+    remove_inferred_tsconfigs(repo, &before);
+    if let Ok(r) = &mut result
+        && let LangStatus::Failed(msg) = &r.status
+        && let Some(help) = pnpm_broken_lockfile_help(repo, msg)
+    {
+        r.status = LangStatus::Failed(help);
+    }
+    result
+}
+
+/// A clear replacement for a scip-typescript failure that means the pnpm on
+/// `PATH` cannot read `pnpm-lock.yaml` (`--pnpm-workspaces` makes
+/// scip-typescript run `pnpm ls`): the same two fixes the example driver
+/// names. `None` for any other failure, and for a lockfile of a current
+/// version — then the file is genuinely broken and pnpm's own error says why.
+///
+/// The trigger is pnpm's `ERR_PNPM_BROKEN_LOCKFILE` token, or the words
+/// `lockfileVersion` and `incompatible`: scip-typescript reports the pnpm
+/// error as a throw dump without the token, and pnpm's error box wraps its
+/// lines between words, so a single word is the longest text that always
+/// survives the wrapping.
+fn pnpm_broken_lockfile_help(repo: &Path, failure: &str) -> Option<String> {
+    let dump_words = failure.contains("lockfileVersion") && failure.contains("incompatible");
+    if !failure.contains("ERR_PNPM_BROKEN_LOCKFILE") && !dump_words {
+        return None;
+    }
+    let version = pnpm_lockfile_version(repo)?;
+    // The pnpm major that writes this lockfile version, for the message only;
+    // the check itself is pnpm's own error.
+    let writes_it = match version.split('.').next() {
+        Some("5") => "7",
+        Some("6") => "8",
+        _ => return None,
+    };
+    let have = Command::new("pnpm")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| format!("pnpm {}", String::from_utf8_lossy(&o.stdout).trim()));
+    Some(format!(
+        "{have} cannot read pnpm-lock.yaml (lockfileVersion {version})\n\
+         upgrade the lockfile: run `pnpm install --lockfile-only` in the repo \
+         (it rewrites pnpm-lock.yaml), or put pnpm {writes_it} on PATH \
+         (it writes lockfileVersion {version})",
+        have = have.as_deref().unwrap_or("the pnpm on PATH"),
+    ))
+}
+
+/// The `lockfileVersion` of the repo's `pnpm-lock.yaml`, e.g. `6.0`.
+fn pnpm_lockfile_version(repo: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(repo.join("pnpm-lock.yaml")).ok()?;
+    let line = text.lines().find(|l| l.starts_with("lockfileVersion"))?;
+    let value: String = line
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    (!value.is_empty()).then_some(value)
+}
+
+fn run_ts_inner(
     spec: &LangSpec,
     repo: &Path,
     bazel: &Path,
@@ -926,8 +1049,25 @@ fn bazel_has_targets(bazel: &Path, repo: &Path, kinds: &[&str]) -> Result<bool> 
     Ok(bazel_count_targets(bazel, repo, kinds)? > 0)
 }
 
-/// Count the workspace's targets of the given rule kinds via one
-/// `bazel query --output=label_kind`. A failed query is an error, not zero:
+/// The `bazel query` expression for the first-party targets of `kinds`: their
+/// union, minus each label with `node_modules` in it. `npm_link_all_packages`
+/// makes a `js_library` per third-party npm package
+/// (`//:.aspect_rules_js/node_modules/<pkg>`, `//vue:node_modules/<pkg>`), so
+/// without the filter a repo that uses rules_js only for a tool (eslint,
+/// prettier) counts ts targets and starts scip-typescript with no TS or JS of
+/// its own. The filter is the same for every language: no other language's
+/// first-party code lives under a `node_modules` label.
+fn target_count_query(kinds: &[&str]) -> String {
+    let union = kinds
+        .iter()
+        .map(|k| format!("kind({k}, //...)"))
+        .collect::<Vec<_>>()
+        .join(" union ");
+    format!("let t = {union} in $t except filter(\"node_modules\", $t)")
+}
+
+/// Count the workspace's first-party targets of the given rule kinds
+/// (`target_count_query`) via one `bazel query --output=label_kind`. A failed query is an error, not zero:
 /// zero reports "no targets" and skips a configured command. A rule kind the
 /// workspace does not have is not a failure (Bazel 9.3.2 exits 0 with
 /// `INFO: Empty results`), and the caller turns the error into a `Failed`
@@ -935,11 +1075,7 @@ fn bazel_has_targets(bazel: &Path, repo: &Path, kinds: &[&str]) -> Result<bool> 
 /// pass's `output_base` is intentional: the analysis cache is warm and this
 /// returns near-instantly. The Go pass uses the count to report the gazelle gap.
 fn bazel_count_targets(bazel: &Path, repo: &Path, kinds: &[&str]) -> Result<usize> {
-    let expr = kinds
-        .iter()
-        .map(|k| format!("kind({}, //...)", k))
-        .collect::<Vec<_>>()
-        .join(" union ");
+    let expr = target_count_query(kinds);
     let output_base = output_base_for(repo);
     let mut cmd = Command::new(bazel);
     cmd.arg(format!("--output_base={}", output_base.display()))
@@ -1432,6 +1568,21 @@ mod tests {
     }
 
     #[test]
+    fn the_target_count_leaves_out_node_modules_links() {
+        // `npm_link_all_packages` makes a `js_library` per third-party npm
+        // package (`//:.aspect_rules_js/node_modules/<pkg>`,
+        // `//vue:node_modules/<pkg>`): 187 of the 248 ts targets of
+        // bazelbuild/examples frontend. Counting them starts the ts pass in a
+        // repo that uses rules_js only for tooling. Bazel does the filtering,
+        // so the expression is the unit; the count (61 there) is checked live.
+        assert_eq!(
+            target_count_query(&["js_library", "ts_project"]),
+            "let t = kind(js_library, //...) union kind(ts_project, //...) \
+             in $t except filter(\"node_modules\", $t)"
+        );
+    }
+
+    #[test]
     fn langs_ts_counts_the_js_rules() {
         // scip-typescript indexes JavaScript too: a repo with only
         // `aspect_rules_js` targets must not report "no targets", and a repo
@@ -1497,6 +1648,197 @@ mod tests {
             }
         );
         assert!(!marker.exists(), "scip-typescript must not start");
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn remove_inferred_tsconfigs_removes_only_what_the_run_wrote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        // A tsconfig from before the run is kept even with a matching content.
+        std::fs::create_dir_all(repo.join("existing")).unwrap();
+        std::fs::write(repo.join("existing/tsconfig.json"), "{}").unwrap();
+        // One under node_modules is not seen at all.
+        std::fs::create_dir_all(repo.join("node_modules/dep")).unwrap();
+        std::fs::write(repo.join("node_modules/dep/tsconfig.json"), "{}").unwrap();
+        let before = tsconfig_paths(repo);
+
+        // The run writes three: the two exact inferred contents, and one that
+        // only a user writes, which is kept.
+        std::fs::write(repo.join("tsconfig.json"), "{}").unwrap();
+        std::fs::create_dir_all(repo.join("pure-js")).unwrap();
+        std::fs::write(
+            repo.join("pure-js/tsconfig.json"),
+            r#"{"compilerOptions":{"allowJs":true}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("app")).unwrap();
+        std::fs::write(
+            repo.join("app/tsconfig.json"),
+            r#"{"compilerOptions":{"strict":true}}"#,
+        )
+        .unwrap();
+
+        remove_inferred_tsconfigs(repo, &before);
+        assert!(repo.join("existing/tsconfig.json").is_file());
+        assert!(repo.join("node_modules/dep/tsconfig.json").is_file());
+        assert!(repo.join("app/tsconfig.json").is_file());
+        assert!(!repo.join("tsconfig.json").exists());
+        assert!(!repo.join("pure-js/tsconfig.json").exists());
+    }
+
+    /// Unix only: on Windows `Command` does not resolve a script without
+    /// `.exe`, so the fake scip-typescript on `PATH` is never found.
+    #[cfg(not(windows))]
+    #[test]
+    fn run_ts_removes_the_tsconfigs_the_indexer_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("node_modules")).unwrap();
+        std::fs::write(repo.join("package.json"), "{}").unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 1);
+
+        // A fake scip-typescript that writes an inferred tsconfig.json into
+        // the repo, as --infer-tsconfig does, and then its SCIP output.
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let scip = make_index(&["a.ts"], &[]);
+        let scip_path = tmp.path().join("fake.scip");
+        std::fs::write(&scip_path, &scip).unwrap();
+        write_script(
+            &bin.join("scip-typescript"),
+            &format!(
+                "#!/bin/sh\n\
+                 [ \"$1\" = --version ] && {{ echo 0.0.0; exit 0; }}\n\
+                 while [ $# -gt 1 ]; do [ \"$1\" = --output ] && out=\"$2\"; shift; done\n\
+                 printf '{{}}' > \"{repo}/tsconfig.json\"\n\
+                 cp \"{scip}\" \"$out\"\n",
+                repo = repo.display(),
+                scip = scip_path.display()
+            ),
+        );
+
+        let _env = cmd_env_lock();
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let path =
+            std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&old_path)))
+                .unwrap();
+        // SAFETY: `_env` serializes every test that touches these variables.
+        unsafe {
+            std::env::remove_var("ENGRAPH_BAZEL_SCIP_TS_CMD");
+            std::env::set_var("PATH", &path);
+        }
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_ts(ts_spec(), &repo, &bazel, &scip_dir, &mut parts);
+        unsafe { std::env::set_var("PATH", &old_path) };
+        assert_eq!(r.unwrap().status, LangStatus::Indexed);
+        assert_eq!(parts.len(), 1);
+        assert!(
+            !repo.join("tsconfig.json").exists(),
+            "the tsconfig.json the indexer wrote must be removed"
+        );
+    }
+
+    fn ts_spec() -> &'static LangSpec {
+        LANGS.iter().find(|s| s.language == "ts").unwrap()
+    }
+
+    #[test]
+    fn pnpm_broken_lockfile_help_names_the_two_fixes() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '6.0'\n",
+        )
+        .unwrap();
+        let failure = "scip-typescript exited with exit status: 1\n\
+                       Error: ERR_PNPM_BROKEN_LOCKFILE  broken lockfile";
+        let help = pnpm_broken_lockfile_help(tmp.path(), failure).expect("a clear message");
+        assert!(
+            help.contains("cannot read pnpm-lock.yaml (lockfileVersion 6.0)"),
+            "{help}"
+        );
+        assert!(help.contains("pnpm install --lockfile-only"), "{help}");
+        assert!(help.contains("pnpm 8 on PATH"), "{help}");
+
+        // The real native-path failure is scip-typescript's throw dump: pnpm's
+        // boxed error as a JS string, without the ERR_PNPM_BROKEN_LOCKFILE
+        // token, wrapped at word boundaries. The trigger words survive the
+        // wrapping because the box never splits a word.
+        let dump = "scip-typescript exited with exit status: 1\n\
+            'Error:   × load the current lockfile\\n' +\n\
+            '  ╰─▶ The lockfile at \"/x/node_modules/.pnpm/lock.yaml\" is broken:\\n' +\n\
+            '      The lockfileVersion of 6.0 is incompatible with this version of pnpm,\\n' +\n\
+            '      which supports lockfileVersion 9.x (1:18)\\n'";
+        let help = pnpm_broken_lockfile_help(tmp.path(), dump).expect("a clear message");
+        assert!(
+            help.contains("cannot read pnpm-lock.yaml (lockfileVersion 6.0)"),
+            "{help}"
+        );
+
+        // Another failure is not rewritten.
+        assert_eq!(pnpm_broken_lockfile_help(tmp.path(), "tsc crashed"), None);
+        // A current lockfile version that pnpm still calls broken is genuine
+        // corruption: pnpm's own error says why.
+        std::fs::write(
+            tmp.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )
+        .unwrap();
+        assert_eq!(pnpm_broken_lockfile_help(tmp.path(), failure), None);
+    }
+
+    /// Unix only: on Windows `Command` does not resolve a script without
+    /// `.exe`, so the fake scip-typescript on `PATH` is never found.
+    #[cfg(not(windows))]
+    #[test]
+    fn run_ts_reports_a_pnpm_lockfile_mismatch_clearly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("node_modules")).unwrap();
+        std::fs::write(repo.join("package.json"), "{}").unwrap();
+        std::fs::write(repo.join("pnpm-lock.yaml"), "lockfileVersion: '6.0'\n").unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 1);
+
+        // A fake scip-typescript that fails the way the real one does when the
+        // pnpm on PATH cannot read the lockfile.
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_script(
+            &bin.join("scip-typescript"),
+            "#!/bin/sh\n\
+             [ \"$1\" = --version ] && { echo 0.0.0; exit 0; }\n\
+             echo 'Error: ERR_PNPM_BROKEN_LOCKFILE  load the current lockfile' >&2\n\
+             exit 1\n",
+        );
+
+        let _env = cmd_env_lock();
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let path =
+            std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&old_path)))
+                .unwrap();
+        // SAFETY: `_env` serializes every test that touches these variables.
+        unsafe {
+            std::env::remove_var("ENGRAPH_BAZEL_SCIP_TS_CMD");
+            std::env::set_var("PATH", &path);
+        }
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_ts(ts_spec(), &repo, &bazel, &scip_dir, &mut parts);
+        unsafe { std::env::set_var("PATH", &old_path) };
+        let status = r.unwrap().status;
+        let LangStatus::Failed(msg) = status else {
+            panic!("expected Failed, got {status:?}");
+        };
+        assert!(
+            msg.starts_with("pnpm") || msg.starts_with("the pnpm on PATH"),
+            "the first line must name the cause, got: {msg}"
+        );
+        assert!(msg.contains("lockfileVersion 6.0"), "{msg}");
+        assert!(msg.contains("pnpm 8 on PATH"), "{msg}");
         assert!(parts.is_empty());
     }
 
