@@ -186,7 +186,12 @@ a worktree would not join the base rows. Step 4 corrects it.
    Complete: refer to "Findings".
 3. ~~Record the decision about the base in the pull request.~~ Complete: refer
    to "Decisions".
-4. Make the scip-python project name the same in each checkout of a repo. In
+4. ~~Make the scip-python project name the same in each checkout of a repo.~~
+   Complete. The fallback applies only when the project is at the root of its
+   checkout (`driver::main_worktree_name`): a project below the root keeps its
+   own basename, which does not change between checkouts.
+
+   In
    `driver::python_project_name`, if `pyproject.toml` gives no name, use the
    basename of the main worktree of the repo, not the basename of the
    directory. `cli::git_main_worktree` finds the main worktree from any

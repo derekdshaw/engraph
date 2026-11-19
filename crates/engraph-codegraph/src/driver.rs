@@ -77,7 +77,13 @@ pub(crate) const SCIP_PYTHON_VERSION: &str = PINNED_VERSION;
 /// directory happens to have (a worktree named `elm` gave other ids than a
 /// clone named `engraph`). `[tool.poetry].name` answers for a Poetry project
 /// without a `[project]` table. Without a `pyproject.toml`, or without a name
-/// in either table, the directory's basename, as before.
+/// in either table, the basename of the **main worktree** of the repo: every
+/// worktree of a repo answers the same name, so the base graph and the overlay
+/// of a worktree write one id for a symbol (plan 10, part 1, step 4). A
+/// project below the root of the repo already had a name that does not change
+/// (`services/api` is `api` in each checkout); this rule is for a project at
+/// the root, where the basename is the name the user gave the checkout. The
+/// directory's basename outside a repo, as before.
 ///
 /// This is an id rule: a change to what it returns changes symbol ids and
 /// bumps `scip_loader::NORMALIZATION_VERSION`.
@@ -85,11 +91,30 @@ pub(crate) fn python_project_name(repo: &Path) -> String {
     std::fs::read_to_string(repo.join("pyproject.toml"))
         .ok()
         .and_then(|text| pyproject_name(&text))
+        .or_else(|| main_worktree_name(repo))
         .unwrap_or_else(|| {
             repo.file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "project".to_string())
         })
+}
+
+/// The basename of the main worktree of the repo, when `repo` is the root of
+/// its own checkout: the worktree `elm/` and the main worktree `engraph/` then
+/// both answer `engraph`. `None` outside git, and for a project below the root
+/// of its checkout — `services/api` is `api` in every checkout already, so the
+/// caller's own basename is right for it.
+fn main_worktree_name(repo: &Path) -> Option<String> {
+    let top = engraph_core::utils::current_toplevel(repo)?
+        .canonicalize()
+        .ok()?;
+    if repo.canonicalize().ok()? != top {
+        return None;
+    }
+    let main = engraph_core::utils::main_worktree(repo)?;
+    Path::new(&main)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
 }
 
 /// The project name in `pyproject.toml` text: `[project].name`, else
@@ -669,6 +694,59 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert!(args.contains(&"elm".to_string()));
+    }
+
+    /// Plan 10, part 1, step 4: the fallback name must be the same in every
+    /// checkout of a repo. A `pyproject.toml` with no name at the root of a
+    /// repo would otherwise put the name of the checkout directory into every
+    /// first-party id, and a worktree's overlay rows would not join the base
+    /// rows (the ids differ in the package field).
+    #[test]
+    fn python_project_name_is_the_same_in_every_worktree_of_a_repo() {
+        fn git(cwd: &Path, args: &[&str]) {
+            let out = engraph_core::utils::git_cmd(cwd)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("engraph");
+        std::fs::create_dir_all(&main).unwrap();
+        // A [project] table without a name, so the fallback decides.
+        std::fs::write(main.join("pyproject.toml"), "[project]\nversion = \"1\"\n").unwrap();
+        git(&main, &["init", "-q"]);
+        git(&main, &["add", "-A"]);
+        git(&main, &["commit", "-q", "-m", "init"]);
+        let wt = dir.path().join("elm");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                wt.to_str().unwrap(),
+            ],
+        );
+
+        // Both checkouts name the repo by its main worktree, not by their own
+        // directory.
+        assert_eq!(python_project_name(&main), "engraph");
+        assert_eq!(python_project_name(&wt), "engraph");
     }
 
     #[test]

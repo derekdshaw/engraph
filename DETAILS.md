@@ -1608,7 +1608,7 @@ crate that does cross-file `who-calls` across Rust/Python/Go/TS/Java.
 | Driver | `detect()` trigger | `command()` |
 |---|---|---|
 | `RustAnalyzer` | `Cargo.toml` | `rust-analyzer scip <repo> --output <out>` (chdir into repo) |
-| `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <out> --project-name <name> --project-version 0.0.0`, where `<name>` is `[project].name` of `pyproject.toml`, else `[tool.poetry].name`, else the repo's basename (`python_project_name`; plan 05 rule R1, so the ids do not depend on the checkout directory); `NODE_OPTIONS` carries the Node heap ceiling (`set_node_heap`, §14.9) |
+| `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <out> --project-name <name> --project-version 0.0.0`, where `<name>` is `[project].name` of `pyproject.toml`, else `[tool.poetry].name`, else the basename of the repo's main worktree (`python_project_name`; plan 05 rule R1 with plan 10 part 1 step 4, so the ids do not depend on the checkout directory or on which worktree indexed it); `NODE_OPTIONS` carries the Node heap ceiling (`set_node_heap`, §14.9) |
 | `ScipGo` | `go.mod` or `go.work` | `scip-go --module-root <repo> --module-version 0.0.0 --output <out>` (chdir into repo); with a `go.work`, also one `./<dir>/...` package pattern per `use` directory, since scip-go's default `./...` covers only the root module; `GOWORK=off` when the nearest `go.work` above the repo does not list it (`outside_its_go_work`), since Go then builds nothing there; with `--go-tags <a,b>`, `GOFLAGS="$GOFLAGS -tags=a,b"` (`apply_go_tags`; scip-go has no tags flag, but its package loader reads `GOFLAGS`, and the last `-tags` wins) |
 | `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index --output <out>` (chdir into repo); in a pnpm or yarn workspace (`TsWorkspace`), also `--pnpm-workspaces` / `--yarn-workspaces <repo>`; `NODE_OPTIONS` carries the Node heap ceiling (`set_node_heap`, §14.9) |
 | `ScipJava` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java index --output <out>` (chdir into repo) |
@@ -2531,7 +2531,14 @@ the fixture manifests.
 
 **Rules.** `driver::python_project_name` gives scip-python `--project-name`
 from `pyproject.toml` (`[project].name`, else `[tool.poetry].name`), not
-the checkout directory's name. `scip_loader::normalize_moniker` applies, in
+the checkout directory's name. Without a name there it falls back to the
+basename of the repo's **main worktree** (`utils::main_worktree`), so the
+worktrees of one repo — `engraph/` and a `git worktree add ../elm` beside it —
+write one id for a symbol instead of `scip-python python engraph …` and
+`scip-python python elm …`. A project below the checkout root keeps its own
+basename, which is already part of the repo (`services/api` is `api`
+everywhere); only a project at the root took the name the user gave the
+checkout. `scip_loader::normalize_moniker` applies, in
 one pass over the parsed index before any row is written: the project tag
 as version for a `semanticdb` id with the empty package name (Java package
 symbols, otherwise one row for every repo with that package name), and the

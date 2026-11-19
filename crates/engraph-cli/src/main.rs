@@ -1313,6 +1313,10 @@ fn index_single(
     Ok(stats)
 }
 
+/// The current worktree's root. Lives in `engraph-core` because the codegraph
+/// drivers need the same git identity (`driver::python_project_name`).
+pub(crate) use engraph_core::utils::current_toplevel as git_current_toplevel;
+
 /// Stable identity for the repo containing `start`, used as the `project` scope
 /// key. For a git repo this is the **main worktree** path — shared across every
 /// linked worktree — so all worktrees of a repo map to one logical index instead
@@ -1320,7 +1324,7 @@ fn index_single(
 /// canonicalized path when `start` isn't in a git repo (or git is unavailable),
 /// which also collapses symlinked checkouts to one key.
 pub(crate) fn canonical_repo_key(start: &std::path::Path) -> String {
-    if let Some(root) = git_main_worktree(start) {
+    if let Some(root) = engraph_core::utils::main_worktree(start) {
         return root;
     }
     start
@@ -1328,67 +1332,6 @@ pub(crate) fn canonical_repo_key(start: &std::path::Path) -> String {
         .unwrap_or_else(|_| start.to_path_buf())
         .to_string_lossy()
         .into_owned()
-}
-
-/// The repo's main worktree path via `git worktree list --porcelain`, whose
-/// first entry is always the main worktree. `None` when `start` isn't a git
-/// working tree or git can't be run.
-fn git_main_worktree(start: &std::path::Path) -> Option<String> {
-    let out = engraph_core::utils::git_cmd(start)
-        .args(["worktree", "list", "--porcelain"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8(out.stdout).ok()?;
-    let mut first = stdout.split("\n\n").next()?.lines();
-    let path = first.next()?.strip_prefix("worktree ")?.trim();
-    if path.is_empty() {
-        return None;
-    }
-    let p = std::path::Path::new(path);
-    // In a submodule, the first entry is the gitdir (<parent>/.git/modules/
-    // <name>), not a checkout. Unlike a bare repo's directory — also listed
-    // first, with a `bare` attribute, and kept as the shared key of its
-    // worktrees — the gitdir is no key: fall back to this checkout's own
-    // root, so the submodule scopes to itself and `in_linked_worktree` stays
-    // false for it.
-    if !first.any(|l| l.trim() == "bare") && !p.join(".git").exists() {
-        return git_current_toplevel(start).map(|top| {
-            top.canonicalize()
-                .unwrap_or(top)
-                .to_string_lossy()
-                .into_owned()
-        });
-    }
-    Some(
-        p.canonicalize()
-            .unwrap_or_else(|_| p.to_path_buf())
-            .to_string_lossy()
-            .into_owned(),
-    )
-}
-
-/// The *current* worktree's root (`git rev-parse --show-toplevel` of `start`) —
-/// the checkout you're actually working in, on its branch. Used to resolve a
-/// stored relative `file_path` to live source, so subgraph reads the worktree
-/// copy, not the (possibly stale or absent) indexed checkout. `None` outside a
-/// git working tree.
-pub(crate) fn git_current_toplevel(start: &std::path::Path) -> Option<std::path::PathBuf> {
-    let out = engraph_core::utils::git_cmd(start)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let top = String::from_utf8(out.stdout).ok()?;
-    let top = top.trim();
-    if top.is_empty() {
-        return None;
-    }
-    Some(std::path::PathBuf::from(top))
 }
 
 /// Keep the original Cow when nothing collapsed (it may still borrow the

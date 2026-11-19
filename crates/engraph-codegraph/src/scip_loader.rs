@@ -84,7 +84,11 @@ fn scheme(symbol: &str) -> Option<&str> {
 /// 1: R2 (project tag for `semanticdb` ids with the empty package name) and
 ///    R3 (the pinned version for `rust-analyzer`, `scip-typescript`, and
 ///    `semanticdb` ids), 2026-11-17.
-pub const NORMALIZATION_VERSION: i64 = 1;
+/// 2: R1 gives the scip-python fallback name (no name in `pyproject.toml`) the
+///    basename of the main worktree, not the basename of the checkout
+///    directory, so every worktree of a repo writes one id (plan 10, part 1,
+///    step 4), 2026-11-19.
+pub const NORMALIZATION_VERSION: i64 = 2;
 
 /// The id normalization rules of plan 05, part 2 (step 5), one `match` arm
 /// per scheme, so a symbol id is the same on each computer and after each
