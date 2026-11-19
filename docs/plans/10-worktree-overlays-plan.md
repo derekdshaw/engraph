@@ -14,9 +14,10 @@ of the plans.
 - A worktree that has a feature branch, also the main worktree, does not change
   the base graph.
 
-## Condition at this time (2026-10-30)
+## Condition at this time (2026-11-19)
 
-This condition includes the `add-auto-indexing` branch.
+The `add-auto-indexing` branch is in `main`. [Plan 05](completed/05-stable-symbol-ids-plan.md)
+is complete, thus the symbol ids are stable (refer to "Findings").
 
 - The code graph is one graph for each repo. The project key is the path of the
   main worktree (`divergence::index_scope`).
@@ -24,8 +25,11 @@ This condition includes the `add-auto-indexing` branch.
   primary key (`id TEXT PRIMARY KEY`). Thus, the graph can keep only one
   version of a symbol.
 - `index_state` has one row for each `(project, subtree)`, with the commit and
-  the index mode (`source`, `lang`, `bazel_symbols`, schema v11). It has no
-  worktree or branch.
+  the index mode (`source`, `lang`, `bazel_symbols`, `go_tags`, `go_tests`,
+  `normalization`). It has no worktree or branch.
+- The schema is at v18. The overlay tables must have the columns that the base
+  tables got after v11: `entities.qualified_name` (v12), `entities.scheme`
+  (v13), and `relations.line` (v14).
 - The automatic refresh (`engraph index --if-changed`) operates only from the
   main worktree (`divergence::in_linked_worktree`). In a linked worktree, the
   per-file divergence check operates: a grep for a symbol in a changed file
@@ -111,31 +115,67 @@ this plan. Add it only if telemetry shows that overlay index runs are too slow
   of different files changes.
 - Remove the overlay of a worktree that `git worktree list` does not show.
 
-## Decisions to make first
+## Decisions
 
-1. **The base.** Two possible bases:
-   - The default branch ref. engraph indexes it from a detached checkout that
-     it manages in its data directory. The base then follows merges when the
-     local ref moves, also when the main worktree has a feature branch. This
-     needs a second checkout of the repo on disk, and the build artifacts of
-     some indexers (for example, rust-analyzer).
-   - The checkout of the main worktree. This needs no second checkout, but a
-     feature branch in the main worktree becomes the base.
-
-   The recommendation is the default branch ref.
+1. **The base: the default branch ref.** engraph indexes it from a detached
+   checkout that it manages in its data directory. The base then follows
+   merges when the local ref moves, also when the main worktree has a feature
+   branch. The cost is a second checkout of the repo on disk, and the build
+   artifacts of some indexers (for example, rust-analyzer). The other possible
+   base, the checkout of the main worktree, needs no second checkout, but a
+   feature branch in the main worktree becomes the base. That result is not
+   correct for a user who does the work in the main worktree.
 2. **Fetch.** engraph does not do `git fetch`. The base changes when the local
    ref moves. The user or other tools fetch.
+
+## Findings
+
+### Part 1, step 2: the symbol ids do not change between commits (2026-11-19)
+
+The test indexed each fixture in `testdata/fixtures` with the installed
+indexer, then indexed it again after a change, and compared the symbol ids.
+The result for all five indexers (rust-analyzer, scip-python, scip-go,
+scip-typescript, scip-java):
+
+- **A change to one file does not change the ids in the other files.** A new
+  function in `ops` and a changed function body gave 0 different ids in the
+  files that did not change. The local ids (`local <n>@<tag>:<path>`) of those
+  files also did not change.
+- **A change to the version of the package does not change the ids.** A bump
+  of the version in `Cargo.toml`, `pyproject.toml`, `package.json`, and
+  `pom.xml` gave 0 different ids. This includes the Rust question of step 2:
+  rule R3 of `scip_loader::normalize_moniker` gives every `rust-analyzer`,
+  `scip-typescript`, and `semanticdb` id the version `0.0.0`, the scip-python
+  and scip-go drivers pin their versions, thus no manifest version is in an
+  id.
+- **The same code at another path gives the same ids,** if the index runs use
+  one project key (`engraph index --project`).
+
+Thus, the overlay design is correct: the base rows and the overlay rows join,
+and no language needs an overlay of all its files.
+
+**One condition for the base checkout.** `driver::python_project_name` uses
+the name in `pyproject.toml`, but if there is no name, it uses the basename of
+the directory. A Python project without a name in `pyproject.toml` thus gives
+different ids in a checkout with a different directory name: the test indexed
+one fixture in `repo-a/` and in `repo-b/` and all 117 ids were different.
+Therefore the detached base checkout must have the same directory name as the
+repo (for example, `<data-dir>/base/<repo-name>`), and each index run of the
+base must give the project key of the repo with `--project`.
 
 ## Steps
 
 ### Part 1: prerequisites
 
-1. Do step 1 of part 2 of [plan 05](05-stable-symbol-ids-plan.md) (a fixed
-   `--module-version` for the standard Go driver).
-2. Find out if other indexers give ids that change between commits. Do this for
-   rust-analyzer, scip-python, scip-typescript, and scip-java. For Rust, find
-   out what occurs when a branch changes the version of a crate.
-3. Record the decision about the base in the pull request.
+1. ~~Do step 1 of part 2 of [plan 05](completed/05-stable-symbol-ids-plan.md) (a
+   fixed `--module-version` for the standard Go driver).~~ Complete: plan 05 is
+   in `docs/plans/completed/`.
+2. ~~Find out if other indexers give ids that change between commits. Do this
+   for rust-analyzer, scip-python, scip-typescript, and scip-java. For Rust,
+   find out what occurs when a branch changes the version of a crate.~~
+   Complete: refer to "Findings".
+3. ~~Record the decision about the base in the pull request.~~ Complete: refer
+   to "Decisions".
 
 ### Part 2: base graph from the base branch
 
@@ -190,7 +230,8 @@ this plan. Add it only if telemetry shows that overlay index runs are too slow
 - A detached checkout of the base doubles the disk use of the repo, and some
   indexers add build artifacts.
 - If symbol ids change between commits, the overlay must contain all files of
-  the affected language. Then it gives no saving.
+  the affected language. Then it gives no saving. The test of part 1, step 2
+  shows that no installed indexer does this (refer to "Findings").
 
 ## Dependencies
 
