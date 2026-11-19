@@ -11,7 +11,7 @@
 
 mod common;
 
-use common::{binary_present, isolate_scip_output};
+use common::{binary_present, isolate_index_locks, isolate_scip_output};
 use engraph_codegraph::{
     Discovery, DiscoveryFilter, GoOptions, format_markdown, index_workspace, subgraph_for,
 };
@@ -66,6 +66,8 @@ fn workspace_links_app_b_caller_to_lib_a_foo() {
         return;
     }
     isolate_scip_output();
+    // index_workspace takes each project's lock (`lock::acquire_wait`).
+    let _locks = isolate_index_locks();
     let dir = tempdir().unwrap();
     let root = dir.path().join("workspace");
     std::fs::create_dir_all(&root).unwrap();
