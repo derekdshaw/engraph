@@ -154,14 +154,24 @@ scip-typescript, scip-java):
 Thus, the overlay design is correct: the base rows and the overlay rows join,
 and no language needs an overlay of all its files.
 
-**One condition for the base checkout.** `driver::python_project_name` uses
+**One bug that this plan makes operative.** `driver::python_project_name` uses
 the name in `pyproject.toml`, but if there is no name, it uses the basename of
-the directory. A Python project without a name in `pyproject.toml` thus gives
-different ids in a checkout with a different directory name: the test indexed
-one fixture in `repo-a/` and in `repo-b/` and all 117 ids were different.
-Therefore the detached base checkout must have the same directory name as the
-repo (for example, `<data-dir>/base/<repo-name>`), and each index run of the
-base must give the project key of the repo with `--project`.
+the directory of the project. That basename is part of every first-party
+scip-python id. If the Python project is at the root of the checkout, the
+basename is the name of the checkout directory, which is different in each
+worktree. The test made one repo with an unnamed `pyproject.toml` at the root
+and added a worktree. The main worktree `engraph/` gave
+`scip-python python engraph 0.0.0 …`, the linked worktree `elm/` gave
+`scip-python python elm 0.0.0 …`, and all 117 ids were different. The same
+repo with the project at `services/api` gave the same ids in both worktrees,
+because that path is part of the repo.
+
+This is not a rule for the name of the base checkout. The user gives the name
+of each worktree (`git worktree add ../elm`), thus engraph cannot make the
+names the same. It is a bug, and it is not operative at this time only because
+the index runs from the main worktree alone (`divergence::in_linked_worktree`).
+This plan makes more than one checkout of a project, thus the overlay rows of
+a worktree would not join the base rows. Step 4 corrects it.
 
 ## Steps
 
@@ -176,6 +186,22 @@ base must give the project key of the repo with `--project`.
    Complete: refer to "Findings".
 3. ~~Record the decision about the base in the pull request.~~ Complete: refer
    to "Decisions".
+4. Make the scip-python project name the same in each checkout of a repo. In
+   `driver::python_project_name`, if `pyproject.toml` gives no name, use the
+   basename of the main worktree of the repo, not the basename of the
+   directory. `cli::git_main_worktree` finds the main worktree from any
+   worktree, and it keeps the two special conditions (a bare repo, a
+   submodule); move it to `engraph_core::utils`, which both crates use, and
+   call it from `canonical_repo_key` and from `python_project_name`. If the
+   directory is not in a repo, the basename of the directory, as before.
+
+   Two repos with the same main-worktree basename (two checkouts named `api`)
+   then have the same package name in their ids. `scip_loader::shared_packages`
+   gives a warning for this condition, which other package names also have.
+
+   This is an id rule: bump `scip_loader::NORMALIZATION_VERSION` to 2 and give
+   it the rule R1 note. `engraph index` then recommends a new index run of the
+   projects whose rows have version 1 (`index::stale_normalization`).
 
 ### Part 2: base graph from the base branch
 
@@ -208,6 +234,9 @@ base must give the project key of the repo with `--project`.
 
 ## Tests
 
+- A Python project with no name in `pyproject.toml`, at the root of a repo,
+  gives the same symbol ids in the main worktree and in a linked worktree with
+  another name (step 4).
 - A symbol that worktree A adds is in the view of A, and it is not in the view
   of worktree B or of the base.
 - A symbol that worktree A removes is not in the view of A, and the callers of
