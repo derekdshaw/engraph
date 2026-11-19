@@ -194,6 +194,46 @@ pub fn record_indexed_commit(
     Ok(())
 }
 
+/// The base a project's base graph was built from (plan 10, part 2, step 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseState {
+    /// The branch ref the base follows, as `refs/heads/<name>`.
+    pub base_ref: String,
+    /// The commit of the last base index run.
+    pub commit: String,
+}
+
+/// Record that the base graph of `project` was indexed from `commit` of
+/// `base_ref`. One row for each project: a later run replaces it.
+pub fn record_base(conn: &PooledConn, project: &str, base_ref: &str, commit: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO project_base (project, base_ref, base_commit, indexed_at)
+         VALUES (?1, ?2, ?3, strftime('%Y-%m-%d %H:%M:%f','now'))
+         ON CONFLICT(project) DO UPDATE SET
+             base_ref = excluded.base_ref,
+             base_commit = excluded.base_commit,
+             indexed_at = excluded.indexed_at",
+        rusqlite::params![project, base_ref, commit],
+    )?;
+    Ok(())
+}
+
+/// The base of `project`, or `None` when it has no base graph yet. The caller
+/// compares `base_ref` with the default branch of the checkout, and `commit`
+/// with where that ref points now: a different ref needs a new base graph, a
+/// different commit needs a base index run.
+pub fn base_state(conn: &PooledConn, project: &str) -> Result<Option<BaseState>> {
+    let mut stmt =
+        conn.prepare("SELECT base_ref, base_commit FROM project_base WHERE project = ?1")?;
+    let mut rows = stmt.query_map([project], |r| {
+        Ok(BaseState {
+            base_ref: r.get(0)?,
+            commit: r.get(1)?,
+        })
+    })?;
+    Ok(rows.next().transpose()?)
+}
+
 /// The projects with an `index_state` row written under other symbol-id
 /// normalization rules than the current `NORMALIZATION_VERSION` — a row from
 /// before the rules (NULL) counts as version 0 — each with the oldest version
@@ -1428,6 +1468,59 @@ mod tests {
         assert_eq!(
             stale_normalization(&conn).unwrap(),
             vec![("/half".to_string(), 0)]
+        );
+    }
+
+    /// Plan 10, part 2, step 4: the base of a project is one row, and a later
+    /// base index run replaces it.
+    #[test]
+    fn base_state_records_the_ref_and_the_commit_of_the_last_base_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = engraph_core::db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        // No base graph yet.
+        assert_eq!(base_state(&conn, "/repo").unwrap(), None);
+
+        record_base(&conn, "/repo", "refs/heads/main", "aaa").unwrap();
+        assert_eq!(
+            base_state(&conn, "/repo").unwrap(),
+            Some(BaseState {
+                base_ref: "refs/heads/main".to_string(),
+                commit: "aaa".to_string(),
+            })
+        );
+
+        // The ref moved and the base was indexed again: one row, the new
+        // commit.
+        record_base(&conn, "/repo", "refs/heads/main", "bbb").unwrap();
+        assert_eq!(
+            base_state(&conn, "/repo").unwrap().unwrap().commit,
+            "bbb".to_string()
+        );
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_base", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+
+        // The default branch was renamed: the ref follows it.
+        record_base(&conn, "/repo", "refs/heads/trunk", "ccc").unwrap();
+        assert_eq!(
+            base_state(&conn, "/repo").unwrap(),
+            Some(BaseState {
+                base_ref: "refs/heads/trunk".to_string(),
+                commit: "ccc".to_string(),
+            })
+        );
+
+        // Another project has its own base.
+        record_base(&conn, "/other", "refs/heads/main", "ddd").unwrap();
+        assert_eq!(
+            base_state(&conn, "/other").unwrap().unwrap().commit,
+            "ddd".to_string()
+        );
+        assert_eq!(
+            base_state(&conn, "/repo").unwrap().unwrap().commit,
+            "ccc".to_string()
         );
     }
 

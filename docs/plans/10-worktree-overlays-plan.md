@@ -210,8 +210,12 @@ a worktree would not join the base rows. Step 4 corrects it.
 
 ### Part 2: base graph from the base branch
 
-4. Record the base of each project: the branch ref and the commit of the last
-   base index run.
+4. ~~Record the base of each project: the branch ref and the commit of the last
+   base index run.~~ Complete: the table `project_base` (schema v19), the
+   functions `index::record_base` and `index::base_state`, and
+   `utils::default_branch_ref`, which gives the local ref of the default
+   branch (`refs/remotes/origin/HEAD`, else `init.defaultBranch`, else `main`
+   or `master`). Step 5 makes the first caller.
 5. If the base is the default branch ref, make a detached checkout of the ref
    in the engraph data directory. Index the base from this checkout.
 6. In the SessionStart hook, find out if the base ref moved after the last base

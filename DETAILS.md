@@ -1446,8 +1446,9 @@ but logs a warning if it ever happens.
 | 16 | `index_state.go_tests`: whether the run had `--go-tests`, so `index --if-changed` lets the Bazel Go pass index `_test.go` files again (§8.0.1). Older rows default to 0; no commit is cleared. |
 | 17 | `events.path_hash` + `events.read_range` + partial index `idx_events_reads (session_id, path_hash, read_range)`: the SHA-256 of the file path of a `read` event and the part of the file it returned (§5.6), so a report can find reads of a file, or of a range of it, that the session read before. NULL for all other events. |
 | 18 | `index_state.normalization`: the version of the symbol-id normalization rules (`scip_loader::NORMALIZATION_VERSION`) the run's ids were written with. `engraph index` lists the projects whose rows carry another version (NULL, from before the rules, counts as 0) and recommends a full `engraph index <repo>` of each: their ids and newly indexed ids do not connect until then (plan 05, part 2, steps 11 to 13). |
+| 19 | `project_base (project, base_ref, base_commit, indexed_at)`: the branch ref the project's base graph follows — the local default branch, `refs/heads/…` — and the commit of the last base index run (plan 10, part 2, step 4). One row per project, written after a base index run, so no row means no base graph yet. The ref is kept beside the commit because a commit alone does not say which branch it came from: a renamed default branch gets a new base, not a refresh of the old one. |
 
-(`SCHEMA_VERSION = 17`; the `MIGRATIONS` array has 17 entries.)
+(`SCHEMA_VERSION = 19`; the `MIGRATIONS` array has 19 entries.)
 
 ---
 

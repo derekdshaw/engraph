@@ -368,6 +368,23 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE index_state ADD COLUMN normalization INTEGER;
     "#,
+    // v19 — the base of each project (plan 10, part 2, step 4): the branch ref
+    // the base graph is built from (the local default branch, `refs/heads/…`),
+    // and the commit of the last base index run. The SessionStart hook
+    // compares that commit with where the ref points now and starts a base
+    // index run in the background when the ref moved (step 6). The ref is kept
+    // beside the commit because a commit alone does not say which branch it
+    // came from: a project whose default branch is renamed gets a new base,
+    // not a refresh of the old one. One row for each project, written after a
+    // base index run, thus no row means no base graph yet.
+    r#"
+    CREATE TABLE IF NOT EXISTS project_base (
+        project TEXT PRIMARY KEY,
+        base_ref TEXT NOT NULL,
+        base_commit TEXT NOT NULL,
+        indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
