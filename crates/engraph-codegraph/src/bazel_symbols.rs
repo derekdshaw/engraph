@@ -773,6 +773,56 @@ fn run_rooted_or_delegated(
     run_indexer(spec, cmd, &out_path, parts, start)
 }
 
+/// The heap ceiling, in MB, of a Node indexer (scip-python, scip-typescript)
+/// when `ENGRAPH_NODE_HEAP_MB` is not set. Node's own default, about 4 GB,
+/// runs out on ray (5,100 Python files). Measured on ray (2026-11-18,
+/// scip-python 0.6.8): an 8 GB ceiling completes but is GC-bound — 7m54s with
+/// RSS pinned at 8.3 GiB, against 5m21s and a 9.85 GiB peak under 16 GB, with
+/// identical SCIP. 12 GB leaves about 20% above what ray uses. It is a
+/// ceiling, not a reservation: Node only grows to what a repo needs.
+const DEFAULT_NODE_HEAP_MB: u32 = 12288;
+
+/// `NODE_OPTIONS` for a Node indexer: `existing` (the user's `NODE_OPTIONS`)
+/// with `--max-old-space-size` added. A heap the user set in `existing` wins
+/// over the default; `override_mb` (`ENGRAPH_NODE_HEAP_MB`) wins over both,
+/// because Node honors the last of repeated flags. An `override_mb` that is
+/// not a positive number of MB gives the default.
+fn node_options(existing: Option<&str>, override_mb: Option<&str>) -> String {
+    let existing = existing.map(str::trim).filter(|s| !s.is_empty());
+    let mb = match override_mb {
+        Some(v) => match v.trim().parse::<u32>() {
+            Ok(mb) if mb > 0 => Some(mb),
+            _ => {
+                tracing::warn!(
+                    value = v,
+                    "ENGRAPH_NODE_HEAP_MB is not a positive number of MB; using {DEFAULT_NODE_HEAP_MB}"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+    let mb = match (mb, existing) {
+        (Some(mb), _) => mb,
+        (None, Some(e)) if e.contains("--max-old-space-size") => return e.to_string(),
+        (None, _) => DEFAULT_NODE_HEAP_MB,
+    };
+    match existing {
+        Some(e) => format!("{e} --max-old-space-size={mb}"),
+        None => format!("--max-old-space-size={mb}"),
+    }
+}
+
+/// Give a Node indexer its heap (`node_options`).
+fn set_node_heap(cmd: &mut Command) {
+    let existing = std::env::var("NODE_OPTIONS").ok();
+    let override_mb = std::env::var("ENGRAPH_NODE_HEAP_MB").ok();
+    cmd.env(
+        "NODE_OPTIONS",
+        node_options(existing.as_deref(), override_mb.as_deref()),
+    );
+}
+
 fn build_indexer_command(spec: &LangSpec, repo: &Path, out_path: &Path) -> Command {
     match spec.language {
         "ts" => {
@@ -782,6 +832,7 @@ fn build_indexer_command(spec: &LangSpec, repo: &Path, out_path: &Path) -> Comma
             // tsconfig.json: each `ts_project` names its own.
             let mut c = crate::driver::typescript_command(repo, out_path, &crate::which::on_path);
             c.arg("--infer-tsconfig");
+            set_node_heap(&mut c);
             c
         }
         "python" => {
@@ -802,6 +853,7 @@ fn build_indexer_command(spec: &LangSpec, repo: &Path, out_path: &Path) -> Comma
                 .arg(project_name)
                 .arg("--project-version")
                 .arg(crate::driver::SCIP_PYTHON_VERSION);
+            set_node_heap(&mut c);
             c
         }
         _ => unreachable!(),
@@ -1565,6 +1617,72 @@ mod tests {
         assert_eq!(r.status, LangStatus::Indexed);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], scip);
+    }
+
+    #[test]
+    fn node_options_add_the_heap_and_keep_the_rest() {
+        let default = format!("--max-old-space-size={DEFAULT_NODE_HEAP_MB}");
+        assert_eq!(node_options(None, None), default);
+        // The user's other Node flags stay.
+        assert_eq!(
+            node_options(Some("--require ./x.js"), None),
+            format!("--require ./x.js {default}")
+        );
+        // A heap the user already set in NODE_OPTIONS wins over the default...
+        assert_eq!(
+            node_options(Some("--max-old-space-size=2048"), None),
+            "--max-old-space-size=2048"
+        );
+        // ...and ENGRAPH_NODE_HEAP_MB over both: Node honors the last flag.
+        assert_eq!(
+            node_options(Some("--max-old-space-size=2048"), Some("12288")),
+            "--max-old-space-size=2048 --max-old-space-size=12288"
+        );
+        // Not a positive number of MB: the default.
+        assert_eq!(node_options(None, Some("lots")), default);
+        assert_eq!(node_options(None, Some("0")), default);
+    }
+
+    #[test]
+    fn node_indexers_get_the_heap_in_node_options() {
+        // scip-python and scip-typescript are both Node programs; Node's own
+        // default heap (about 4 GB) runs out on ray (5,100 Python files).
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("index.scip");
+        let _env = cmd_env_lock();
+        let saved = (
+            std::env::var_os("NODE_OPTIONS"),
+            std::env::var_os("ENGRAPH_NODE_HEAP_MB"),
+        );
+        // SAFETY: `_env` serializes every test that touches these variables.
+        unsafe {
+            std::env::remove_var("NODE_OPTIONS");
+            std::env::set_var("ENGRAPH_NODE_HEAP_MB", "12288");
+        }
+        for lang in ["python", "ts"] {
+            let spec = LANGS.iter().find(|s| s.language == lang).unwrap();
+            let cmd = build_indexer_command(spec, tmp.path(), &out);
+            let node_options = cmd
+                .get_envs()
+                .find(|(k, _)| *k == "NODE_OPTIONS")
+                .and_then(|(_, v)| v)
+                .map(|v| v.to_string_lossy().into_owned());
+            assert_eq!(
+                node_options.as_deref(),
+                Some("--max-old-space-size=12288"),
+                "{lang}"
+            );
+        }
+        unsafe {
+            match &saved.0 {
+                Some(v) => std::env::set_var("NODE_OPTIONS", v),
+                None => std::env::remove_var("NODE_OPTIONS"),
+            }
+            match &saved.1 {
+                Some(v) => std::env::set_var("ENGRAPH_NODE_HEAP_MB", v),
+                None => std::env::remove_var("ENGRAPH_NODE_HEAP_MB"),
+            }
+        }
     }
 
     #[test]

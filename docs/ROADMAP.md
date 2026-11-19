@@ -39,12 +39,6 @@ Telemetry shows the tokens that file reads use. It also shows the tokens of read
 
 Plan: [`docs/plans/04-file-read-measurement-plan.md`](plans/04-file-read-measurement-plan.md)
 
-## 6. Bazel symbols for TypeScript, JavaScript, Python, and Rust
-
-The symbol-level Bazel pass (`--bazel-symbols`) indexes TypeScript, JavaScript, Python, and Rust code. Rust (phase E) and TypeScript and JavaScript (phase B) are done. Python (phase D) is open: scip-python runs out of Node heap on a large repo (ray).
-
-Plan: [`docs/plans/06-bazel-typescript-python-symbols-plan.md`](plans/06-bazel-typescript-python-symbols-plan.md)
-
 ## 11. Subgraph results in the grep redirect
 
 When the grep redirect finds the symbol of a search, the deny reason contains the `engraph subgraph` result. The agent does not do a second tool call. The redirect and `engraph subgraph` use one rule to find a symbol. You can do this item at any time.

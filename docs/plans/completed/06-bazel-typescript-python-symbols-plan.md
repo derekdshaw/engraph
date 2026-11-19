@@ -243,6 +243,33 @@ Validation of phase B:
 
 ### Phase D: Python
 
+Status (2026-11-18): steps 1 to 3 and the validation are complete; step 4 is
+not started, because its condition is not true on ray. Step 2 results, on
+ray commit `a24e301` (5,115 `.py` files; `.bazelversion` is now 8.8.1),
+scip-python 0.6.8, Node v24.22.1, `--project-name ray --project-version
+0.0.0` as the Bazel pass gives them:
+
+| `--max-old-space-size` | Result | Time | Maximum RSS | SCIP size |
+|---|---|---|---|---|
+| Node default (about 4 GB) | out of memory (2026-11-11) | — | — | — |
+| 8192 | completes | 7m54s | 8.3 GiB (8,713,088 KB) | 210,778,316 bytes |
+| 16384 | completes | 5m21s | 9.85 GiB (10,332,304 KB) | 210,778,316 bytes |
+
+With 8 GB the run is GC-bound: the RSS stays at the limit and the time is
+48% longer, for the same SCIP. The default is 12288 (about 20% more than ray
+uses); `ENGRAPH_NODE_HEAP_MB` overrides it. Validation:
+`symbol[python]: indexed (210778316 SCIP bytes)`, 425,006 symbol entities
+(423,039 in `.py` files, 171 in `.pyi`), 223,993 `CALLS`, 179,313
+`REFERENCES`, 10,936 `IMPLEMENTS`, 6m25s with the load (release build,
+maximum RSS 9.66 GiB). The graph has many relations, and they resolve across
+packages: 6,445 of the 6,908 textual `ray.get(` call sites in 727 files are
+`CALLS` to its definition, from 671 files. Thus step 4 (`rules_python`) waits
+for a repo that shows the problem. Two notes from the validation: the symbol
+load deleted 383 of the 3,129 `bazel_target` entities (bug 23 of plan 01),
+and scip-python names modules by their path from `--cwd`
+(`python.ray._private.worker`, not `ray._private.worker`), so a second repo
+that imports `ray` does not link to these ids.
+
 1. Write a test: `build_indexer_command` for `scip-python` sets
    `NODE_OPTIONS=--max-old-space-size=<N>` in the environment of the command,
    where N is from `ENGRAPH_NODE_HEAP_MB` when set, or a default that this

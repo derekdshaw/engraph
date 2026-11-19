@@ -104,7 +104,7 @@ Index runs are serialized per project with an OS file lock on `locks/index-<hash
   export ENGRAPH_BAZEL_SCIP_TS_CMD="$PWD/docs/examples/scip-typescript-bazel-index.sh"
   engraph index --bazel-symbols ~/src/monorepo
   ```
-- **Python** — runs scip-python against the workspace root (best-effort; `rules_python` venv resolution is a follow-up).
+- **Python** — runs scip-python against the workspace root (best-effort; `rules_python` venv resolution is not built — ray did not need it). scip-python and scip-typescript are Node programs, and Node's default heap (about 4 GB) runs out on a large repo, so engraph gives them a 12 GB heap ceiling through `NODE_OPTIONS` (a ceiling, not a reservation); set **`ENGRAPH_NODE_HEAP_MB`** to change it. Your other `NODE_OPTIONS` flags stay, and a `--max-old-space-size` you already set there wins over the default.
 
 ### Hybrid retrieval
 

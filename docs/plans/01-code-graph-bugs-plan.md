@@ -207,6 +207,8 @@ index (plan 06 made this visible on Rust and TypeScript repos):
   and `//src/builtin:default_build_language` are deleted).
 - `bazelbuild/examples` `frontend`: 8,701 without the ts symbol load, 8,669
   with it.
+- `ray-project/ray` (commit `a24e301`): 3,129 without the Python symbol
+  load, 2,746 with it.
 
 `gc::collect_orphans` deletes an orphan `bazel_target` by design (the test
 `prunes_orphan_bazel_target_keeps_linked`). A correction must decide whether

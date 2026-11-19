@@ -2228,8 +2228,21 @@ flag is still available to opt in on a single-repo run.
   analysis cache stays warm) → `SkippedNoTargets` if empty; gate on
   `which scip-python` → `SkippedNoIndexer`; then spawn the indexer at the
   workspace root (`run_indexer`, shared with Rust and TypeScript), SCIP
-  landing under `~/.cache/engraph/bazel-scip-out/<sha>/`. Best-effort:
-  `rules_python` venv resolution is unresolved.
+  landing under `~/.cache/engraph/bazel-scip-out/<sha>/`. Both Node
+  indexers, scip-python and scip-typescript, get a heap ceiling through
+  `NODE_OPTIONS=--max-old-space-size=<MB>` (`set_node_heap`):
+  `ENGRAPH_NODE_HEAP_MB`, else 12288. Node's own default (about 4 GB here)
+  runs out on ray; measured there (scip-python 0.6.8, 5,100 files), an 8 GB
+  ceiling completes but is GC-bound (7m54s, RSS pinned at 8.3 GiB) against
+  5m21s and a 9.85 GiB peak under 16 GB, with byte-identical SCIP, so 12 GB
+  leaves about 20% above what ray uses. It is a ceiling, not a
+  reservation. The user's other `NODE_OPTIONS` flags stay, and a heap
+  already set there wins over the default; `ENGRAPH_NODE_HEAP_MB` wins over
+  both, because Node honors the last of repeated flags. On ray the pass
+  indexes 425,006 symbols with 223,993 `CALLS` (6m25s with the load, release
+  build), and 6,445 of the 6,908 textual `ray.get(` call sites resolve to
+  its definition across 671 files, so per-project `rules_python` venv
+  resolution is not built.
 - **TypeScript and JavaScript** (`run_ts`, language id `ts`).
   scip-typescript indexes JavaScript too, so the count covers `ts_project`,
   `ts_library`, `js_library`, `js_binary`, and `js_test` (not
@@ -2469,7 +2482,15 @@ workload trips them):
   the lockfile with `pnpm install --lockfile-only`, or put the pnpm that
   writes that version on `PATH`.
 - **scip-python rules_python venv**: per-project environment resolution
-  is unbuilt (Phase D).
+  is unbuilt; ray did not need it (about 93% of `ray.get` call sites
+  resolve). A repo whose imports stay unresolved shows it as few
+  relations, not as a failure.
+- **scip-python module names follow the path from `--cwd`**: ray's
+  `python/ray/_private/worker.py` is module `python.ray._private.worker`,
+  while its code imports `ray._private.worker`. Inside the repo the ids
+  match; another repo that imports `ray` makes `ray._private.worker` ids, so
+  cross-repo stitching does not link the two. Changing it is an id rule
+  (a `NORMALIZATION_VERSION` bump, §14.10).
 - **Rust without a root `Cargo.toml`**: only the root is checked; a repo
   whose Cargo workspaces sit in subdirectories, or that has no Cargo at
   all, needs `ENGRAPH_BAZEL_SCIP_RUST_CMD`. A command built on `rules_rust`'s
@@ -2526,5 +2547,5 @@ v18).
 
 The roadmap (`docs/ROADMAP.md`, one plan per item in `docs/plans/`)
 tracks features that aren't built, ranked by expected impact. The codegraph is shipped (target-level §14.8,
-symbol-level §14.9, stable symbol ids §14.10); its open item there is
-Bazel symbols for Python (plan 06, phase D).
+symbol-level §14.9, stable symbol ids §14.10); its open items there are
+the code-graph bugs of plan 01.
