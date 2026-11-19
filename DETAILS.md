@@ -1608,9 +1608,9 @@ crate that does cross-file `who-calls` across Rust/Python/Go/TS/Java.
 | Driver | `detect()` trigger | `command()` |
 |---|---|---|
 | `RustAnalyzer` | `Cargo.toml` | `rust-analyzer scip <repo> --output <out>` (chdir into repo) |
-| `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <out> --project-name <name> --project-version 0.0.0`, where `<name>` is `[project].name` of `pyproject.toml`, else `[tool.poetry].name`, else the repo's basename (`python_project_name`; plan 05 rule R1, so the ids do not depend on the checkout directory) |
+| `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <out> --project-name <name> --project-version 0.0.0`, where `<name>` is `[project].name` of `pyproject.toml`, else `[tool.poetry].name`, else the repo's basename (`python_project_name`; plan 05 rule R1, so the ids do not depend on the checkout directory); `NODE_OPTIONS` carries the Node heap ceiling (`set_node_heap`, §14.9) |
 | `ScipGo` | `go.mod` or `go.work` | `scip-go --module-root <repo> --module-version 0.0.0 --output <out>` (chdir into repo); with a `go.work`, also one `./<dir>/...` package pattern per `use` directory, since scip-go's default `./...` covers only the root module; `GOWORK=off` when the nearest `go.work` above the repo does not list it (`outside_its_go_work`), since Go then builds nothing there; with `--go-tags <a,b>`, `GOFLAGS="$GOFLAGS -tags=a,b"` (`apply_go_tags`; scip-go has no tags flag, but its package loader reads `GOFLAGS`, and the last `-tags` wins) |
-| `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index --output <out>` (chdir into repo); in a pnpm or yarn workspace (`TsWorkspace`), also `--pnpm-workspaces` / `--yarn-workspaces <repo>` |
+| `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index --output <out>` (chdir into repo); in a pnpm or yarn workspace (`TsWorkspace`), also `--pnpm-workspaces` / `--yarn-workspaces <repo>`; `NODE_OPTIONS` carries the Node heap ceiling (`set_node_heap`, §14.9) |
 | `ScipJava` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java index --output <out>` (chdir into repo) |
 
 `<out>` is `index.scip` inside a per-repo scratch directory `index.rs`
@@ -2228,9 +2228,12 @@ flag is still available to opt in on a single-repo run.
   analysis cache stays warm) → `SkippedNoTargets` if empty; gate on
   `which scip-python` → `SkippedNoIndexer`; then spawn the indexer at the
   workspace root (`run_indexer`, shared with Rust and TypeScript), SCIP
-  landing under `~/.cache/engraph/bazel-scip-out/<sha>/`. Both Node
-  indexers, scip-python and scip-typescript, get a heap ceiling through
-  `NODE_OPTIONS=--max-old-space-size=<MB>` (`set_node_heap`):
+  landing under `~/.cache/engraph/bazel-scip-out/<sha>/`. The command is
+  the standalone driver's own (`ScipPython::command`; the ts arm uses
+  `typescript_command`), so the argv and the heap are defined once. Both
+  Node indexers, scip-python and scip-typescript, get a heap ceiling
+  through `NODE_OPTIONS=--max-old-space-size=<MB>` (`driver::set_node_heap`,
+  called by those two commands, so a plain `engraph index` gets it too):
   `ENGRAPH_NODE_HEAP_MB`, else 12288. Node's own default (about 4 GB here)
   runs out on ray; measured there (scip-python 0.6.8, 5,100 files), an 8 GB
   ceiling completes but is GC-bound (7m54s, RSS pinned at 8.3 GiB) against

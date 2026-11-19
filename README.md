@@ -73,6 +73,8 @@ Index runs are serialized per project with an OS file lock on `locks/index-<hash
 | `scip-typescript` | `package.json` + `tsconfig.json` | `@sourcegraph/scip-typescript` (npm) |
 | `scip-java` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java` via Coursier (`cs install --contrib scip-java`) |
 
+**Node heap:** scip-python and scip-typescript are Node programs, and Node's default heap (about 4 GB) runs out on a large repo (ray, 5,100 Python files), so engraph gives them a 12 GB heap ceiling through `NODE_OPTIONS` — for a plain `engraph index` and for `--bazel-symbols` alike. It is a ceiling, not a reservation: Node only grows to what the repo needs. Set **`ENGRAPH_NODE_HEAP_MB`** to change it. Your other `NODE_OPTIONS` flags stay, and a `--max-old-space-size` you already set there wins over the default.
+
 **Go build tags and tests:** scip-go indexes one build configuration, so a file behind a `//go:build` line that the build does not meet is not in the code graph. `engraph index --go-tags integration,e2e` gives scip-go those tags (through `GOFLAGS`, keeping your other Go flags), and `--if-changed` repeats them. `GOOS` / `GOARCH` in the environment of the run select the platform files the same way. The Bazel Go pass skips `_test.go` files, so one module with unresolved test-only dependencies does not lose its library symbols; `--go-tests` indexes them too. The standalone Go driver always indexes tests.
 
 `scripts/install-scip-indexers.sh` is an idempotent installer for all five upstream indexers with per-toolchain prerequisite checks.
@@ -104,7 +106,7 @@ Index runs are serialized per project with an OS file lock on `locks/index-<hash
   export ENGRAPH_BAZEL_SCIP_TS_CMD="$PWD/docs/examples/scip-typescript-bazel-index.sh"
   engraph index --bazel-symbols ~/src/monorepo
   ```
-- **Python** — runs scip-python against the workspace root (best-effort; `rules_python` venv resolution is not built — ray did not need it). scip-python and scip-typescript are Node programs, and Node's default heap (about 4 GB) runs out on a large repo, so engraph gives them a 12 GB heap ceiling through `NODE_OPTIONS` (a ceiling, not a reservation); set **`ENGRAPH_NODE_HEAP_MB`** to change it. Your other `NODE_OPTIONS` flags stay, and a `--max-old-space-size` you already set there wins over the default.
+- **Python** — runs scip-python against the workspace root (best-effort; `rules_python` venv resolution is not built — ray did not need it). The Node heap ceiling (**Node heap**, above) applies.
 
 ### Hybrid retrieval
 

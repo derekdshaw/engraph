@@ -773,89 +773,24 @@ fn run_rooted_or_delegated(
     run_indexer(spec, cmd, &out_path, parts, start)
 }
 
-/// The heap ceiling, in MB, of a Node indexer (scip-python, scip-typescript)
-/// when `ENGRAPH_NODE_HEAP_MB` is not set. Node's own default, about 4 GB,
-/// runs out on ray (5,100 Python files). Measured on ray (2026-11-18,
-/// scip-python 0.6.8): an 8 GB ceiling completes but is GC-bound — 7m54s with
-/// RSS pinned at 8.3 GiB, against 5m21s and a 9.85 GiB peak under 16 GB, with
-/// identical SCIP. 12 GB leaves about 20% above what ray uses. It is a
-/// ceiling, not a reservation: Node only grows to what a repo needs.
-const DEFAULT_NODE_HEAP_MB: u32 = 12288;
-
-/// `NODE_OPTIONS` for a Node indexer: `existing` (the user's `NODE_OPTIONS`)
-/// with `--max-old-space-size` added. A heap the user set in `existing` wins
-/// over the default; `override_mb` (`ENGRAPH_NODE_HEAP_MB`) wins over both,
-/// because Node honors the last of repeated flags. An `override_mb` that is
-/// not a positive number of MB gives the default.
-fn node_options(existing: Option<&str>, override_mb: Option<&str>) -> String {
-    let existing = existing.map(str::trim).filter(|s| !s.is_empty());
-    let mb = match override_mb {
-        Some(v) => match v.trim().parse::<u32>() {
-            Ok(mb) if mb > 0 => Some(mb),
-            _ => {
-                tracing::warn!(
-                    value = v,
-                    "ENGRAPH_NODE_HEAP_MB is not a positive number of MB; using {DEFAULT_NODE_HEAP_MB}"
-                );
-                None
-            }
-        },
-        None => None,
-    };
-    let mb = match (mb, existing) {
-        (Some(mb), _) => mb,
-        (None, Some(e)) if e.contains("--max-old-space-size") => return e.to_string(),
-        (None, _) => DEFAULT_NODE_HEAP_MB,
-    };
-    match existing {
-        Some(e) => format!("{e} --max-old-space-size={mb}"),
-        None => format!("--max-old-space-size={mb}"),
-    }
-}
-
-/// Give a Node indexer its heap (`node_options`).
-fn set_node_heap(cmd: &mut Command) {
-    let existing = std::env::var("NODE_OPTIONS").ok();
-    let override_mb = std::env::var("ENGRAPH_NODE_HEAP_MB").ok();
-    cmd.env(
-        "NODE_OPTIONS",
-        node_options(existing.as_deref(), override_mb.as_deref()),
-    );
-}
-
+/// The single-shot indexer commands are the standalone drivers' own
+/// (`driver.rs`), so the argv and the Node heap ceiling
+/// (`driver::set_node_heap`) are defined once for both paths.
 fn build_indexer_command(spec: &LangSpec, repo: &Path, out_path: &Path) -> Command {
+    use crate::driver::Driver;
     match spec.language {
         "ts" => {
-            // The standalone driver's command: it adds `--pnpm-workspaces` or
+            // The standalone command adds `--pnpm-workspaces` or
             // `--yarn-workspaces` for a workspace whose tool is installed.
             // `--infer-tsconfig` because a Bazel root often has no
             // tsconfig.json: each `ts_project` names its own.
             let mut c = crate::driver::typescript_command(repo, out_path, &crate::which::on_path);
             c.arg("--infer-tsconfig");
-            set_node_heap(&mut c);
             c
         }
-        "python" => {
-            // Mirror the standalone scip-python driver (driver.rs): --output is
-            // resolved relative to --cwd, so pin --cwd to the repo and pass an
-            // absolute out_path. --project-name comes from pyproject.toml, else
-            // the repo dir name (driver::python_project_name), and
-            // --project-version is pinned (see driver::SCIP_PYTHON_VERSION)
-            // to avoid the undefined-version crash and keep entity IDs stable.
-            let project_name = crate::driver::python_project_name(repo);
-            let mut c = Command::new(spec.binary);
-            c.arg("index")
-                .arg("--cwd")
-                .arg(repo)
-                .arg("--output")
-                .arg(out_path)
-                .arg("--project-name")
-                .arg(project_name)
-                .arg("--project-version")
-                .arg(crate::driver::SCIP_PYTHON_VERSION);
-            set_node_heap(&mut c);
-            c
-        }
+        // --cwd and an absolute --output, the --project-name of
+        // pyproject.toml, and the pinned --project-version.
+        "python" => crate::driver::ScipPython.command(repo, out_path),
         _ => unreachable!(),
     }
 }
@@ -1617,30 +1552,6 @@ mod tests {
         assert_eq!(r.status, LangStatus::Indexed);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], scip);
-    }
-
-    #[test]
-    fn node_options_add_the_heap_and_keep_the_rest() {
-        let default = format!("--max-old-space-size={DEFAULT_NODE_HEAP_MB}");
-        assert_eq!(node_options(None, None), default);
-        // The user's other Node flags stay.
-        assert_eq!(
-            node_options(Some("--require ./x.js"), None),
-            format!("--require ./x.js {default}")
-        );
-        // A heap the user already set in NODE_OPTIONS wins over the default...
-        assert_eq!(
-            node_options(Some("--max-old-space-size=2048"), None),
-            "--max-old-space-size=2048"
-        );
-        // ...and ENGRAPH_NODE_HEAP_MB over both: Node honors the last flag.
-        assert_eq!(
-            node_options(Some("--max-old-space-size=2048"), Some("12288")),
-            "--max-old-space-size=2048 --max-old-space-size=12288"
-        );
-        // Not a positive number of MB: the default.
-        assert_eq!(node_options(None, Some("lots")), default);
-        assert_eq!(node_options(None, Some("0")), default);
     }
 
     #[test]
