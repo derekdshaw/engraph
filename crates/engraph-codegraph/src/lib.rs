@@ -7,6 +7,8 @@ pub mod lock;
 pub mod relation_kind;
 pub mod scip_loader;
 pub mod subgraph;
+#[cfg(test)]
+mod test_env;
 mod which;
 
 pub use bazel::{BazelStats, detect_bazel, index_bazel_workspace};

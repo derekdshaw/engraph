@@ -27,7 +27,8 @@
 #
 # The install writes node_modules into the repo (gitignored in most repos) and runs
 # the packages' install scripts. Once a root node_modules exists, engraph's native
-# pass can index the repo without this script.
+# pass runs the first scip-typescript command below itself, but not the second pass
+# for the JavaScript files no tsconfig covers; keep this script set for those.
 set -euo pipefail
 
 REPO="${1:?usage: $0 <repo-root> <output-scip>}"
@@ -124,13 +125,41 @@ WORK="$(mktemp -d -t scip-ts-work.XXXXXX)"
 TSCONFIGS_BEFORE="$(mktemp -t scip-ts-cfgs.XXXXXX)"
 list_tsconfigs > "$TSCONFIGS_BEFORE"
 
-# The workspace flag, as engraph's native pass gives it (driver::typescript_command):
-# with the flag scip-typescript indexes only the packages the tool lists, and yarn 1
-# does not list the root, so name the root too, as its real path.
+# Whether pnpm-workspace.yaml lists at least one `packages` glob, read as engraph
+# reads it (driver::pnpm_packages): a column-0 `packages:` key, then its `-` items,
+# quoted or not, up to a ` #` comment.
+pnpm_has_packages() {
+  awk '
+    { body = $0; gsub(/^[ \t]+|[ \t]+$/, "", body) }
+    body == "" || body ~ /^#/ { next }
+    /^[^ \t-]/ { key = body; sub(/#.*/, "", key); gsub(/[ \t]+$/, "", key); inp = (key == "packages:"); next }
+    inp && body ~ /^-/ {
+      item = substr(body, 2); gsub(/^[ \t]+/, "", item)
+      q = substr(item, 1, 1)
+      if (q == "\"" || q == "\047") { item = substr(item, 2); i = index(item, q); if (i) item = substr(item, 1, i - 1) }
+      else { i = index(item, " #"); if (i) item = substr(item, 1, i - 1); gsub(/[ \t]+$/, "", item) }
+      if (item != "") { found = 1; exit }
+    }
+    END { exit !found }
+  ' pnpm-workspace.yaml
+}
+
+# The workspace flag, as engraph's native pass gives it (driver::TsWorkspace and
+# driver::typescript_command): a pnpm-workspace.yaml with at least one glob, else a
+# yarn.lock and a package.json `workspaces` (an array, or yarn's {"packages": [...]})
+# with at least one; and the tool on PATH, since the flag makes scip-typescript run
+# it. With the flag scip-typescript indexes only the packages the tool lists, and
+# yarn 1 does not list the root, so name the root too, as its real path.
 ARGS=(index --output "$WORK/ts.scip" --infer-tsconfig)
 if [ -f pnpm-workspace.yaml ]; then
-  ARGS+=(--pnpm-workspaces "$(pwd -P)")
-elif [ -f yarn.lock ] && node -e 'process.exit(require("./package.json").workspaces ? 0 : 1)' 2>/dev/null; then
+  if pnpm_has_packages && command -v pnpm >/dev/null 2>&1; then
+    ARGS+=(--pnpm-workspaces "$(pwd -P)")
+  fi
+elif [ -f yarn.lock ] && command -v yarn >/dev/null 2>&1 && node -e '
+    const w = require("./package.json").workspaces;
+    const list = Array.isArray(w) ? w : w && w.packages;
+    process.exit(Array.isArray(list) && list.some((g) => typeof g === "string") ? 0 : 1);
+  ' 2>/dev/null; then
   ARGS+=(--yarn-workspaces "$(pwd -P)")
 fi
 

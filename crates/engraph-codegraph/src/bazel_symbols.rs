@@ -52,6 +52,7 @@
 //! not engraph. Go and TS read sources directly (no Bazel build subprocess).
 
 use crate::bazel::{FAILURE_TAIL_LINES, bazel_binary, failure_tail, output_base_for};
+use crate::driver::Driver;
 use crate::scip_loader::{self, LoadOptions};
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
@@ -98,6 +99,10 @@ pub struct LangIndexResult {
 /// cannot (`run_go`). Also the `env` of the `SkippedNotConfigured` the native
 /// pass reports when it finds no `go.mod`, so both stay in step.
 const GO_CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_GO_CMD";
+
+/// The command that indexes Java under Bazel (`run_java`); Java has no native
+/// pass, so without it the targets are reported not configured.
+const JAVA_CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_JAVA_CMD";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LangStatus {
@@ -230,7 +235,7 @@ const LANGS: &[LangSpec] = &[
 /// What a `--dry-run` reports for one symbol-level language: the language, the
 /// indexer binary it needs, and whether that binary is on PATH right now.
 /// Target presence is NOT probed here (that needs a Bazel server) — it is
-/// checked at real run time by `bazel_has_targets`.
+/// checked at real run time by `bazel_count_targets`.
 #[derive(Debug)]
 pub struct SymbolLangPlan {
     pub language: &'static str,
@@ -317,6 +322,8 @@ pub fn index_bazel_symbols(
     Ok(stats)
 }
 
+/// Python symbol pass: the standalone scip-python at the workspace root, with
+/// no root file to require and no delegated command.
 fn run_language(
     spec: &LangSpec,
     repo: &Path,
@@ -325,30 +332,63 @@ fn run_language(
     parts: &mut Vec<Vec<u8>>,
 ) -> Result<LangIndexResult> {
     let start = Instant::now();
-
-    if !bazel_has_targets(bazel, repo, spec.rule_kinds)? {
-        return Ok(LangIndexResult {
-            language: spec.language,
-            scip_bytes: 0,
-            elapsed_ms: start.elapsed().as_millis() as i64,
-            status: LangStatus::SkippedNoTargets,
-        });
-    }
-
-    if !indexer_present(spec.binary) {
-        return Ok(LangIndexResult {
-            language: spec.language,
-            scip_bytes: 0,
-            elapsed_ms: start.elapsed().as_millis() as i64,
-            status: LangStatus::SkippedNoIndexer {
-                binary: spec.binary,
-            },
-        });
-    }
-
     let out_path = scip_dir.join(format!("index-{}.scip", spec.language));
-    let cmd = build_indexer_command(spec, repo, &out_path);
-    run_indexer(spec, cmd, &out_path, parts, start)
+    run_native(spec, repo, bazel, start, None, || {
+        let cmd = build_indexer_command(spec, repo, &out_path);
+        run_indexer(spec, cmd, &out_path, parts, start)
+    })
+}
+
+/// The native pass of a single-shot indexer: count the targets; with
+/// `root = Some((path, cmd_env))`, report `SkippedNotConfigured` naming
+/// `cmd_env` when `path` is missing at the workspace root; check the indexer
+/// is on PATH; then `index`. `start` is the start of the language pass.
+fn run_native(
+    spec: &LangSpec,
+    repo: &Path,
+    bazel: &Path,
+    start: Instant,
+    root: Option<(&str, &'static str)>,
+    index: impl FnOnce() -> Result<LangIndexResult>,
+) -> Result<LangIndexResult> {
+    let skip = |status| lang_result(spec, start, 0, status);
+    let targets = bazel_count_targets(bazel, repo, spec.rule_kinds)?;
+    if targets == 0 {
+        return Ok(skip(LangStatus::SkippedNoTargets));
+    }
+    // Before the PATH probe, which starts the indexer: without `root` there is
+    // nothing for it to index whether it is installed or not.
+    if let Some((root, env)) = root
+        && !repo.join(root).exists()
+    {
+        return Ok(skip(LangStatus::SkippedNotConfigured { targets, env }));
+    }
+    if !indexer_present(spec.binary) {
+        return Ok(skip(LangStatus::SkippedNoIndexer {
+            binary: spec.binary,
+        }));
+    }
+    index()
+}
+
+/// A language's result at the end of its pass, timed from `start`.
+fn lang_result(
+    spec: &LangSpec,
+    start: Instant,
+    scip_bytes: usize,
+    status: LangStatus,
+) -> LangIndexResult {
+    LangIndexResult {
+        language: spec.language,
+        scip_bytes,
+        elapsed_ms: start.elapsed().as_millis() as i64,
+        status,
+    }
+}
+
+/// The value of the command variable `env`, if it is set and not blank.
+fn configured_cmd(env: &str) -> Option<String> {
+    std::env::var(env).ok().filter(|c| !c.trim().is_empty())
 }
 
 /// Run one single-shot SCIP indexer `cmd` that writes to `out_path`, and merge
@@ -371,28 +411,23 @@ fn run_indexer(
         .output()
         .with_context(|| format!("spawning {}", spec.binary))?;
     if !output.status.success() {
-        return Ok(LangIndexResult {
-            language: spec.language,
-            scip_bytes: 0,
-            elapsed_ms: start.elapsed().as_millis() as i64,
-            status: LangStatus::Failed(format!(
+        return Ok(lang_result(
+            spec,
+            start,
+            0,
+            LangStatus::Failed(format!(
                 "{} exited with {}\n{}",
                 spec.binary,
                 output.status,
                 failure_tail(&output.stderr, &output.stdout, FAILURE_TAIL_LINES)
             )),
-        });
+        ));
     }
 
     let bytes = read_scip_output(spec, out_path)?;
     let n = bytes.len();
     parts.push(bytes);
-    Ok(LangIndexResult {
-        language: spec.language,
-        scip_bytes: n,
-        elapsed_ms: start.elapsed().as_millis() as i64,
-        status: LangStatus::Indexed,
-    })
+    Ok(lang_result(spec, start, n, LangStatus::Indexed))
 }
 
 /// Delegated symbol pass, shared by Java and Go. The language's SCIP build is too
@@ -417,17 +452,12 @@ fn run_delegated(
     out_name: &str,
 ) -> Result<LangIndexResult> {
     let start = Instant::now();
-    let skip = |status: LangStatus| LangIndexResult {
-        language: spec.language,
-        scip_bytes: 0,
-        elapsed_ms: start.elapsed().as_millis() as i64,
-        status,
-    };
+    let skip = |status| lang_result(spec, start, 0, status);
 
     // The count gates the command either way (a `--workspace` run must not
     // start the Java command in every repo without Java); the variable only
     // decides what a zero count is reported as.
-    let cmd = std::env::var(cmd_env).ok().filter(|c| !c.trim().is_empty());
+    let cmd = configured_cmd(cmd_env);
     let targets = bazel_count_targets(bazel, repo, spec.rule_kinds)?;
     if targets == 0 {
         return Ok(skip(match cmd {
@@ -474,12 +504,7 @@ fn run_delegated(
         Ok(bytes) if !bytes.is_empty() => {
             let n = bytes.len();
             parts.push(bytes);
-            Ok(LangIndexResult {
-                language: spec.language,
-                scip_bytes: n,
-                elapsed_ms: start.elapsed().as_millis() as i64,
-                status: LangStatus::Indexed,
-            })
+            Ok(lang_result(spec, start, n, LangStatus::Indexed))
         }
         _ => Ok(skip(LangStatus::Failed(format!(
             "{cmd_env} command succeeded but wrote no SCIP to {}",
@@ -504,7 +529,7 @@ fn run_java(
         bazel,
         scip_dir,
         parts,
-        "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
+        JAVA_CMD_ENV,
         "index-java.scip",
     )
 }
@@ -524,24 +549,30 @@ fn run_go(
     parts: &mut Vec<Vec<u8>>,
     go: crate::index::GoOptions,
 ) -> Result<LangIndexResult> {
-    const CMD_ENV: &str = GO_CMD_ENV;
-    let configured = std::env::var(CMD_ENV)
-        .map(|c| !c.trim().is_empty())
-        .unwrap_or(false);
-    if configured {
-        run_delegated(spec, repo, bazel, scip_dir, parts, CMD_ENV, "index-go.scip")
+    if configured_cmd(GO_CMD_ENV).is_some() {
+        run_delegated(
+            spec,
+            repo,
+            bazel,
+            scip_dir,
+            parts,
+            GO_CMD_ENV,
+            "index-go.scip",
+        )
     } else {
         run_go_modules(spec, repo, bazel, scip_dir, parts, go)
     }
 }
 
-/// The command that indexes Rust under Bazel when the root has no `Cargo.toml`
-/// (`run_rust`), and the `env` of the `SkippedNotConfigured` reported then.
+/// The command that indexes Rust under Bazel (`run_rust`): when set, it runs
+/// instead of the native pass, root `Cargo.toml` or not. Also the `env` of the
+/// `SkippedNotConfigured` the native pass reports with no root `Cargo.toml`.
 const RUST_CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_RUST_CMD";
 
-/// The command that indexes TypeScript and JavaScript under Bazel when the root
-/// has no `node_modules` (`run_ts`), and the `env` of the
-/// `SkippedNotConfigured` reported then.
+/// The command that indexes TypeScript and JavaScript under Bazel (`run_ts`):
+/// when set, it runs instead of the native pass, root `node_modules` or not.
+/// Also the `env` of the `SkippedNotConfigured` the native pass reports with
+/// no root `node_modules`.
 const TS_CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_TS_CMD";
 
 /// Rust symbol pass. Unset `ENGRAPH_BAZEL_SCIP_RUST_CMD` → rust-analyzer on the
@@ -556,7 +587,6 @@ fn run_rust(
     scip_dir: &Path,
     parts: &mut Vec<Vec<u8>>,
 ) -> Result<LangIndexResult> {
-    use crate::driver::Driver;
     run_rooted_or_delegated(
         spec,
         repo,
@@ -565,7 +595,15 @@ fn run_rust(
         parts,
         RUST_CMD_ENV,
         "Cargo.toml",
-        |out| crate::driver::RustAnalyzer.command(repo, out),
+        |out, parts, start| {
+            run_indexer(
+                spec,
+                crate::driver::RustAnalyzer.command(repo, out),
+                out,
+                parts,
+                start,
+            )
+        },
     )
 }
 
@@ -587,14 +625,13 @@ fn tsconfig_paths(repo: &Path) -> std::collections::BTreeSet<PathBuf> {
             if name == "node_modules" || name.starts_with('.') || name.starts_with("bazel-") {
                 continue;
             }
-            let path = entry.path();
-            if path.is_symlink() {
-                continue;
-            }
-            if path.is_dir() {
-                walk(&path, out);
-            } else if name == "tsconfig.json" {
-                out.insert(path);
+            // The entry's own type: no stat per entry, and a symlink is
+            // neither a dir nor a file here.
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                walk(&entry.path(), out);
+            } else if ft.is_file() && name == "tsconfig.json" {
+                out.insert(entry.path());
             }
         }
     }
@@ -634,11 +671,31 @@ fn run_ts(
     scip_dir: &Path,
     parts: &mut Vec<Vec<u8>>,
 ) -> Result<LangIndexResult> {
-    // `--infer-tsconfig` writes into the repo; sweep what this run created,
-    // whichever branch ran and however it ended.
-    let before = tsconfig_paths(repo);
-    let mut result = run_ts_inner(spec, repo, bazel, scip_dir, parts);
-    remove_inferred_tsconfigs(repo, &before);
+    let mut result = run_rooted_or_delegated(
+        spec,
+        repo,
+        bazel,
+        scip_dir,
+        parts,
+        TS_CMD_ENV,
+        "node_modules",
+        |out, parts, start| {
+            // `--infer-tsconfig` writes into the repo; sweep what this run
+            // created, however it ended. A delegated command owns its own
+            // side effects, so only this branch, the one that passes the
+            // flag, takes the two repo walks.
+            let before = tsconfig_paths(repo);
+            let result = run_indexer(
+                spec,
+                build_indexer_command(spec, repo, out),
+                out,
+                parts,
+                start,
+            );
+            remove_inferred_tsconfigs(repo, &before);
+            result
+        },
+    );
     if let Ok(r) = &mut result
         && let LangStatus::Failed(msg) = &r.status
         && let Some(help) = pnpm_broken_lockfile_help(repo, msg)
@@ -698,31 +755,12 @@ fn pnpm_lockfile_version(repo: &Path) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-fn run_ts_inner(
-    spec: &LangSpec,
-    repo: &Path,
-    bazel: &Path,
-    scip_dir: &Path,
-    parts: &mut Vec<Vec<u8>>,
-) -> Result<LangIndexResult> {
-    run_rooted_or_delegated(
-        spec,
-        repo,
-        bazel,
-        scip_dir,
-        parts,
-        TS_CMD_ENV,
-        "node_modules",
-        |out| build_indexer_command(spec, repo, out),
-    )
-}
-
 /// The pass of a language whose native indexer needs `root` (a file or a
 /// directory) at the workspace root. If `cmd_env` is set, delegate the whole
 /// pass to it (see `run_delegated`). Unset → count the targets, and with
 /// targets but no `root`, report `SkippedNotConfigured` naming `cmd_env` — the
-/// same state as Go with no `go.mod`, reported the same way. Else run the
-/// command `command` builds for the output path.
+/// same state as Go with no `go.mod`, reported the same way. Else `index` into
+/// the output path (`run_native`).
 #[allow(clippy::too_many_arguments)]
 fn run_rooted_or_delegated(
     spec: &LangSpec,
@@ -732,52 +770,23 @@ fn run_rooted_or_delegated(
     parts: &mut Vec<Vec<u8>>,
     cmd_env: &'static str,
     root: &str,
-    command: impl FnOnce(&Path) -> Command,
+    index: impl FnOnce(&Path, &mut Vec<Vec<u8>>, Instant) -> Result<LangIndexResult>,
 ) -> Result<LangIndexResult> {
     let out_name = format!("index-{}.scip", spec.language);
-    let configured = std::env::var(cmd_env)
-        .map(|c| !c.trim().is_empty())
-        .unwrap_or(false);
-    if configured {
+    if configured_cmd(cmd_env).is_some() {
         return run_delegated(spec, repo, bazel, scip_dir, parts, cmd_env, &out_name);
     }
-
     let start = Instant::now();
-    let skip = |status: LangStatus| LangIndexResult {
-        language: spec.language,
-        scip_bytes: 0,
-        elapsed_ms: start.elapsed().as_millis() as i64,
-        status,
-    };
-
-    let targets = bazel_count_targets(bazel, repo, spec.rule_kinds)?;
-    if targets == 0 {
-        return Ok(skip(LangStatus::SkippedNoTargets));
-    }
-    // Before the PATH probe, which starts the indexer: without `root` there is
-    // nothing for it to index whether it is installed or not.
-    if !repo.join(root).exists() {
-        return Ok(skip(LangStatus::SkippedNotConfigured {
-            targets,
-            env: cmd_env,
-        }));
-    }
-    if !indexer_present(spec.binary) {
-        return Ok(skip(LangStatus::SkippedNoIndexer {
-            binary: spec.binary,
-        }));
-    }
-
     let out_path = scip_dir.join(out_name);
-    let cmd = command(&out_path);
-    run_indexer(spec, cmd, &out_path, parts, start)
+    run_native(spec, repo, bazel, start, Some((root, cmd_env)), || {
+        index(&out_path, parts, start)
+    })
 }
 
 /// The single-shot indexer commands are the standalone drivers' own
 /// (`driver.rs`), so the argv and the Node heap ceiling
 /// (`driver::set_node_heap`) are defined once for both paths.
 fn build_indexer_command(spec: &LangSpec, repo: &Path, out_path: &Path) -> Command {
-    use crate::driver::Driver;
     match spec.language {
         "ts" => {
             // The standalone command adds `--pnpm-workspaces` or
@@ -821,12 +830,7 @@ fn run_go_modules(
     go: crate::index::GoOptions,
 ) -> Result<LangIndexResult> {
     let start = Instant::now();
-    let skip = |status: LangStatus| LangIndexResult {
-        language: spec.language,
-        scip_bytes: 0,
-        elapsed_ms: start.elapsed().as_millis() as i64,
-        status,
-    };
+    let skip = |status| lang_result(spec, start, 0, status);
 
     let targets = bazel_count_targets(bazel, repo, spec.rule_kinds)?;
     if targets == 0 {
@@ -904,16 +908,16 @@ fn run_go_modules(
         indexed += 1;
     }
 
-    Ok(LangIndexResult {
-        language: spec.language,
+    Ok(lang_result(
+        spec,
+        start,
         scip_bytes,
-        elapsed_ms: start.elapsed().as_millis() as i64,
-        status: LangStatus::IndexedModules {
+        LangStatus::IndexedModules {
             indexed,
             failed,
             targets,
         },
-    })
+    ))
 }
 
 /// Enumerate every Go module (directory containing `go.mod`) under `repo`, as
@@ -1032,10 +1036,6 @@ fn prefix_documents(idx: &mut scip::types::Index, prefix_str: &str) {
     }
 }
 
-fn bazel_has_targets(bazel: &Path, repo: &Path, kinds: &[&str]) -> Result<bool> {
-    Ok(bazel_count_targets(bazel, repo, kinds)? > 0)
-}
-
 /// The `bazel query` expression for the first-party targets of `kinds`: their
 /// union, minus each label with `node_modules` in it. `npm_link_all_packages`
 /// makes a `js_library` per third-party npm package
@@ -1149,6 +1149,7 @@ pub(crate) fn merge_scip_bytes(parts: &[Vec<u8>]) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::index::GoOptions;
+    use crate::test_env::{EnvGuard, lock as cmd_env_lock};
     use protobuf::{Message, MessageField};
     use scip::types::{Document, Index, Metadata, SymbolInformation};
 
@@ -1381,16 +1382,6 @@ mod tests {
         assert!(run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).is_err());
     }
 
-    /// Serializes the tests that read or write `ENGRAPH_BAZEL_SCIP_JAVA_CMD`
-    /// or `ENGRAPH_BAZEL_SCIP_GO_CMD`. The env is process-global, so without
-    /// it a parallel test can unset a command another test just set.
-    static CMD_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn cmd_env_lock() -> std::sync::MutexGuard<'static, ()> {
-        // A failed test poisons the mutex; the next test still gets the lock.
-        CMD_ENV.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     #[test]
     fn a_delegated_language_reports_no_targets_before_it_reads_the_env_var() {
         // The Java gap this mirrors the Go one from bug 5: with no java
@@ -1402,8 +1393,8 @@ mod tests {
         let bazel = fake_bazel(tmp.path(), 0);
 
         let _env = cmd_env_lock();
-        // SAFETY: `_env` serializes every test that touches this variable.
-        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_JAVA_CMD", None);
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
         assert_eq!(r.status, LangStatus::SkippedNoTargets);
@@ -1419,8 +1410,8 @@ mod tests {
         let bazel = fake_bazel(tmp.path(), 2);
 
         let _env = cmd_env_lock();
-        // SAFETY: `_env` serializes every test that touches this variable.
-        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_JAVA_CMD", None);
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
         assert_eq!(
@@ -1444,17 +1435,12 @@ mod tests {
         // swallows the `"$1" "$2"` the runner appends.
         let marker = tmp.path().join("ran");
 
+        let cmd = format!(": > \"{}\" #", marker.display());
         let _env = cmd_env_lock();
-        // SAFETY: `_env` serializes every test that touches this variable.
-        unsafe {
-            std::env::set_var(
-                "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
-                format!(": > \"{}\" #", marker.display()),
-            )
-        };
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_JAVA_CMD", Some(cmd.as_ref()));
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts);
-        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
         assert_eq!(
             r.unwrap().status,
             LangStatus::SkippedNoTargetsForCommand {
@@ -1476,34 +1462,20 @@ mod tests {
         // path needs a bazel that reports some.
         let bazel = fake_bazel(tmp.path(), 2);
 
-        // Unconfigured → skipped, nothing merged. SAFETY: `_env` serializes
-        // every test that touches this variable.
+        // Unconfigured → skipped, nothing merged.
         let _env = cmd_env_lock();
-        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_JAVA_CMD", None);
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
         assert!(matches!(r.status, LangStatus::SkippedNotConfigured { .. }));
         assert!(parts.is_empty());
 
-        // A fake command that writes a known SCIP to its 2nd arg → merged.
-        let scip = make_index(&["Hello.java"], &[]);
-        let scip_path = tmp.path().join("fake.scip");
-        std::fs::write(&scip_path, &scip).unwrap();
-        let cmd_path = tmp.path().join("fake-cmd.sh");
-        std::fs::write(
-            &cmd_path,
-            format!("cp \"{}\" \"$2\"\n", scip_path.display()),
-        )
-        .unwrap();
-        unsafe {
-            std::env::set_var(
-                "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
-                format!("sh \"{}\"", cmd_path.display()),
-            )
-        };
+        // Configured → merged.
+        let (scip, cmd) = fake_scip_cmd(tmp.path(), &["Hello.java"]);
+        vars.set("ENGRAPH_BAZEL_SCIP_JAVA_CMD", Some(cmd.as_ref()));
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
-        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
         assert_eq!(r.status, LangStatus::Indexed);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], scip);
@@ -1519,25 +1491,11 @@ mod tests {
         // branch needs a bazel that reports some.
         let bazel = fake_bazel(tmp.path(), 3);
 
-        // A fake command that writes a known SCIP to its 2nd arg → delegated and
-        // merged. SAFETY: `_env` serializes every test that touches this
-        // variable.
+        // Delegated and merged.
+        let (scip, cmd) = fake_scip_cmd(tmp.path(), &["pkg/widget.go"]);
         let _env = cmd_env_lock();
-        let scip = make_index(&["pkg/widget.go"], &[]);
-        let scip_path = tmp.path().join("fake.scip");
-        std::fs::write(&scip_path, &scip).unwrap();
-        let cmd_path = tmp.path().join("fake-go-cmd.sh");
-        std::fs::write(
-            &cmd_path,
-            format!("cp \"{}\" \"$2\"\n", scip_path.display()),
-        )
-        .unwrap();
-        unsafe {
-            std::env::set_var(
-                "ENGRAPH_BAZEL_SCIP_GO_CMD",
-                format!("sh \"{}\"", cmd_path.display()),
-            )
-        };
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_GO_CMD", Some(cmd.as_ref()));
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_go(
             spec,
@@ -1548,7 +1506,6 @@ mod tests {
             GoOptions::default(),
         )
         .unwrap();
-        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_GO_CMD") };
         assert_eq!(r.status, LangStatus::Indexed);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], scip);
@@ -1561,15 +1518,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path().join("index.scip");
         let _env = cmd_env_lock();
-        let saved = (
-            std::env::var_os("NODE_OPTIONS"),
-            std::env::var_os("ENGRAPH_NODE_HEAP_MB"),
-        );
-        // SAFETY: `_env` serializes every test that touches these variables.
-        unsafe {
-            std::env::remove_var("NODE_OPTIONS");
-            std::env::set_var("ENGRAPH_NODE_HEAP_MB", "12288");
-        }
+        let mut vars = EnvGuard::default();
+        vars.set("NODE_OPTIONS", None);
+        // Not the default, so the value shows the override reached the command.
+        vars.set("ENGRAPH_NODE_HEAP_MB", Some("9999".as_ref()));
         for lang in ["python", "ts"] {
             let spec = LANGS.iter().find(|s| s.language == lang).unwrap();
             let cmd = build_indexer_command(spec, tmp.path(), &out);
@@ -1580,19 +1532,9 @@ mod tests {
                 .map(|v| v.to_string_lossy().into_owned());
             assert_eq!(
                 node_options.as_deref(),
-                Some("--max-old-space-size=12288"),
+                Some("--max-old-space-size=9999"),
                 "{lang}"
             );
-        }
-        unsafe {
-            match &saved.0 {
-                Some(v) => std::env::set_var("NODE_OPTIONS", v),
-                None => std::env::remove_var("NODE_OPTIONS"),
-            }
-            match &saved.1 {
-                Some(v) => std::env::set_var("ENGRAPH_NODE_HEAP_MB", v),
-                None => std::env::remove_var("ENGRAPH_NODE_HEAP_MB"),
-            }
         }
     }
 
@@ -1616,10 +1558,7 @@ mod tests {
         // scip-typescript indexes JavaScript too: a repo with only
         // `aspect_rules_js` targets must not report "no targets", and a repo
         // with both must count both.
-        let ts = LANGS
-            .iter()
-            .find(|s| s.language == "ts")
-            .expect("ts LangSpec present");
+        let ts = ts_spec();
         assert_eq!(ts.binary, "scip-typescript");
         for kind in [
             "ts_project",
@@ -1638,7 +1577,7 @@ mod tests {
         // the root, and scip-typescript fails without them. The targets are
         // reported as needing a command, like Go with no go.mod.
         let tmp = tempfile::tempdir().unwrap();
-        let spec = LANGS.iter().find(|s| s.language == "ts").unwrap();
+        let spec = ts_spec();
         let scip_dir = tmp.path().join("out");
         std::fs::create_dir_all(&scip_dir).unwrap();
         let bazel = fake_bazel(tmp.path(), 5);
@@ -1657,18 +1596,11 @@ mod tests {
         );
 
         let _env = cmd_env_lock();
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let path =
-            std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&old_path)))
-                .unwrap();
-        // SAFETY: `_env` serializes every test that touches these variables.
-        unsafe {
-            std::env::remove_var("ENGRAPH_BAZEL_SCIP_TS_CMD");
-            std::env::set_var("PATH", &path);
-        }
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_TS_CMD", None);
+        vars.prepend_path(&bin);
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_ts(spec, tmp.path(), &bazel, &scip_dir, &mut parts);
-        unsafe { std::env::set_var("PATH", &old_path) };
         assert_eq!(
             r.unwrap().status,
             LangStatus::SkippedNotConfigured {
@@ -1750,18 +1682,11 @@ mod tests {
         );
 
         let _env = cmd_env_lock();
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let path =
-            std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&old_path)))
-                .unwrap();
-        // SAFETY: `_env` serializes every test that touches these variables.
-        unsafe {
-            std::env::remove_var("ENGRAPH_BAZEL_SCIP_TS_CMD");
-            std::env::set_var("PATH", &path);
-        }
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_TS_CMD", None);
+        vars.prepend_path(&bin);
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_ts(ts_spec(), &repo, &bazel, &scip_dir, &mut parts);
-        unsafe { std::env::set_var("PATH", &old_path) };
         assert_eq!(r.unwrap().status, LangStatus::Indexed);
         assert_eq!(parts.len(), 1);
         assert!(
@@ -1772,6 +1697,21 @@ mod tests {
 
     fn ts_spec() -> &'static LangSpec {
         LANGS.iter().find(|s| s.language == "ts").unwrap()
+    }
+
+    /// A delegated command, as an `ENGRAPH_BAZEL_SCIP_*_CMD` value, that
+    /// copies a SCIP index of `files` to its 2nd arg; and that index.
+    fn fake_scip_cmd(dir: &Path, files: &[&str]) -> (Vec<u8>, String) {
+        let scip = make_index(files, &[]);
+        let scip_path = dir.join("fake.scip");
+        std::fs::write(&scip_path, &scip).unwrap();
+        let cmd_path = dir.join("fake-cmd.sh");
+        std::fs::write(
+            &cmd_path,
+            format!("cp \"{}\" \"$2\"\n", scip_path.display()),
+        )
+        .unwrap();
+        (scip, format!("sh \"{}\"", cmd_path.display()))
     }
 
     #[test]
@@ -1846,18 +1786,11 @@ mod tests {
         );
 
         let _env = cmd_env_lock();
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let path =
-            std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&old_path)))
-                .unwrap();
-        // SAFETY: `_env` serializes every test that touches these variables.
-        unsafe {
-            std::env::remove_var("ENGRAPH_BAZEL_SCIP_TS_CMD");
-            std::env::set_var("PATH", &path);
-        }
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_TS_CMD", None);
+        vars.prepend_path(&bin);
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_ts(ts_spec(), &repo, &bazel, &scip_dir, &mut parts);
-        unsafe { std::env::set_var("PATH", &old_path) };
         let status = r.unwrap().status;
         let LangStatus::Failed(msg) = status else {
             panic!("expected Failed, got {status:?}");
@@ -1874,33 +1807,18 @@ mod tests {
     #[test]
     fn run_ts_delegates_to_configured_command() {
         let tmp = tempfile::tempdir().unwrap();
-        let spec = LANGS.iter().find(|s| s.language == "ts").unwrap();
+        let spec = ts_spec();
         let scip_dir = tmp.path().join("out");
         std::fs::create_dir_all(&scip_dir).unwrap();
         let bazel = fake_bazel(tmp.path(), 2);
 
-        // A fake command that writes a known SCIP to its 2nd arg → delegated
-        // and merged, even with no node_modules at the root. SAFETY: `_env`
-        // serializes every test that touches this variable.
+        // Delegated and merged, even with no node_modules at the root.
+        let (scip, cmd) = fake_scip_cmd(tmp.path(), &["src/app.ts", "src/util.js"]);
         let _env = cmd_env_lock();
-        let scip = make_index(&["src/app.ts", "src/util.js"], &[]);
-        let scip_path = tmp.path().join("fake.scip");
-        std::fs::write(&scip_path, &scip).unwrap();
-        let cmd_path = tmp.path().join("fake-ts-cmd.sh");
-        std::fs::write(
-            &cmd_path,
-            format!("cp \"{}\" \"$2\"\n", scip_path.display()),
-        )
-        .unwrap();
-        unsafe {
-            std::env::set_var(
-                "ENGRAPH_BAZEL_SCIP_TS_CMD",
-                format!("sh \"{}\"", cmd_path.display()),
-            )
-        };
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_TS_CMD", Some(cmd.as_ref()));
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_ts(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
-        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_TS_CMD") };
         assert_eq!(r.status, LangStatus::Indexed);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], scip);
@@ -1911,7 +1829,7 @@ mod tests {
         // A Bazel root often has no tsconfig.json (each ts_project names its
         // own), and scip-typescript fails without one unless it infers it.
         // No workspace file here, so no workspace flag and no PATH lookup.
-        let ts = LANGS.iter().find(|s| s.language == "ts").unwrap();
+        let ts = ts_spec();
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path().join("index-ts.scip");
         let cmd = build_indexer_command(ts, tmp.path(), &out);
@@ -1943,8 +1861,8 @@ mod tests {
         let bazel = fake_bazel(tmp.path(), 4);
 
         let _env = cmd_env_lock();
-        // SAFETY: `_env` serializes every test that touches this variable.
-        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_RUST_CMD") };
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_RUST_CMD", None);
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_rust(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
         assert_eq!(
@@ -1967,29 +1885,14 @@ mod tests {
         // bazel that reports some.
         let bazel = fake_bazel(tmp.path(), 2);
 
-        // A fake command that writes a known SCIP to its 2nd arg → delegated
-        // and merged, even with no Cargo.toml at the root (the configured
-        // command wins before the native path looks for one). SAFETY: `_env`
-        // serializes every test that touches this variable.
+        // Delegated and merged, even with no Cargo.toml at the root (the
+        // configured command wins before the native path looks for one).
+        let (scip, cmd) = fake_scip_cmd(tmp.path(), &["src/lib.rs"]);
         let _env = cmd_env_lock();
-        let scip = make_index(&["src/lib.rs"], &[]);
-        let scip_path = tmp.path().join("fake.scip");
-        std::fs::write(&scip_path, &scip).unwrap();
-        let cmd_path = tmp.path().join("fake-rust-cmd.sh");
-        std::fs::write(
-            &cmd_path,
-            format!("cp \"{}\" \"$2\"\n", scip_path.display()),
-        )
-        .unwrap();
-        unsafe {
-            std::env::set_var(
-                "ENGRAPH_BAZEL_SCIP_RUST_CMD",
-                format!("sh \"{}\"", cmd_path.display()),
-            )
-        };
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_RUST_CMD", Some(cmd.as_ref()));
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_rust(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
-        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_RUST_CMD") };
         assert_eq!(r.status, LangStatus::Indexed);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], scip);

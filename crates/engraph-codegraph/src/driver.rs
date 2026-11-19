@@ -124,7 +124,7 @@ const DEFAULT_NODE_HEAP_MB: u32 = 12288;
 /// with `--max-old-space-size` added. A heap the user set in `existing` wins
 /// over the default; `override_mb` (`ENGRAPH_NODE_HEAP_MB`) wins over both,
 /// because Node honors the last of repeated flags. An `override_mb` that is
-/// not a positive number of MB gives the default.
+/// not a positive number of MB is ignored, as if unset.
 fn node_options(existing: Option<&str>, override_mb: Option<&str>) -> String {
     let existing = existing.map(str::trim).filter(|s| !s.is_empty());
     let mb = match override_mb {
@@ -133,7 +133,7 @@ fn node_options(existing: Option<&str>, override_mb: Option<&str>) -> String {
             _ => {
                 tracing::warn!(
                     value = v,
-                    "ENGRAPH_NODE_HEAP_MB is not a positive number of MB; using {DEFAULT_NODE_HEAP_MB}"
+                    "ENGRAPH_NODE_HEAP_MB is not a positive number of MB; ignoring it"
                 );
                 None
             }
@@ -142,7 +142,10 @@ fn node_options(existing: Option<&str>, override_mb: Option<&str>) -> String {
     };
     let mb = match (mb, existing) {
         (Some(mb), _) => mb,
-        (None, Some(e)) if e.contains("--max-old-space-size") => return e.to_string(),
+        // Node reads `_` and `-` alike in a V8 flag name.
+        (None, Some(e)) if e.replace('_', "-").contains("--max-old-space-size") => {
+            return e.to_string();
+        }
         (None, _) => DEFAULT_NODE_HEAP_MB,
     };
     match existing {
@@ -594,14 +597,24 @@ mod tests {
             node_options(Some("--max-old-space-size=2048"), None),
             "--max-old-space-size=2048"
         );
+        // Node also reads the flag with underscores.
+        assert_eq!(
+            node_options(Some("--max_old_space_size=2048"), None),
+            "--max_old_space_size=2048"
+        );
         // ...and ENGRAPH_NODE_HEAP_MB over both: Node honors the last flag.
         assert_eq!(
             node_options(Some("--max-old-space-size=2048"), Some("12288")),
             "--max-old-space-size=2048 --max-old-space-size=12288"
         );
-        // Not a positive number of MB: the default.
+        // Not a positive number of MB: ignored, so the default...
         assert_eq!(node_options(None, Some("lots")), default);
         assert_eq!(node_options(None, Some("0")), default);
+        // ...or the heap the user set.
+        assert_eq!(
+            node_options(Some("--max-old-space-size=2048"), Some("lots")),
+            "--max-old-space-size=2048"
+        );
     }
 
     #[test]
@@ -610,7 +623,9 @@ mod tests {
         // heap (about 4 GB) runs out on a large repo (ray) for a plain
         // `engraph index` too. The values are `node_options`'; this checks the
         // standalone commands get them. No env var is set here: a value is
-        // always there (the default when nothing overrides it).
+        // always there (the default when nothing overrides it). The lock keeps
+        // a test that sets these variables from running meanwhile.
+        let _env = crate::test_env::lock();
         let repo = Path::new("/tmp/some-repo");
         let out = Path::new("/tmp/out/index.scip");
         for cmd in [
