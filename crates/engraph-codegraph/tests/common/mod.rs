@@ -259,6 +259,54 @@ pub fn isolate_scip_output() {
     });
 }
 
+/// One test's index locks, in a temp dir instead of the user's real
+/// `~/.local/share/engraph/locks`. The locks live next to `ENGRAPH_DB_PATH`
+/// and their files are never deleted (`engraph_codegraph::lock`), so without
+/// this every indexing test run leaves its lock files there. On drop the
+/// variable is put back and the dir, lock files included, is removed.
+///
+/// Holds a mutex for its whole life: the variable is process-global, so a
+/// second test in the binary must not repoint it while this one indexes.
+pub struct IsolatedLocks {
+    old: Option<std::ffi::OsString>,
+    _dir: tempfile::TempDir,
+    // Declared last, so it is released after the variable and the dir.
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+pub fn isolate_index_locks() -> IsolatedLocks {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A failed test poisons the mutex; the next test still gets the lock.
+    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let old = std::env::var_os("ENGRAPH_DB_PATH");
+    set_db_path(Some(dir.path().join("eg.db").as_os_str()));
+    IsolatedLocks {
+        old,
+        _dir: dir,
+        _guard: guard,
+    }
+}
+
+impl Drop for IsolatedLocks {
+    fn drop(&mut self) {
+        set_db_path(self.old.as_deref());
+    }
+}
+
+fn set_db_path(value: Option<&std::ffi::OsStr>) {
+    // SAFETY: the `isolate_index_locks` mutex is held, so no other test in
+    // this binary writes the variable meanwhile, and the code that reads it
+    // (`engraph_core::db::default_db_path`) uses `std::env::var`, which takes
+    // std's env lock, the one `set_var` takes.
+    unsafe {
+        match value {
+            Some(v) => std::env::set_var("ENGRAPH_DB_PATH", v),
+            None => std::env::remove_var("ENGRAPH_DB_PATH"),
+        }
+    }
+}
+
 /// A fresh database at `dir/eg.db`.
 pub fn db_for_test(dir: &Path) -> Pool {
     open_pool(&dir.join("eg.db")).unwrap()

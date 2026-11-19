@@ -21,6 +21,8 @@ set -euo pipefail
 
 REPO="${1:?usage: $0 <repo-root> <output-scip>}"
 OUT="${2:?usage: $0 <repo-root> <output-scip>}"
+# Resolve OUT before the cd: a relative path would land inside the repo.
+OUT="$(cd "$(dirname "$OUT")" && pwd -P)/$(basename "$OUT")"
 cd "$REPO"
 command -v scip-go >/dev/null 2>&1 || { echo "scip-go-index: scip-go not on PATH" >&2; exit 2; }
 

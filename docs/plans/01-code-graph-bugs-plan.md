@@ -182,6 +182,38 @@ Repro: the test
 defines `f` without a `SymbolInformation`. The row of `f` has a `NULL`
 `file_path`.
 
+### Bug 23: a symbol load prunes `bazel_target` entities that have no edges
+
+**Found on 2026-11-18**, in the validation of plan 06 phase E. This bug has
+no part yet.
+
+The pre-load GC of the SCIP loader deletes each entity of the project that no
+relation references (`crates/engraph-codegraph/src/scip_loader.rs:372`):
+
+```rust
+    // Pre-load GC: in-scope rows nothing references. The load re-creates any
+    // that are still current, so this only removes genuinely deleted ones.
+```
+
+The comment is not correct for `bazel_target` entities: the load re-creates
+only SCIP symbols. Thus the symbol pass of `--bazel-symbols` deletes each
+target with no `BAZEL_DEPENDS_ON` edge in or out, although the target-level
+pass of the same run wrote it. The deletion occurs only when a symbol
+language produces SCIP, so the target count changes when a language starts to
+index (plan 06 made this visible on Rust and TypeScript repos):
+
+- `cameron-martin/bazel-lsp`: 11 `bazel_target` entities without the Rust
+  symbol load, 8 with it (`//prost:prost_toolchain`, `//src/builtin:builtin`,
+  and `//src/builtin:default_build_language` are deleted).
+- `bazelbuild/examples` `frontend`: 8,701 without the ts symbol load, 8,669
+  with it.
+- `ray-project/ray` (commit `a24e301`): 3,129 without the Python symbol
+  load, 2,746 with it.
+
+`gc::collect_orphans` deletes an orphan `bazel_target` by design (the test
+`prunes_orphan_bazel_target_keeps_linked`). A correction must decide whether
+an isolated target is an orphan, and make the pre-load GC and `gc.rs` agree.
+
 ## Steps
 
 Do each part on its own branch. The parts do not depend on each other. Each

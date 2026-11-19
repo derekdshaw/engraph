@@ -73,6 +73,8 @@ Index runs are serialized per project with an OS file lock on `locks/index-<hash
 | `scip-typescript` | `package.json` + `tsconfig.json` | `@sourcegraph/scip-typescript` (npm) |
 | `scip-java` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java` via Coursier (`cs install --contrib scip-java`) |
 
+**Node heap:** scip-python and scip-typescript are Node programs, and Node's default heap (about 4 GB) runs out on a large repo (ray, 5,100 Python files), so engraph gives them a 12 GB heap ceiling through `NODE_OPTIONS` — for a plain `engraph index` and for `--bazel-symbols` alike. It is a ceiling, not a reservation: Node only grows to what the repo needs. Set **`ENGRAPH_NODE_HEAP_MB`** to change it. Your other `NODE_OPTIONS` flags stay, and a `--max-old-space-size` you already set there wins over the default.
+
 **Go build tags and tests:** scip-go indexes one build configuration, so a file behind a `//go:build` line that the build does not meet is not in the code graph. `engraph index --go-tags integration,e2e` gives scip-go those tags (through `GOFLAGS`, keeping your other Go flags), and `--if-changed` repeats them. `GOOS` / `GOARCH` in the environment of the run select the platform files the same way. The Bazel Go pass skips `_test.go` files, so one module with unresolved test-only dependencies does not lose its library symbols; `--go-tests` indexes them too. The standalone Go driver always indexes tests.
 
 `scripts/install-scip-indexers.sh` is an idempotent installer for all five upstream indexers with per-toolchain prerequisite checks.
@@ -97,7 +99,14 @@ Index runs are serialized per project with an OS file lock on `locks/index-<hash
   ```
 
   Any other Java build system plugs in by pointing the same env var at its own SCIP-producing command — engraph stays build-system-agnostic.
-- **TypeScript / Python** — run their standalone indexers against the workspace root (best-effort; `rules_ts` `node_modules` and `rules_python` venv resolution are follow-ups).
+- **Rust** — *delegated when configured.* If **`ENGRAPH_BAZEL_SCIP_RUST_CMD`** is set, engraph runs it as `<cmd> <repo> <out.scip>` (the Java contract). Unset → `rust-analyzer scip` on the root `Cargo.toml`, as the standalone driver runs it. engraph counts `rust_library`, `rust_binary`, `rust_test`, `rust_proc_macro`, `rust_library_group`, and `rust_prost_library` targets (not toolchain rules); with targets but no root `Cargo.toml` it reports `skipped (N targets, set ENGRAPH_BAZEL_SCIP_RUST_CMD to index them)` and does not start rust-analyzer.
+- **TypeScript and JavaScript** (reported as `symbol[ts]`) — *delegated when configured.* engraph counts `ts_project`, `ts_library`, `js_library`, `js_binary`, and `js_test` targets — scip-typescript indexes JavaScript too — but not the `node_modules` link targets rules_js makes for third-party npm packages, so a repo that uses rules_js only for a tool is not a TS repo. If **`ENGRAPH_BAZEL_SCIP_TS_CMD`** is set, engraph runs it as `<cmd> <repo> <out.scip>` (the Java contract). Unset → `scip-typescript index --infer-tsconfig` at the workspace root, with `--pnpm-workspaces` / `--yarn-workspaces` as the standalone driver gives them, when the root has a `node_modules`. `rules_js` makes `node_modules` under `bazel-bin` during a build, not at the root, so without one engraph reports `skipped (N targets, set ENGRAPH_BAZEL_SCIP_TS_CMD to index them)` and does not start scip-typescript. A ready-made driver ships as **`docs/examples/scip-typescript-bazel-index.sh`**: it installs the packages with the package manager of the lock file (`pnpm`, `yarn`, or `npm ci`), which writes `node_modules` into the repo, and then runs the same command. For pnpm, when the pnpm on `PATH` cannot read the lockfile version, it stops and names the fixes (upgrade the lockfile with `pnpm install --lockfile-only`, or put the pnpm that writes that version on `PATH`); when the lockfile is out of date with a `package.json` it installs with `--no-frozen-lockfile` and restores the lockfile after. It then runs a second scip-typescript pass over exactly the `.js`/`.jsx` files no project's tsconfig covers (a tsconfig without `allowJs` skips them), and removes the `tsconfig.json` files `--infer-tsconfig` writes into the repo — the native pass removes those too, but indexes TypeScript only:
+
+  ```sh
+  export ENGRAPH_BAZEL_SCIP_TS_CMD="$PWD/docs/examples/scip-typescript-bazel-index.sh"
+  engraph index --bazel-symbols ~/src/monorepo
+  ```
+- **Python** — runs scip-python against the workspace root (best-effort; `rules_python` venv resolution is not built — ray did not need it). The Node heap ceiling (**Node heap**, above) applies.
 
 ### Hybrid retrieval
 

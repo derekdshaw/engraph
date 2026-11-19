@@ -1,13 +1,14 @@
 # Design: Bazel-resolved symbol indexing
 
-Status: **Phases A (Go) and C (Java) shipped; B (TypeScript and JavaScript),
-D (Python), and E (Rust) open.** Kept as the original design record: the problem, the per-language
+Status: **All phases shipped: A (Go), B (TypeScript and JavaScript), C
+(Java), D (Python), and E (Rust).** Kept as the original design record: the problem, the per-language
 approach, integration points, risks, and the phased plan. Line references and
 the "Problem & evidence" section describe the codebase as of the 2026-06-02
-diagnosis, not today. Current behavior lives in `DETAILS.md` §14.9; remaining
-work in `docs/plans/06-bazel-typescript-python-symbols-plan.md`.
+diagnosis, not today. Current behavior lives in `DETAILS.md` §14.9; the
+work and its validation data in
+`docs/plans/completed/06-bazel-typescript-python-symbols-plan.md`.
 
-Related: `docs/plans/06-bazel-typescript-python-symbols-plan.md` (the open phases);
+Related: `docs/plans/completed/06-bazel-typescript-python-symbols-plan.md` (phases B, D, E);
 `crates/engraph-codegraph/src/bazel.rs:8` defers this ("symbol-level half … is
 deferred").
 
@@ -170,7 +171,12 @@ per-language project, not a tweak.
 - **Phase B — TypeScript.** node_modules materialization + workspace-mode index.
 - **Phase C — Java.** Bazel SemanticDB build + SCIP gen; target subsetting;
   output_base threading; resolve the config-injection question first.
-- **Phase D — Python (stretch).** Per-project env + scip-python.
+- **Phase D — Python (stretch).** Per-project env + scip-python. Shipped as
+  a Node heap ceiling (`ENGRAPH_NODE_HEAP_MB`, default 12 GB); ray did not
+  need the per-project env.
+- **Phase E — Rust.** rust-analyzer on the root `Cargo.toml`, else a
+  delegated command (`ENGRAPH_BAZEL_SCIP_RUST_CMD`). Added later in
+  `docs/plans/completed/06-bazel-typescript-python-symbols-plan.md`.
 
 Each phase: stays behind `--bazel-symbols`, reports per-language status, and is
 verified on a real Bazel monorepo (start with a small `//some/subtree/...`

@@ -111,6 +111,61 @@ fn pyproject_name(text: &str) -> Option<String> {
     })
 }
 
+/// The heap ceiling, in MB, of a Node indexer (scip-python, scip-typescript)
+/// when `ENGRAPH_NODE_HEAP_MB` is not set. Node's own default, about 4 GB,
+/// runs out on ray (5,100 Python files). Measured on ray (2026-11-18,
+/// scip-python 0.6.8): an 8 GB ceiling completes but is GC-bound — 7m54s with
+/// RSS pinned at 8.3 GiB, against 5m21s and a 9.85 GiB peak under 16 GB, with
+/// identical SCIP. 12 GB leaves about 20% above what ray uses. It is a
+/// ceiling, not a reservation: Node only grows to what a repo needs.
+const DEFAULT_NODE_HEAP_MB: u32 = 12288;
+
+/// `NODE_OPTIONS` for a Node indexer: `existing` (the user's `NODE_OPTIONS`)
+/// with `--max-old-space-size` added. A heap the user set in `existing` wins
+/// over the default; `override_mb` (`ENGRAPH_NODE_HEAP_MB`) wins over both,
+/// because Node honors the last of repeated flags. An `override_mb` that is
+/// not a positive number of MB is ignored, as if unset.
+fn node_options(existing: Option<&str>, override_mb: Option<&str>) -> String {
+    let existing = existing.map(str::trim).filter(|s| !s.is_empty());
+    let mb = match override_mb {
+        Some(v) => match v.trim().parse::<u32>() {
+            Ok(mb) if mb > 0 => Some(mb),
+            _ => {
+                tracing::warn!(
+                    value = v,
+                    "ENGRAPH_NODE_HEAP_MB is not a positive number of MB; ignoring it"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+    let mb = match (mb, existing) {
+        (Some(mb), _) => mb,
+        // Node reads `_` and `-` alike in a V8 flag name.
+        (None, Some(e)) if e.replace('_', "-").contains("--max-old-space-size") => {
+            return e.to_string();
+        }
+        (None, _) => DEFAULT_NODE_HEAP_MB,
+    };
+    match existing {
+        Some(e) => format!("{e} --max-old-space-size={mb}"),
+        None => format!("--max-old-space-size={mb}"),
+    }
+}
+
+/// Give a Node indexer its heap ceiling (`node_options`). The scip-python
+/// and scip-typescript commands call it, so the standalone drivers and the
+/// Bazel symbol pass, which runs those commands, all get it.
+fn set_node_heap(cmd: &mut Command) {
+    let existing = std::env::var("NODE_OPTIONS").ok();
+    let override_mb = std::env::var("ENGRAPH_NODE_HEAP_MB").ok();
+    cmd.env(
+        "NODE_OPTIONS",
+        node_options(existing.as_deref(), override_mb.as_deref()),
+    );
+}
+
 pub struct ScipPython;
 impl Driver for ScipPython {
     fn name(&self) -> &'static str {
@@ -150,6 +205,7 @@ impl Driver for ScipPython {
             // monikers as opaque keys, so version fidelity buys nothing here.
             .arg("--project-version")
             .arg(SCIP_PYTHON_VERSION);
+        set_node_heap(&mut c);
         c
     }
 }
@@ -383,11 +439,16 @@ impl Driver for ScipJava {
 
 /// The scip-typescript command for `repo`. `on_path` says whether a package
 /// manager is installed.
-fn typescript_command(repo: &Path, out: &Path, on_path: &dyn Fn(&str) -> bool) -> Command {
+pub(crate) fn typescript_command(
+    repo: &Path,
+    out: &Path,
+    on_path: &dyn Fn(&str) -> bool,
+) -> Command {
     // scip-typescript defaults --output to `index.scip` in the cwd; pin it
     // to `out`. Still chdir into the repo so it picks up tsconfig.json.
     let mut c = Command::new("scip-typescript");
     c.arg("index").arg("--output").arg(out).current_dir(repo);
+    set_node_heap(&mut c);
     let Some(ws) = TsWorkspace::of(repo) else {
         return c;
     };
@@ -521,6 +582,68 @@ fn package_json_workspaces(path: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_options_add_the_heap_and_keep_the_rest() {
+        let default = format!("--max-old-space-size={DEFAULT_NODE_HEAP_MB}");
+        assert_eq!(node_options(None, None), default);
+        // The user's other Node flags stay.
+        assert_eq!(
+            node_options(Some("--require ./x.js"), None),
+            format!("--require ./x.js {default}")
+        );
+        // A heap the user already set in NODE_OPTIONS wins over the default...
+        assert_eq!(
+            node_options(Some("--max-old-space-size=2048"), None),
+            "--max-old-space-size=2048"
+        );
+        // Node also reads the flag with underscores.
+        assert_eq!(
+            node_options(Some("--max_old_space_size=2048"), None),
+            "--max_old_space_size=2048"
+        );
+        // ...and ENGRAPH_NODE_HEAP_MB over both: Node honors the last flag.
+        assert_eq!(
+            node_options(Some("--max-old-space-size=2048"), Some("12288")),
+            "--max-old-space-size=2048 --max-old-space-size=12288"
+        );
+        // Not a positive number of MB: ignored, so the default...
+        assert_eq!(node_options(None, Some("lots")), default);
+        assert_eq!(node_options(None, Some("0")), default);
+        // ...or the heap the user set.
+        assert_eq!(
+            node_options(Some("--max-old-space-size=2048"), Some("lots")),
+            "--max-old-space-size=2048"
+        );
+    }
+
+    #[test]
+    fn standalone_node_indexers_carry_a_heap_ceiling() {
+        // scip-python and scip-typescript are Node programs, and Node's own
+        // heap (about 4 GB) runs out on a large repo (ray) for a plain
+        // `engraph index` too. The values are `node_options`'; this checks the
+        // standalone commands get them. No env var is set here: a value is
+        // always there (the default when nothing overrides it). The lock keeps
+        // a test that sets these variables from running meanwhile.
+        let _env = crate::test_env::lock();
+        let repo = Path::new("/tmp/some-repo");
+        let out = Path::new("/tmp/out/index.scip");
+        for cmd in [
+            ScipPython.command(repo, out),
+            ScipTypescript.command(repo, out),
+        ] {
+            let node_options = cmd
+                .get_envs()
+                .find(|(k, _)| *k == "NODE_OPTIONS")
+                .and_then(|(_, v)| v)
+                .map(|v| v.to_string_lossy().into_owned());
+            assert!(
+                node_options.is_some_and(|v| v.contains("--max-old-space-size=")),
+                "{:?} has no heap ceiling",
+                cmd.get_program()
+            );
+        }
+    }
 
     #[test]
     fn python_project_name_comes_from_pyproject_else_the_directory() {

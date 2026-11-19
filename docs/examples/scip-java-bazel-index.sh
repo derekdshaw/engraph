@@ -21,6 +21,10 @@ set -euo pipefail
 
 REPO="${1:?usage: $0 <repo-root> <output-scip>}"
 OUT="${2:?usage: $0 <repo-root> <output-scip>}"
+# Resolve both before the cd: a relative OUT would land inside the repo, and
+# REPO is used again after it (the aspect dir, --define=sourceroot).
+OUT="$(cd "$(dirname "$OUT")" && pwd -P)/$(basename "$OUT")"
+REPO="$(cd "$REPO" && pwd -P)"
 # Default scope when ENGRAPH_BAZEL_SCIP_JAVA_TARGETS is unset. Scope this to your
 # repo's first-party Java roots so a bare run never analyzes the whole repo (a
 # bare //... can pull in a huge number of non-Java targets, and any one broken

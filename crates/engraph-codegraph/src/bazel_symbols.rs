@@ -1,7 +1,7 @@
 //! F2 Phase 2.3 #2 — symbol-level Bazel indexing.
 //!
 //! Sits on top of the target-level pass in `bazel.rs`. For each of
-//! {Java, Go, TypeScript, Python} we (a) probe `bazel query` for any target of that
+//! {Java, Go, TypeScript, Python, Rust} we (a) probe `bazel query` for any target of that
 //! language in the workspace; (b) probe PATH for the per-language SCIP
 //! indexer binary; (c) on both-present, run the indexer, capture its SCIP
 //! bytes. We MERGE the per-language SCIP byte streams in memory and call
@@ -25,15 +25,21 @@
 //!   <dir>` per module, and rebase each module's document paths back to
 //!   repo-root before merging. The native pass can't see `go_library` targets
 //!   without a `go.mod`; that gap is reported via the `go targets` count.
-//! - **TypeScript**: `scip-typescript index` at the workspace root.
-//!   `rules_ts`-based repos may need a prior `bazel build //...` to
-//!   populate `bazel-bin/<pkg>/node_modules` symlinks; documented
-//!   limitation, not addressed here.
+//! - **TypeScript and JavaScript** (language id `ts`): if
+//!   `ENGRAPH_BAZEL_SCIP_TS_CMD` is set, delegated exactly like Java. Unset →
+//!   `scip-typescript index --infer-tsconfig` at the workspace root, with the
+//!   standalone driver's workspace flag. `rules_js` makes `node_modules` under
+//!   `bazel-bin` during a build, not at the root, and scip-typescript fails
+//!   without them, so no root `node_modules` → reported not-configured.
 //! - **Python**: `scip-python index --cwd .` at the workspace root. In a
 //!   Bazel-`rules_python` monorepo the sub-projects share no single venv, so
 //!   import resolution from the root is best-effort — unresolved cross-package
 //!   imports surface as external symbols rather than edges (analogous to the
 //!   `rules_ts` and multi-`go.mod` caveats above).
+//! - **Rust**: if `ENGRAPH_BAZEL_SCIP_RUST_CMD` is set, delegated exactly like
+//!   Java. Unset → `rust-analyzer scip` on the root `Cargo.toml`, as the
+//!   standalone driver runs it. No root `Cargo.toml` → reported not-configured,
+//!   as Go is with no `go.mod`.
 //!
 //! Off by default (`engraph index --bazel-symbols`); toolchain downloads
 //! and full builds make it heavy. The target-level pass remains the fast
@@ -46,6 +52,7 @@
 //! not engraph. Go and TS read sources directly (no Bazel build subprocess).
 
 use crate::bazel::{FAILURE_TAIL_LINES, bazel_binary, failure_tail, output_base_for};
+use crate::driver::Driver;
 use crate::scip_loader::{self, LoadOptions};
 use anyhow::{Context, Result};
 use engraph_core::db::PooledConn;
@@ -60,6 +67,7 @@ pub struct BazelSymbolStats {
     pub go: Option<LangIndexResult>,
     pub ts: Option<LangIndexResult>,
     pub python: Option<LangIndexResult>,
+    pub rust: Option<LangIndexResult>,
     pub entities_inserted: usize,
     pub relations_inserted: usize,
     pub entities_pruned: usize,
@@ -68,11 +76,11 @@ pub struct BazelSymbolStats {
 }
 
 impl BazelSymbolStats {
-    /// Per-language results in stable order (java, go, ts, python), skipping
-    /// languages that were never attempted (None). After a real run every
-    /// `LANGS` entry is present, including skipped/failed ones.
+    /// Per-language results in stable order (java, go, ts, python, rust),
+    /// skipping languages that were never attempted (None). After a real run
+    /// every `LANGS` entry is present, including skipped/failed ones.
     pub fn results(&self) -> Vec<&LangIndexResult> {
-        [&self.java, &self.go, &self.ts, &self.python]
+        [&self.java, &self.go, &self.ts, &self.python, &self.rust]
             .into_iter()
             .filter_map(|o| o.as_ref())
             .collect()
@@ -91,6 +99,10 @@ pub struct LangIndexResult {
 /// cannot (`run_go`). Also the `env` of the `SkippedNotConfigured` the native
 /// pass reports when it finds no `go.mod`, so both stay in step.
 const GO_CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_GO_CMD";
+
+/// The command that indexes Java under Bazel (`run_java`); Java has no native
+/// pass, so without it the targets are reported not configured.
+const JAVA_CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_JAVA_CMD";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LangStatus {
@@ -187,19 +199,43 @@ const LANGS: &[LangSpec] = &[
     LangSpec {
         language: "ts",
         binary: "scip-typescript",
-        rule_kinds: &["ts_project", "ts_library"],
+        // scip-typescript indexes JavaScript too, so the `aspect_rules_js`
+        // source rules count here. `js_run_binary` runs a tool at build time
+        // and is not source.
+        rule_kinds: &[
+            "ts_project",
+            "ts_library",
+            "js_library",
+            "js_binary",
+            "js_test",
+        ],
     },
     LangSpec {
         language: "python",
         binary: "scip-python",
         rule_kinds: &["py_library", "py_binary", "py_test"],
     },
+    LangSpec {
+        language: "rust",
+        binary: "rust-analyzer",
+        // Named classes, not `rust_.*`: that also counts toolchain rules
+        // (`rust_prost_toolchain`). `rust_library_group` and
+        // `rust_prost_library` cover repos with no top-level `rust_library`.
+        rule_kinds: &[
+            "rust_library",
+            "rust_binary",
+            "rust_test",
+            "rust_proc_macro",
+            "rust_library_group",
+            "rust_prost_library",
+        ],
+    },
 ];
 
 /// What a `--dry-run` reports for one symbol-level language: the language, the
 /// indexer binary it needs, and whether that binary is on PATH right now.
 /// Target presence is NOT probed here (that needs a Bazel server) — it is
-/// checked at real run time by `bazel_has_targets`.
+/// checked at real run time by `bazel_count_targets`.
 #[derive(Debug)]
 pub struct SymbolLangPlan {
     pub language: &'static str,
@@ -236,11 +272,15 @@ pub fn index_bazel_symbols(
     for spec in LANGS {
         // Go: delegate if ENGRAPH_BAZEL_SCIP_GO_CMD is set, else the native
         // multi-module pass. Java: always delegated (its SCIP build is
-        // repo-specific). TS / Python: single-shot standalone indexer at the
-        // workspace root.
+        // repo-specific). Rust / TS: delegate if ENGRAPH_BAZEL_SCIP_RUST_CMD /
+        // ENGRAPH_BAZEL_SCIP_TS_CMD is set, else the indexer on the root
+        // Cargo.toml / node_modules. Python: single-shot standalone indexer
+        // at the workspace root.
         let outcome = match spec.language {
             "go" => run_go(spec, repo, &bazel, &scip_dir, &mut parts, go),
             "java" => run_java(spec, repo, &bazel, &scip_dir, &mut parts),
+            "rust" => run_rust(spec, repo, &bazel, &scip_dir, &mut parts),
+            "ts" => run_ts(spec, repo, &bazel, &scip_dir, &mut parts),
             _ => run_language(spec, repo, &bazel, &scip_dir, &mut parts),
         };
         let result = match outcome {
@@ -258,6 +298,7 @@ pub fn index_bazel_symbols(
             "go" => stats.go = Some(result),
             "ts" => stats.ts = Some(result),
             "python" => stats.python = Some(result),
+            "rust" => stats.rust = Some(result),
             _ => unreachable!(),
         }
     }
@@ -281,6 +322,8 @@ pub fn index_bazel_symbols(
     Ok(stats)
 }
 
+/// Python symbol pass: the standalone scip-python at the workspace root, with
+/// no root file to require and no delegated command.
 fn run_language(
     spec: &LangSpec,
     repo: &Path,
@@ -289,31 +332,78 @@ fn run_language(
     parts: &mut Vec<Vec<u8>>,
 ) -> Result<LangIndexResult> {
     let start = Instant::now();
-
-    if !bazel_has_targets(bazel, repo, spec.rule_kinds)? {
-        return Ok(LangIndexResult {
-            language: spec.language,
-            scip_bytes: 0,
-            elapsed_ms: start.elapsed().as_millis() as i64,
-            status: LangStatus::SkippedNoTargets,
-        });
-    }
-
-    if !indexer_present(spec.binary) {
-        return Ok(LangIndexResult {
-            language: spec.language,
-            scip_bytes: 0,
-            elapsed_ms: start.elapsed().as_millis() as i64,
-            status: LangStatus::SkippedNoIndexer {
-                binary: spec.binary,
-            },
-        });
-    }
-
     let out_path = scip_dir.join(format!("index-{}.scip", spec.language));
-    let _ = std::fs::remove_file(&out_path); // ignore-if-absent
+    run_native(spec, repo, bazel, start, None, || {
+        let cmd = build_indexer_command(spec, repo, &out_path);
+        run_indexer(spec, cmd, &out_path, parts, start)
+    })
+}
 
-    let mut cmd = build_indexer_command(spec, repo, &out_path);
+/// The native pass of a single-shot indexer: count the targets; with
+/// `root = Some((path, cmd_env))`, report `SkippedNotConfigured` naming
+/// `cmd_env` when `path` is missing at the workspace root; check the indexer
+/// is on PATH; then `index`. `start` is the start of the language pass.
+fn run_native(
+    spec: &LangSpec,
+    repo: &Path,
+    bazel: &Path,
+    start: Instant,
+    root: Option<(&str, &'static str)>,
+    index: impl FnOnce() -> Result<LangIndexResult>,
+) -> Result<LangIndexResult> {
+    let skip = |status| lang_result(spec, start, 0, status);
+    let targets = bazel_count_targets(bazel, repo, spec.rule_kinds)?;
+    if targets == 0 {
+        return Ok(skip(LangStatus::SkippedNoTargets));
+    }
+    // Before the PATH probe, which starts the indexer: without `root` there is
+    // nothing for it to index whether it is installed or not.
+    if let Some((root, env)) = root
+        && !repo.join(root).exists()
+    {
+        return Ok(skip(LangStatus::SkippedNotConfigured { targets, env }));
+    }
+    if !indexer_present(spec.binary) {
+        return Ok(skip(LangStatus::SkippedNoIndexer {
+            binary: spec.binary,
+        }));
+    }
+    index()
+}
+
+/// A language's result at the end of its pass, timed from `start`.
+fn lang_result(
+    spec: &LangSpec,
+    start: Instant,
+    scip_bytes: usize,
+    status: LangStatus,
+) -> LangIndexResult {
+    LangIndexResult {
+        language: spec.language,
+        scip_bytes,
+        elapsed_ms: start.elapsed().as_millis() as i64,
+        status,
+    }
+}
+
+/// The value of the command variable `env`, if it is set and not blank.
+fn configured_cmd(env: &str) -> Option<String> {
+    std::env::var(env).ok().filter(|c| !c.trim().is_empty())
+}
+
+/// Run one single-shot SCIP indexer `cmd` that writes to `out_path`, and merge
+/// its output: remove any stale `out_path`, spawn, report a non-zero exit as
+/// `Failed` with the stderr tail, else push the SCIP at `out_path` onto
+/// `parts`. `start` is the start of the whole language pass, so `elapsed_ms`
+/// covers the target probe too.
+fn run_indexer(
+    spec: &LangSpec,
+    mut cmd: Command,
+    out_path: &Path,
+    parts: &mut Vec<Vec<u8>>,
+    start: Instant,
+) -> Result<LangIndexResult> {
+    let _ = std::fs::remove_file(out_path); // ignore-if-absent
     tracing::info!(driver = spec.binary, ?cmd, "running symbol-level indexer");
     let output = cmd
         .stdout(Stdio::piped())
@@ -321,28 +411,23 @@ fn run_language(
         .output()
         .with_context(|| format!("spawning {}", spec.binary))?;
     if !output.status.success() {
-        return Ok(LangIndexResult {
-            language: spec.language,
-            scip_bytes: 0,
-            elapsed_ms: start.elapsed().as_millis() as i64,
-            status: LangStatus::Failed(format!(
+        return Ok(lang_result(
+            spec,
+            start,
+            0,
+            LangStatus::Failed(format!(
                 "{} exited with {}\n{}",
                 spec.binary,
                 output.status,
                 failure_tail(&output.stderr, &output.stdout, FAILURE_TAIL_LINES)
             )),
-        });
+        ));
     }
 
-    let bytes = read_scip_output(spec, &out_path)?;
+    let bytes = read_scip_output(spec, out_path)?;
     let n = bytes.len();
     parts.push(bytes);
-    Ok(LangIndexResult {
-        language: spec.language,
-        scip_bytes: n,
-        elapsed_ms: start.elapsed().as_millis() as i64,
-        status: LangStatus::Indexed,
-    })
+    Ok(lang_result(spec, start, n, LangStatus::Indexed))
 }
 
 /// Delegated symbol pass, shared by Java and Go. The language's SCIP build is too
@@ -367,17 +452,12 @@ fn run_delegated(
     out_name: &str,
 ) -> Result<LangIndexResult> {
     let start = Instant::now();
-    let skip = |status: LangStatus| LangIndexResult {
-        language: spec.language,
-        scip_bytes: 0,
-        elapsed_ms: start.elapsed().as_millis() as i64,
-        status,
-    };
+    let skip = |status| lang_result(spec, start, 0, status);
 
     // The count gates the command either way (a `--workspace` run must not
     // start the Java command in every repo without Java); the variable only
     // decides what a zero count is reported as.
-    let cmd = std::env::var(cmd_env).ok().filter(|c| !c.trim().is_empty());
+    let cmd = configured_cmd(cmd_env);
     let targets = bazel_count_targets(bazel, repo, spec.rule_kinds)?;
     if targets == 0 {
         return Ok(skip(match cmd {
@@ -424,12 +504,7 @@ fn run_delegated(
         Ok(bytes) if !bytes.is_empty() => {
             let n = bytes.len();
             parts.push(bytes);
-            Ok(LangIndexResult {
-                language: spec.language,
-                scip_bytes: n,
-                elapsed_ms: start.elapsed().as_millis() as i64,
-                status: LangStatus::Indexed,
-            })
+            Ok(lang_result(spec, start, n, LangStatus::Indexed))
         }
         _ => Ok(skip(LangStatus::Failed(format!(
             "{cmd_env} command succeeded but wrote no SCIP to {}",
@@ -454,7 +529,7 @@ fn run_java(
         bazel,
         scip_dir,
         parts,
-        "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
+        JAVA_CMD_ENV,
         "index-java.scip",
     )
 }
@@ -474,47 +549,257 @@ fn run_go(
     parts: &mut Vec<Vec<u8>>,
     go: crate::index::GoOptions,
 ) -> Result<LangIndexResult> {
-    const CMD_ENV: &str = GO_CMD_ENV;
-    let configured = std::env::var(CMD_ENV)
-        .map(|c| !c.trim().is_empty())
-        .unwrap_or(false);
-    if configured {
-        run_delegated(spec, repo, bazel, scip_dir, parts, CMD_ENV, "index-go.scip")
+    if configured_cmd(GO_CMD_ENV).is_some() {
+        run_delegated(
+            spec,
+            repo,
+            bazel,
+            scip_dir,
+            parts,
+            GO_CMD_ENV,
+            "index-go.scip",
+        )
     } else {
         run_go_modules(spec, repo, bazel, scip_dir, parts, go)
     }
 }
 
+/// The command that indexes Rust under Bazel (`run_rust`): when set, it runs
+/// instead of the native pass, root `Cargo.toml` or not. Also the `env` of the
+/// `SkippedNotConfigured` the native pass reports with no root `Cargo.toml`.
+const RUST_CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_RUST_CMD";
+
+/// The command that indexes TypeScript and JavaScript under Bazel (`run_ts`):
+/// when set, it runs instead of the native pass, root `node_modules` or not.
+/// Also the `env` of the `SkippedNotConfigured` the native pass reports with
+/// no root `node_modules`.
+const TS_CMD_ENV: &str = "ENGRAPH_BAZEL_SCIP_TS_CMD";
+
+/// Rust symbol pass. Unset `ENGRAPH_BAZEL_SCIP_RUST_CMD` → rust-analyzer on the
+/// root `Cargo.toml`, with the argv of the standalone driver
+/// (`driver::RustAnalyzer`). Without a root `Cargo.toml` rust-analyzer has no
+/// project to load, so only a user-supplied command can reach the targets (for
+/// example one that has `rules_rust` write a `rust-project.json`).
+fn run_rust(
+    spec: &LangSpec,
+    repo: &Path,
+    bazel: &Path,
+    scip_dir: &Path,
+    parts: &mut Vec<Vec<u8>>,
+) -> Result<LangIndexResult> {
+    run_rooted_or_delegated(
+        spec,
+        repo,
+        bazel,
+        scip_dir,
+        parts,
+        RUST_CMD_ENV,
+        "Cargo.toml",
+        |out, parts, start| {
+            run_indexer(
+                spec,
+                crate::driver::RustAnalyzer.command(repo, out),
+                out,
+                parts,
+                start,
+            )
+        },
+    )
+}
+
+/// The two configs `--infer-tsconfig` writes verbatim (scip-typescript's
+/// `inferTsconfig.ts`). Only a new file whose content is exactly one of them
+/// is removed after a ts run.
+const INFERRED_TSCONFIGS: [&str; 2] = ["{}", r#"{"compilerOptions":{"allowJs":true}}"#];
+
+/// Every `tsconfig.json` under `repo`, pruning `node_modules`, `bazel-*`,
+/// hidden directories, and symlinked trees.
+fn tsconfig_paths(repo: &Path) -> std::collections::BTreeSet<PathBuf> {
+    fn walk(dir: &Path, out: &mut std::collections::BTreeSet<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == "node_modules" || name.starts_with('.') || name.starts_with("bazel-") {
+                continue;
+            }
+            // The entry's own type: no stat per entry, and a symlink is
+            // neither a dir nor a file here.
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                walk(&entry.path(), out);
+            } else if ft.is_file() && name == "tsconfig.json" {
+                out.insert(entry.path());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(repo, &mut out);
+    out
+}
+
+/// Remove the `tsconfig.json` files a ts run created: `--infer-tsconfig`
+/// writes one into each project that has none and leaves it in the repo. Only
+/// a file that `before` does not have, with exactly an inferred content
+/// (`INFERRED_TSCONFIGS`), goes.
+fn remove_inferred_tsconfigs(repo: &Path, before: &std::collections::BTreeSet<PathBuf>) {
+    for path in tsconfig_paths(repo).difference(before) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if INFERRED_TSCONFIGS.contains(&text.trim()) && std::fs::remove_file(path).is_ok() {
+            tracing::info!(
+                path = %path.display(),
+                "removed a tsconfig.json that --infer-tsconfig wrote"
+            );
+        }
+    }
+}
+
+/// TypeScript and JavaScript symbol pass. Unset `ENGRAPH_BAZEL_SCIP_TS_CMD` →
+/// scip-typescript at the root (`build_indexer_command`). It needs the
+/// packages installed, and `rules_js` makes `node_modules` under `bazel-bin`
+/// during a build, not at the root; without a root `node_modules`
+/// scip-typescript would fail, so only a user-supplied command (one that
+/// installs the packages first) can reach the targets.
+fn run_ts(
+    spec: &LangSpec,
+    repo: &Path,
+    bazel: &Path,
+    scip_dir: &Path,
+    parts: &mut Vec<Vec<u8>>,
+) -> Result<LangIndexResult> {
+    let mut result = run_rooted_or_delegated(
+        spec,
+        repo,
+        bazel,
+        scip_dir,
+        parts,
+        TS_CMD_ENV,
+        "node_modules",
+        |out, parts, start| {
+            // `--infer-tsconfig` writes into the repo; sweep what this run
+            // created, however it ended. A delegated command owns its own
+            // side effects, so only this branch, the one that passes the
+            // flag, takes the two repo walks.
+            let before = tsconfig_paths(repo);
+            let result = run_indexer(
+                spec,
+                build_indexer_command(spec, repo, out),
+                out,
+                parts,
+                start,
+            );
+            remove_inferred_tsconfigs(repo, &before);
+            result
+        },
+    );
+    if let Ok(r) = &mut result
+        && let LangStatus::Failed(msg) = &r.status
+        && let Some(help) = pnpm_broken_lockfile_help(repo, msg)
+    {
+        r.status = LangStatus::Failed(help);
+    }
+    result
+}
+
+/// A clear replacement for a scip-typescript failure that means the pnpm on
+/// `PATH` cannot read `pnpm-lock.yaml` (`--pnpm-workspaces` makes
+/// scip-typescript run `pnpm ls`): the same two fixes the example driver
+/// names. `None` for any other failure, and for a lockfile of a current
+/// version — then the file is genuinely broken and pnpm's own error says why.
+///
+/// The trigger is pnpm's `ERR_PNPM_BROKEN_LOCKFILE` token, or the words
+/// `lockfileVersion` and `incompatible`: scip-typescript reports the pnpm
+/// error as a throw dump without the token, and pnpm's error box wraps its
+/// lines between words, so a single word is the longest text that always
+/// survives the wrapping.
+fn pnpm_broken_lockfile_help(repo: &Path, failure: &str) -> Option<String> {
+    let dump_words = failure.contains("lockfileVersion") && failure.contains("incompatible");
+    if !failure.contains("ERR_PNPM_BROKEN_LOCKFILE") && !dump_words {
+        return None;
+    }
+    let version = pnpm_lockfile_version(repo)?;
+    // The pnpm major that writes this lockfile version, for the message only;
+    // the check itself is pnpm's own error.
+    let writes_it = match version.split('.').next() {
+        Some("5") => "7",
+        Some("6") => "8",
+        _ => return None,
+    };
+    let have = Command::new("pnpm")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| format!("pnpm {}", String::from_utf8_lossy(&o.stdout).trim()));
+    Some(format!(
+        "{have} cannot read pnpm-lock.yaml (lockfileVersion {version})\n\
+         upgrade the lockfile: run `pnpm install --lockfile-only` in the repo \
+         (it rewrites pnpm-lock.yaml), or put pnpm {writes_it} on PATH \
+         (it writes lockfileVersion {version})",
+        have = have.as_deref().unwrap_or("the pnpm on PATH"),
+    ))
+}
+
+/// The `lockfileVersion` of the repo's `pnpm-lock.yaml`, e.g. `6.0`.
+fn pnpm_lockfile_version(repo: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(repo.join("pnpm-lock.yaml")).ok()?;
+    let line = text.lines().find(|l| l.starts_with("lockfileVersion"))?;
+    let value: String = line
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    (!value.is_empty()).then_some(value)
+}
+
+/// The pass of a language whose native indexer needs `root` (a file or a
+/// directory) at the workspace root. If `cmd_env` is set, delegate the whole
+/// pass to it (see `run_delegated`). Unset → count the targets, and with
+/// targets but no `root`, report `SkippedNotConfigured` naming `cmd_env` — the
+/// same state as Go with no `go.mod`, reported the same way. Else `index` into
+/// the output path (`run_native`).
+#[allow(clippy::too_many_arguments)]
+fn run_rooted_or_delegated(
+    spec: &LangSpec,
+    repo: &Path,
+    bazel: &Path,
+    scip_dir: &Path,
+    parts: &mut Vec<Vec<u8>>,
+    cmd_env: &'static str,
+    root: &str,
+    index: impl FnOnce(&Path, &mut Vec<Vec<u8>>, Instant) -> Result<LangIndexResult>,
+) -> Result<LangIndexResult> {
+    let out_name = format!("index-{}.scip", spec.language);
+    if configured_cmd(cmd_env).is_some() {
+        return run_delegated(spec, repo, bazel, scip_dir, parts, cmd_env, &out_name);
+    }
+    let start = Instant::now();
+    let out_path = scip_dir.join(out_name);
+    run_native(spec, repo, bazel, start, Some((root, cmd_env)), || {
+        index(&out_path, parts, start)
+    })
+}
+
+/// The single-shot indexer commands are the standalone drivers' own
+/// (`driver.rs`), so the argv and the Node heap ceiling
+/// (`driver::set_node_heap`) are defined once for both paths.
 fn build_indexer_command(spec: &LangSpec, repo: &Path, out_path: &Path) -> Command {
     match spec.language {
         "ts" => {
-            let mut c = Command::new(spec.binary);
-            c.arg("index")
-                .arg("--output")
-                .arg(out_path)
-                .current_dir(repo);
+            // The standalone command adds `--pnpm-workspaces` or
+            // `--yarn-workspaces` for a workspace whose tool is installed.
+            // `--infer-tsconfig` because a Bazel root often has no
+            // tsconfig.json: each `ts_project` names its own.
+            let mut c = crate::driver::typescript_command(repo, out_path, &crate::which::on_path);
+            c.arg("--infer-tsconfig");
             c
         }
-        "python" => {
-            // Mirror the standalone scip-python driver (driver.rs): --output is
-            // resolved relative to --cwd, so pin --cwd to the repo and pass an
-            // absolute out_path. --project-name comes from pyproject.toml, else
-            // the repo dir name (driver::python_project_name), and
-            // --project-version is pinned (see driver::SCIP_PYTHON_VERSION)
-            // to avoid the undefined-version crash and keep entity IDs stable.
-            let project_name = crate::driver::python_project_name(repo);
-            let mut c = Command::new(spec.binary);
-            c.arg("index")
-                .arg("--cwd")
-                .arg(repo)
-                .arg("--output")
-                .arg(out_path)
-                .arg("--project-name")
-                .arg(project_name)
-                .arg("--project-version")
-                .arg(crate::driver::SCIP_PYTHON_VERSION);
-            c
-        }
+        // --cwd and an absolute --output, the --project-name of
+        // pyproject.toml, and the pinned --project-version.
+        "python" => crate::driver::ScipPython.command(repo, out_path),
         _ => unreachable!(),
     }
 }
@@ -545,12 +830,7 @@ fn run_go_modules(
     go: crate::index::GoOptions,
 ) -> Result<LangIndexResult> {
     let start = Instant::now();
-    let skip = |status: LangStatus| LangIndexResult {
-        language: spec.language,
-        scip_bytes: 0,
-        elapsed_ms: start.elapsed().as_millis() as i64,
-        status,
-    };
+    let skip = |status| lang_result(spec, start, 0, status);
 
     let targets = bazel_count_targets(bazel, repo, spec.rule_kinds)?;
     if targets == 0 {
@@ -628,16 +908,16 @@ fn run_go_modules(
         indexed += 1;
     }
 
-    Ok(LangIndexResult {
-        language: spec.language,
+    Ok(lang_result(
+        spec,
+        start,
         scip_bytes,
-        elapsed_ms: start.elapsed().as_millis() as i64,
-        status: LangStatus::IndexedModules {
+        LangStatus::IndexedModules {
             indexed,
             failed,
             targets,
         },
-    })
+    ))
 }
 
 /// Enumerate every Go module (directory containing `go.mod`) under `repo`, as
@@ -756,12 +1036,25 @@ fn prefix_documents(idx: &mut scip::types::Index, prefix_str: &str) {
     }
 }
 
-fn bazel_has_targets(bazel: &Path, repo: &Path, kinds: &[&str]) -> Result<bool> {
-    Ok(bazel_count_targets(bazel, repo, kinds)? > 0)
+/// The `bazel query` expression for the first-party targets of `kinds`: their
+/// union, minus each label with `node_modules` in it. `npm_link_all_packages`
+/// makes a `js_library` per third-party npm package
+/// (`//:.aspect_rules_js/node_modules/<pkg>`, `//vue:node_modules/<pkg>`), so
+/// without the filter a repo that uses rules_js only for a tool (eslint,
+/// prettier) counts ts targets and starts scip-typescript with no TS or JS of
+/// its own. The filter is the same for every language: no other language's
+/// first-party code lives under a `node_modules` label.
+fn target_count_query(kinds: &[&str]) -> String {
+    let union = kinds
+        .iter()
+        .map(|k| format!("kind({k}, //...)"))
+        .collect::<Vec<_>>()
+        .join(" union ");
+    format!("let t = {union} in $t except filter(\"node_modules\", $t)")
 }
 
-/// Count the workspace's targets of the given rule kinds via one
-/// `bazel query --output=label_kind`. A failed query is an error, not zero:
+/// Count the workspace's first-party targets of the given rule kinds
+/// (`target_count_query`) via one `bazel query --output=label_kind`. A failed query is an error, not zero:
 /// zero reports "no targets" and skips a configured command. A rule kind the
 /// workspace does not have is not a failure (Bazel 9.3.2 exits 0 with
 /// `INFO: Empty results`), and the caller turns the error into a `Failed`
@@ -769,11 +1062,7 @@ fn bazel_has_targets(bazel: &Path, repo: &Path, kinds: &[&str]) -> Result<bool> 
 /// pass's `output_base` is intentional: the analysis cache is warm and this
 /// returns near-instantly. The Go pass uses the count to report the gazelle gap.
 fn bazel_count_targets(bazel: &Path, repo: &Path, kinds: &[&str]) -> Result<usize> {
-    let expr = kinds
-        .iter()
-        .map(|k| format!("kind({}, //...)", k))
-        .collect::<Vec<_>>()
-        .join(" union ");
+    let expr = target_count_query(kinds);
     let output_base = output_base_for(repo);
     let mut cmd = Command::new(bazel);
     cmd.arg(format!("--output_base={}", output_base.display()))
@@ -860,6 +1149,7 @@ pub(crate) fn merge_scip_bytes(parts: &[Vec<u8>]) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::index::GoOptions;
+    use crate::test_env::{EnvGuard, lock as cmd_env_lock};
     use protobuf::{Message, MessageField};
     use scip::types::{Document, Index, Metadata, SymbolInformation};
 
@@ -1092,16 +1382,6 @@ mod tests {
         assert!(run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).is_err());
     }
 
-    /// Serializes the tests that read or write `ENGRAPH_BAZEL_SCIP_JAVA_CMD`
-    /// or `ENGRAPH_BAZEL_SCIP_GO_CMD`. The env is process-global, so without
-    /// it a parallel test can unset a command another test just set.
-    static CMD_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn cmd_env_lock() -> std::sync::MutexGuard<'static, ()> {
-        // A failed test poisons the mutex; the next test still gets the lock.
-        CMD_ENV.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     #[test]
     fn a_delegated_language_reports_no_targets_before_it_reads_the_env_var() {
         // The Java gap this mirrors the Go one from bug 5: with no java
@@ -1113,8 +1393,8 @@ mod tests {
         let bazel = fake_bazel(tmp.path(), 0);
 
         let _env = cmd_env_lock();
-        // SAFETY: `_env` serializes every test that touches this variable.
-        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_JAVA_CMD", None);
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
         assert_eq!(r.status, LangStatus::SkippedNoTargets);
@@ -1130,8 +1410,8 @@ mod tests {
         let bazel = fake_bazel(tmp.path(), 2);
 
         let _env = cmd_env_lock();
-        // SAFETY: `_env` serializes every test that touches this variable.
-        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_JAVA_CMD", None);
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
         assert_eq!(
@@ -1155,17 +1435,12 @@ mod tests {
         // swallows the `"$1" "$2"` the runner appends.
         let marker = tmp.path().join("ran");
 
+        let cmd = format!(": > \"{}\" #", marker.display());
         let _env = cmd_env_lock();
-        // SAFETY: `_env` serializes every test that touches this variable.
-        unsafe {
-            std::env::set_var(
-                "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
-                format!(": > \"{}\" #", marker.display()),
-            )
-        };
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_JAVA_CMD", Some(cmd.as_ref()));
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts);
-        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
         assert_eq!(
             r.unwrap().status,
             LangStatus::SkippedNoTargetsForCommand {
@@ -1187,34 +1462,20 @@ mod tests {
         // path needs a bazel that reports some.
         let bazel = fake_bazel(tmp.path(), 2);
 
-        // Unconfigured → skipped, nothing merged. SAFETY: `_env` serializes
-        // every test that touches this variable.
+        // Unconfigured → skipped, nothing merged.
         let _env = cmd_env_lock();
-        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_JAVA_CMD", None);
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
         assert!(matches!(r.status, LangStatus::SkippedNotConfigured { .. }));
         assert!(parts.is_empty());
 
-        // A fake command that writes a known SCIP to its 2nd arg → merged.
-        let scip = make_index(&["Hello.java"], &[]);
-        let scip_path = tmp.path().join("fake.scip");
-        std::fs::write(&scip_path, &scip).unwrap();
-        let cmd_path = tmp.path().join("fake-cmd.sh");
-        std::fs::write(
-            &cmd_path,
-            format!("cp \"{}\" \"$2\"\n", scip_path.display()),
-        )
-        .unwrap();
-        unsafe {
-            std::env::set_var(
-                "ENGRAPH_BAZEL_SCIP_JAVA_CMD",
-                format!("sh \"{}\"", cmd_path.display()),
-            )
-        };
+        // Configured → merged.
+        let (scip, cmd) = fake_scip_cmd(tmp.path(), &["Hello.java"]);
+        vars.set("ENGRAPH_BAZEL_SCIP_JAVA_CMD", Some(cmd.as_ref()));
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_java(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
-        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_JAVA_CMD") };
         assert_eq!(r.status, LangStatus::Indexed);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], scip);
@@ -1230,25 +1491,11 @@ mod tests {
         // branch needs a bazel that reports some.
         let bazel = fake_bazel(tmp.path(), 3);
 
-        // A fake command that writes a known SCIP to its 2nd arg → delegated and
-        // merged. SAFETY: `_env` serializes every test that touches this
-        // variable.
+        // Delegated and merged.
+        let (scip, cmd) = fake_scip_cmd(tmp.path(), &["pkg/widget.go"]);
         let _env = cmd_env_lock();
-        let scip = make_index(&["pkg/widget.go"], &[]);
-        let scip_path = tmp.path().join("fake.scip");
-        std::fs::write(&scip_path, &scip).unwrap();
-        let cmd_path = tmp.path().join("fake-go-cmd.sh");
-        std::fs::write(
-            &cmd_path,
-            format!("cp \"{}\" \"$2\"\n", scip_path.display()),
-        )
-        .unwrap();
-        unsafe {
-            std::env::set_var(
-                "ENGRAPH_BAZEL_SCIP_GO_CMD",
-                format!("sh \"{}\"", cmd_path.display()),
-            )
-        };
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_GO_CMD", Some(cmd.as_ref()));
         let mut parts: Vec<Vec<u8>> = Vec::new();
         let r = run_go(
             spec,
@@ -1259,7 +1506,393 @@ mod tests {
             GoOptions::default(),
         )
         .unwrap();
-        unsafe { std::env::remove_var("ENGRAPH_BAZEL_SCIP_GO_CMD") };
+        assert_eq!(r.status, LangStatus::Indexed);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0], scip);
+    }
+
+    #[test]
+    fn node_indexers_get_the_heap_in_node_options() {
+        // scip-python and scip-typescript are both Node programs; Node's own
+        // default heap (about 4 GB) runs out on ray (5,100 Python files).
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("index.scip");
+        let _env = cmd_env_lock();
+        let mut vars = EnvGuard::default();
+        vars.set("NODE_OPTIONS", None);
+        // Not the default, so the value shows the override reached the command.
+        vars.set("ENGRAPH_NODE_HEAP_MB", Some("9999".as_ref()));
+        for lang in ["python", "ts"] {
+            let spec = LANGS.iter().find(|s| s.language == lang).unwrap();
+            let cmd = build_indexer_command(spec, tmp.path(), &out);
+            let node_options = cmd
+                .get_envs()
+                .find(|(k, _)| *k == "NODE_OPTIONS")
+                .and_then(|(_, v)| v)
+                .map(|v| v.to_string_lossy().into_owned());
+            assert_eq!(
+                node_options.as_deref(),
+                Some("--max-old-space-size=9999"),
+                "{lang}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_target_count_leaves_out_node_modules_links() {
+        // `npm_link_all_packages` makes a `js_library` per third-party npm
+        // package (`//:.aspect_rules_js/node_modules/<pkg>`,
+        // `//vue:node_modules/<pkg>`): 187 of the 248 ts targets of
+        // bazelbuild/examples frontend. Counting them starts the ts pass in a
+        // repo that uses rules_js only for tooling. Bazel does the filtering,
+        // so the expression is the unit; the count (61 there) is checked live.
+        assert_eq!(
+            target_count_query(&["js_library", "ts_project"]),
+            "let t = kind(js_library, //...) union kind(ts_project, //...) \
+             in $t except filter(\"node_modules\", $t)"
+        );
+    }
+
+    #[test]
+    fn langs_ts_counts_the_js_rules() {
+        // scip-typescript indexes JavaScript too: a repo with only
+        // `aspect_rules_js` targets must not report "no targets", and a repo
+        // with both must count both.
+        let ts = ts_spec();
+        assert_eq!(ts.binary, "scip-typescript");
+        for kind in [
+            "ts_project",
+            "ts_library",
+            "js_library",
+            "js_binary",
+            "js_test",
+        ] {
+            assert!(ts.rule_kinds.contains(&kind), "missing {kind}");
+        }
+    }
+
+    #[test]
+    fn run_ts_without_a_root_node_modules_is_not_configured() {
+        // `rules_js` makes node_modules under bazel-bin during a build, not at
+        // the root, and scip-typescript fails without them. The targets are
+        // reported as needing a command, like Go with no go.mod.
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = ts_spec();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 5);
+
+        // A scip-typescript ahead of the real one on PATH that leaves a
+        // marker, to show that neither the PATH probe nor the index run
+        // starts it. On Windows `Command` does not resolve a script without
+        // `.exe`, so there only the status is checked.
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let marker = tmp.path().join("scip-typescript-ran");
+        #[cfg(not(windows))]
+        write_script(
+            &bin.join("scip-typescript"),
+            &format!("#!/bin/sh\n: > \"{}\"\n", marker.display()),
+        );
+
+        let _env = cmd_env_lock();
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_TS_CMD", None);
+        vars.prepend_path(&bin);
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_ts(spec, tmp.path(), &bazel, &scip_dir, &mut parts);
+        assert_eq!(
+            r.unwrap().status,
+            LangStatus::SkippedNotConfigured {
+                targets: 5,
+                env: "ENGRAPH_BAZEL_SCIP_TS_CMD",
+            }
+        );
+        assert!(!marker.exists(), "scip-typescript must not start");
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn remove_inferred_tsconfigs_removes_only_what_the_run_wrote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        // A tsconfig from before the run is kept even with a matching content.
+        std::fs::create_dir_all(repo.join("existing")).unwrap();
+        std::fs::write(repo.join("existing/tsconfig.json"), "{}").unwrap();
+        // One under node_modules is not seen at all.
+        std::fs::create_dir_all(repo.join("node_modules/dep")).unwrap();
+        std::fs::write(repo.join("node_modules/dep/tsconfig.json"), "{}").unwrap();
+        let before = tsconfig_paths(repo);
+
+        // The run writes three: the two exact inferred contents, and one that
+        // only a user writes, which is kept.
+        std::fs::write(repo.join("tsconfig.json"), "{}").unwrap();
+        std::fs::create_dir_all(repo.join("pure-js")).unwrap();
+        std::fs::write(
+            repo.join("pure-js/tsconfig.json"),
+            r#"{"compilerOptions":{"allowJs":true}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("app")).unwrap();
+        std::fs::write(
+            repo.join("app/tsconfig.json"),
+            r#"{"compilerOptions":{"strict":true}}"#,
+        )
+        .unwrap();
+
+        remove_inferred_tsconfigs(repo, &before);
+        assert!(repo.join("existing/tsconfig.json").is_file());
+        assert!(repo.join("node_modules/dep/tsconfig.json").is_file());
+        assert!(repo.join("app/tsconfig.json").is_file());
+        assert!(!repo.join("tsconfig.json").exists());
+        assert!(!repo.join("pure-js/tsconfig.json").exists());
+    }
+
+    /// Unix only: on Windows `Command` does not resolve a script without
+    /// `.exe`, so the fake scip-typescript on `PATH` is never found.
+    #[cfg(not(windows))]
+    #[test]
+    fn run_ts_removes_the_tsconfigs_the_indexer_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("node_modules")).unwrap();
+        std::fs::write(repo.join("package.json"), "{}").unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 1);
+
+        // A fake scip-typescript that writes an inferred tsconfig.json into
+        // the repo, as --infer-tsconfig does, and then its SCIP output.
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let scip = make_index(&["a.ts"], &[]);
+        let scip_path = tmp.path().join("fake.scip");
+        std::fs::write(&scip_path, &scip).unwrap();
+        write_script(
+            &bin.join("scip-typescript"),
+            &format!(
+                "#!/bin/sh\n\
+                 [ \"$1\" = --version ] && {{ echo 0.0.0; exit 0; }}\n\
+                 while [ $# -gt 1 ]; do [ \"$1\" = --output ] && out=\"$2\"; shift; done\n\
+                 printf '{{}}' > \"{repo}/tsconfig.json\"\n\
+                 cp \"{scip}\" \"$out\"\n",
+                repo = repo.display(),
+                scip = scip_path.display()
+            ),
+        );
+
+        let _env = cmd_env_lock();
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_TS_CMD", None);
+        vars.prepend_path(&bin);
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_ts(ts_spec(), &repo, &bazel, &scip_dir, &mut parts);
+        assert_eq!(r.unwrap().status, LangStatus::Indexed);
+        assert_eq!(parts.len(), 1);
+        assert!(
+            !repo.join("tsconfig.json").exists(),
+            "the tsconfig.json the indexer wrote must be removed"
+        );
+    }
+
+    fn ts_spec() -> &'static LangSpec {
+        LANGS.iter().find(|s| s.language == "ts").unwrap()
+    }
+
+    /// A delegated command, as an `ENGRAPH_BAZEL_SCIP_*_CMD` value, that
+    /// copies a SCIP index of `files` to its 2nd arg; and that index.
+    fn fake_scip_cmd(dir: &Path, files: &[&str]) -> (Vec<u8>, String) {
+        let scip = make_index(files, &[]);
+        let scip_path = dir.join("fake.scip");
+        std::fs::write(&scip_path, &scip).unwrap();
+        let cmd_path = dir.join("fake-cmd.sh");
+        std::fs::write(
+            &cmd_path,
+            format!("cp \"{}\" \"$2\"\n", scip_path.display()),
+        )
+        .unwrap();
+        (scip, format!("sh \"{}\"", cmd_path.display()))
+    }
+
+    #[test]
+    fn pnpm_broken_lockfile_help_names_the_two_fixes() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '6.0'\n",
+        )
+        .unwrap();
+        let failure = "scip-typescript exited with exit status: 1\n\
+                       Error: ERR_PNPM_BROKEN_LOCKFILE  broken lockfile";
+        let help = pnpm_broken_lockfile_help(tmp.path(), failure).expect("a clear message");
+        assert!(
+            help.contains("cannot read pnpm-lock.yaml (lockfileVersion 6.0)"),
+            "{help}"
+        );
+        assert!(help.contains("pnpm install --lockfile-only"), "{help}");
+        assert!(help.contains("pnpm 8 on PATH"), "{help}");
+
+        // The real native-path failure is scip-typescript's throw dump: pnpm's
+        // boxed error as a JS string, without the ERR_PNPM_BROKEN_LOCKFILE
+        // token, wrapped at word boundaries. The trigger words survive the
+        // wrapping because the box never splits a word.
+        let dump = "scip-typescript exited with exit status: 1\n\
+            'Error:   × load the current lockfile\\n' +\n\
+            '  ╰─▶ The lockfile at \"/x/node_modules/.pnpm/lock.yaml\" is broken:\\n' +\n\
+            '      The lockfileVersion of 6.0 is incompatible with this version of pnpm,\\n' +\n\
+            '      which supports lockfileVersion 9.x (1:18)\\n'";
+        let help = pnpm_broken_lockfile_help(tmp.path(), dump).expect("a clear message");
+        assert!(
+            help.contains("cannot read pnpm-lock.yaml (lockfileVersion 6.0)"),
+            "{help}"
+        );
+
+        // Another failure is not rewritten.
+        assert_eq!(pnpm_broken_lockfile_help(tmp.path(), "tsc crashed"), None);
+        // A current lockfile version that pnpm still calls broken is genuine
+        // corruption: pnpm's own error says why.
+        std::fs::write(
+            tmp.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )
+        .unwrap();
+        assert_eq!(pnpm_broken_lockfile_help(tmp.path(), failure), None);
+    }
+
+    /// Unix only: on Windows `Command` does not resolve a script without
+    /// `.exe`, so the fake scip-typescript on `PATH` is never found.
+    #[cfg(not(windows))]
+    #[test]
+    fn run_ts_reports_a_pnpm_lockfile_mismatch_clearly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("node_modules")).unwrap();
+        std::fs::write(repo.join("package.json"), "{}").unwrap();
+        std::fs::write(repo.join("pnpm-lock.yaml"), "lockfileVersion: '6.0'\n").unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 1);
+
+        // A fake scip-typescript that fails the way the real one does when the
+        // pnpm on PATH cannot read the lockfile.
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_script(
+            &bin.join("scip-typescript"),
+            "#!/bin/sh\n\
+             [ \"$1\" = --version ] && { echo 0.0.0; exit 0; }\n\
+             echo 'Error: ERR_PNPM_BROKEN_LOCKFILE  load the current lockfile' >&2\n\
+             exit 1\n",
+        );
+
+        let _env = cmd_env_lock();
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_TS_CMD", None);
+        vars.prepend_path(&bin);
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_ts(ts_spec(), &repo, &bazel, &scip_dir, &mut parts);
+        let status = r.unwrap().status;
+        let LangStatus::Failed(msg) = status else {
+            panic!("expected Failed, got {status:?}");
+        };
+        assert!(
+            msg.starts_with("pnpm") || msg.starts_with("the pnpm on PATH"),
+            "the first line must name the cause, got: {msg}"
+        );
+        assert!(msg.contains("lockfileVersion 6.0"), "{msg}");
+        assert!(msg.contains("pnpm 8 on PATH"), "{msg}");
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn run_ts_delegates_to_configured_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = ts_spec();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 2);
+
+        // Delegated and merged, even with no node_modules at the root.
+        let (scip, cmd) = fake_scip_cmd(tmp.path(), &["src/app.ts", "src/util.js"]);
+        let _env = cmd_env_lock();
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_TS_CMD", Some(cmd.as_ref()));
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_ts(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
+        assert_eq!(r.status, LangStatus::Indexed);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0], scip);
+    }
+
+    #[test]
+    fn build_indexer_command_ts_infers_a_tsconfig() {
+        // A Bazel root often has no tsconfig.json (each ts_project names its
+        // own), and scip-typescript fails without one unless it infers it.
+        // No workspace file here, so no workspace flag and no PATH lookup.
+        let ts = ts_spec();
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("index-ts.scip");
+        let cmd = build_indexer_command(ts, tmp.path(), &out);
+        assert_eq!(cmd.get_program(), std::ffi::OsStr::new("scip-typescript"));
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "index".to_string(),
+                "--output".to_string(),
+                out.to_string_lossy().into_owned(),
+                "--infer-tsconfig".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn run_rust_without_a_root_cargo_toml_is_not_configured() {
+        // rust-analyzer has no project to load without a Cargo.toml, so the
+        // targets are reported as needing a command, like Go with no go.mod.
+        // The result must not depend on rust-analyzer being on PATH.
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = LANGS.iter().find(|s| s.language == "rust").unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        let bazel = fake_bazel(tmp.path(), 4);
+
+        let _env = cmd_env_lock();
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_RUST_CMD", None);
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_rust(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
+        assert_eq!(
+            r.status,
+            LangStatus::SkippedNotConfigured {
+                targets: 4,
+                env: "ENGRAPH_BAZEL_SCIP_RUST_CMD",
+            }
+        );
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn run_rust_delegates_to_configured_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = LANGS.iter().find(|s| s.language == "rust").unwrap();
+        let scip_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&scip_dir).unwrap();
+        // Targets are counted before the delegated branch skips, so it needs a
+        // bazel that reports some.
+        let bazel = fake_bazel(tmp.path(), 2);
+
+        // Delegated and merged, even with no Cargo.toml at the root (the
+        // configured command wins before the native path looks for one).
+        let (scip, cmd) = fake_scip_cmd(tmp.path(), &["src/lib.rs"]);
+        let _env = cmd_env_lock();
+        let mut vars = EnvGuard::default();
+        vars.set("ENGRAPH_BAZEL_SCIP_RUST_CMD", Some(cmd.as_ref()));
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let r = run_rust(spec, tmp.path(), &bazel, &scip_dir, &mut parts).unwrap();
         assert_eq!(r.status, LangStatus::Indexed);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], scip);
@@ -1273,6 +1906,34 @@ mod tests {
             .expect("python LangSpec present");
         assert_eq!(py.binary, "scip-python");
         assert!(py.rule_kinds.contains(&"py_library"));
+    }
+
+    #[test]
+    fn langs_includes_rust() {
+        let rust = LANGS
+            .iter()
+            .find(|s| s.language == "rust")
+            .expect("rust LangSpec present");
+        assert_eq!(rust.binary, "rust-analyzer");
+        for kind in [
+            "rust_library",
+            "rust_binary",
+            "rust_test",
+            "rust_proc_macro",
+            "rust_library_group",
+            "rust_prost_library",
+        ] {
+            assert!(rust.rule_kinds.contains(&kind), "missing {kind}");
+        }
+        // `rust_.*` would also count toolchain rules (`rust_prost_toolchain`).
+        assert!(
+            !rust
+                .rule_kinds
+                .iter()
+                .any(|k| k.contains('*') || k.ends_with("_toolchain")),
+            "{:?}",
+            rust.rule_kinds
+        );
     }
 
     #[test]
@@ -1304,6 +1965,9 @@ mod tests {
         let langs: Vec<&str> = plan.iter().map(|p| p.language).collect();
         assert!(langs.contains(&"java"));
         assert!(langs.contains(&"python"));
+        assert!(langs.contains(&"rust"));
+        let rust = plan.iter().find(|p| p.language == "rust").unwrap();
+        assert_eq!(rust.binary, "rust-analyzer");
     }
 
     #[test]

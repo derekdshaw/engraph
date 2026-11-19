@@ -1608,9 +1608,9 @@ crate that does cross-file `who-calls` across Rust/Python/Go/TS/Java.
 | Driver | `detect()` trigger | `command()` |
 |---|---|---|
 | `RustAnalyzer` | `Cargo.toml` | `rust-analyzer scip <repo> --output <out>` (chdir into repo) |
-| `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <out> --project-name <name> --project-version 0.0.0`, where `<name>` is `[project].name` of `pyproject.toml`, else `[tool.poetry].name`, else the repo's basename (`python_project_name`; plan 05 rule R1, so the ids do not depend on the checkout directory) |
+| `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <out> --project-name <name> --project-version 0.0.0`, where `<name>` is `[project].name` of `pyproject.toml`, else `[tool.poetry].name`, else the repo's basename (`python_project_name`; plan 05 rule R1, so the ids do not depend on the checkout directory); `NODE_OPTIONS` carries the Node heap ceiling (`set_node_heap`, §14.9) |
 | `ScipGo` | `go.mod` or `go.work` | `scip-go --module-root <repo> --module-version 0.0.0 --output <out>` (chdir into repo); with a `go.work`, also one `./<dir>/...` package pattern per `use` directory, since scip-go's default `./...` covers only the root module; `GOWORK=off` when the nearest `go.work` above the repo does not list it (`outside_its_go_work`), since Go then builds nothing there; with `--go-tags <a,b>`, `GOFLAGS="$GOFLAGS -tags=a,b"` (`apply_go_tags`; scip-go has no tags flag, but its package loader reads `GOFLAGS`, and the last `-tags` wins) |
-| `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index --output <out>` (chdir into repo); in a pnpm or yarn workspace (`TsWorkspace`), also `--pnpm-workspaces` / `--yarn-workspaces <repo>` |
+| `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index --output <out>` (chdir into repo); in a pnpm or yarn workspace (`TsWorkspace`), also `--pnpm-workspaces` / `--yarn-workspaces <repo>`; `NODE_OPTIONS` carries the Node heap ceiling (`set_node_heap`, §14.9) |
 | `ScipJava` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java index --output <out>` (chdir into repo) |
 
 `<out>` is `index.scip` inside a per-repo scratch directory `index.rs`
@@ -1640,10 +1640,10 @@ because many services keep per-platform files. A missing symbol in a
 
 scip-java's `index` subcommand auto-detects `{Maven, Gradle, sbt, mill}`
 when invoked standalone (the path covered by `drivers_live.rs`).
-On a Bazel workspace the same binary is driven by the symbol-level
-Bazel pathway (§14.9), where scip-java materializes its own aspect and
-orchestrates Bazel internally — engraph does not reimplement aspect
-dispatch.
+It does not detect Bazel. On a Bazel workspace the symbol-level pass
+(§14.9) does not run scip-java itself: it delegates to the command named
+by `ENGRAPH_BAZEL_SCIP_JAVA_CMD`, and a ready-made SemanticDB-aspect
+driver ships as `docs/examples/scip-java-bazel-index.sh`.
 
 `scripts/install-scip-indexers.sh` is the companion installer: idempotent,
 per-toolchain prerequisite checks, surfaces WSL-specific failure modes
@@ -2201,7 +2201,7 @@ the target-level pass writes `bazel_target` entities and
 `BAZEL_DEPENDS_ON` edges, this module produces per-language SCIP, merges
 it in memory, and loads the result under the same project key. The
 standalone SCIP indexers don't drive Bazel, so each language is handled
-the way that actually works on a real Bazel monorepo — the three paths
+the way that actually works on a real Bazel monorepo — the paths
 diverge (see **Per-language strategy**). The end result: `engraph
 subgraph <name>` carries both a **Calls / References** symbol section
 (from SCIP) and a **Bazel deps** section (from `bazel query`) in one
@@ -2219,16 +2219,104 @@ Toolchain downloads and full Bazel builds make `--bazel-symbols` heavy
 (5s warm to minutes cold per language); the explicit `--bazel-symbols`
 flag is still available to opt in on a single-repo run.
 
-**Per-language strategy.** Three distinct paths:
+**Per-language strategy.** Rust and TypeScript share one flow
+(`run_rooted_or_delegated`); the other languages each have their own:
 
-- **TypeScript / Python** (`run_language`, single-shot). Gate on a
+- **Python** (`run_language`, single-shot). Gate on a
   `bazel query --output=label_kind` probe for the language's rule
   classes (shared `--output_base` with the target-level pass, so the
   analysis cache stays warm) → `SkippedNoTargets` if empty; gate on
-  `which scip-<lang>` → `SkippedNoIndexer`; then spawn the indexer at the
-  workspace root, SCIP landing under
-  `~/.cache/engraph/bazel-scip-out/<sha>/`. Best-effort: `rules_ts`
-  `node_modules` and `rules_python` venv resolution are unresolved.
+  `which scip-python` → `SkippedNoIndexer`; then spawn the indexer at the
+  workspace root (`run_indexer`, shared with Rust and TypeScript), SCIP
+  landing under `~/.cache/engraph/bazel-scip-out/<sha>/`. The command is
+  the standalone driver's own (`ScipPython::command`; the ts arm uses
+  `typescript_command`), so the argv and the heap are defined once. Both
+  Node indexers, scip-python and scip-typescript, get a heap ceiling
+  through `NODE_OPTIONS=--max-old-space-size=<MB>` (`driver::set_node_heap`,
+  called by those two commands, so a plain `engraph index` gets it too):
+  `ENGRAPH_NODE_HEAP_MB`, else 12288. Node's own default (about 4 GB here)
+  runs out on ray; measured there (scip-python 0.6.8, 5,100 files), an 8 GB
+  ceiling completes but is GC-bound (7m54s, RSS pinned at 8.3 GiB) against
+  5m21s and a 9.85 GiB peak under 16 GB, with byte-identical SCIP, so 12 GB
+  leaves about 20% above what ray uses. It is a ceiling, not a
+  reservation. The user's other `NODE_OPTIONS` flags stay, and a heap
+  already set there wins over the default; `ENGRAPH_NODE_HEAP_MB` wins over
+  both, because Node honors the last of repeated flags. On ray the pass
+  indexes 425,006 symbols with 223,993 `CALLS` (6m25s with the load, release
+  build), and 6,445 of the 6,908 textual `ray.get(` call sites resolve to
+  its definition across 671 files, so per-project `rules_python` venv
+  resolution is not built.
+- **TypeScript and JavaScript** (`run_ts`, language id `ts`).
+  scip-typescript indexes JavaScript too, so the count covers `ts_project`,
+  `ts_library`, `js_library`, `js_binary`, and `js_test` (not
+  `js_run_binary`, which runs a tool at build time). Labels with
+  `node_modules` in them are not counted, for every language
+  (`target_count_query`: `let t = <kinds> in $t except
+  filter("node_modules", $t)`): `npm_link_all_packages` makes a `js_library`
+  per third-party npm package, 187 of the 248 matches on
+  `bazelbuild/examples` `frontend` (61 are first-party), and a repo that uses
+  rules_js only for a tool would otherwise start scip-typescript with no TS
+  or JS of its own. The id stays `ts`: it
+  is only printed, never stored, and `ts/js` would break the
+  `index-<language>.scip` output path. When `ENGRAPH_BAZEL_SCIP_TS_CMD` is
+  set the pass delegates to it (`run_delegated`). Unset → with targets and
+  no root `node_modules`, `SkippedNotConfigured { targets, env:
+  "ENGRAPH_BAZEL_SCIP_TS_CMD" }`, before the PATH probe, so scip-typescript
+  does not start: `rules_js` makes `node_modules` under `bazel-bin/<pkg>/`
+  during a build, not at the root, and scip-typescript fails without them.
+  With a root `node_modules`, `scip-typescript index --infer-tsconfig` runs
+  with the standalone driver's command (`driver::typescript_command`, so the
+  same `--pnpm-workspaces` / `--yarn-workspaces <root>` rule, §14.7);
+  `--infer-tsconfig` because a Bazel root often has no `tsconfig.json`. That
+  flag writes the inferred `tsconfig.json` into the repo and leaves it, so
+  after the run engraph removes each `tsconfig.json` that is new since the
+  run started and whose content is exactly one of the two the flag writes
+  (`remove_inferred_tsconfigs`); a user's own file is never touched. The
+  native pass indexes TypeScript only: each project is read through its
+  tsconfig, and one without `allowJs` skips the `.js`/`.jsx` files
+  (`--infer-tsconfig` does not help — its file walk enters `node_modules`
+  and the first `.d.ts` there makes it write `{}`, the TypeScript-only
+  config). The example driver below covers JavaScript with a second pass. A
+  ready-made driver that installs the packages with the package manager of
+  the lock file (`pnpm install --frozen-lockfile`, `yarn install
+  --immutable`, or `--frozen-lockfile` on yarn 1, `npm ci`) and then runs the
+  same command ships as `docs/examples/scip-typescript-bazel-index.sh`. When
+  the pnpm on `PATH` cannot read the lockfile version (pnpm 12 refuses a v6
+  lockfile, and a rules_js repo often pins no pnpm), the frozen install
+  fails at once with `ERR_PNPM_BROKEN_LOCKFILE`; that is the check, so no
+  table of which pnpm reads which version. The driver then stops and names
+  the two fixes: upgrade the lockfile with `pnpm install --lockfile-only`
+  (pnpm 12 rewrites a v6 lockfile as v9), or put the pnpm that writes that
+  version on `PATH` (7 for v5, 8 for v6). It never runs another pnpm
+  itself. When the lockfile is out of date with a `package.json` (`ERR_PNPM_OUTDATED_LOCKFILE`,
+  as at `bazelbuild/examples` `efab5bd`), it installs with
+  `--no-frozen-lockfile` and restores the lockfile after; the drifted
+  packages then resolve from `package.json`, not from the lockfile Bazel
+  builds with. yarn and npm stay strict. After the workspace pass the driver
+  runs scip-typescript once more over a generated project (`allowJs`, in a
+  temp directory outside the repo) whose `files` are exactly the JS files no
+  project's tsconfig covers — a Node helper resolves every tsconfig with the
+  TypeScript that ships inside scip-typescript, so an `extends` chain into
+  `node_modules` counts (astro turns `allowJs` on that way) and no file is
+  indexed twice (a duplicate document doubles its relations) — and
+  concatenates the two SCIP indexes. The driver removes the `tsconfig.json`
+  files `--infer-tsconfig` wrote, like the native pass.
+- **Rust** (`run_rust`, Go's shape with one root). When
+  `ENGRAPH_BAZEL_SCIP_RUST_CMD` is set the pass delegates to it
+  (`run_delegated`, the Java contract). Unset → count the targets of
+  `rust_library`, `rust_binary`, `rust_test`, `rust_proc_macro`,
+  `rust_library_group`, and `rust_prost_library` (named classes, not
+  `rust_.*`, which also counts toolchain rules such as
+  `rust_prost_toolchain`; the group and prost classes cover a repo with no
+  top-level `rust_library`) → `SkippedNoTargets` if none. With targets and
+  no root `Cargo.toml`, rust-analyzer has no project to load →
+  `SkippedNotConfigured { targets, env: "ENGRAPH_BAZEL_SCIP_RUST_CMD" }`.
+  This check comes before the PATH probe, so rust-analyzer does not start
+  and the status is the same whether or not it is installed. With a root
+  `Cargo.toml`, `rust-analyzer scip` runs with the standalone driver's argv
+  (`driver::RustAnalyzer`) through `run_indexer` → `Indexed`. A repo that
+  is also indexed standalone (`engraph index .`) loads under the same
+  project key, so the second load replaces the first.
 - **Go** (`run_go_modules`, multi-module). scip-go needs a module root,
   and Bazel-go repos rarely have one at the workspace root.
   `discover_go_modules` walks for every `go.mod` (pruning symlinked /
@@ -2319,12 +2407,15 @@ who exported it sees which rule classes were counted instead of a bare
 "no targets". One variant covers both
 routes into that state — a language always delegated because its build is
 repo-specific (Java), and one whose native pass found no root (Go with no
-`go.mod`, a pure gazelle repo) — so a new delegated language needs no new
+`go.mod`, a pure gazelle repo; Rust with no root `Cargo.toml`; TypeScript
+with no root `node_modules`) — so a new delegated language needs no new
 status:
 
 ```
 symbol[go]:   skipped (3 targets, set ENGRAPH_BAZEL_SCIP_GO_CMD to index them)
 symbol[java]: skipped (2 targets, set ENGRAPH_BAZEL_SCIP_JAVA_CMD to index them)
+symbol[ts]:   skipped (5 targets, set ENGRAPH_BAZEL_SCIP_TS_CMD to index them)
+symbol[rust]: skipped (4 targets, set ENGRAPH_BAZEL_SCIP_RUST_CMD to index them)
 ```
 
 `SkippedNoIndexer` deliberately carries no count: its remedy is installing
@@ -2345,7 +2436,17 @@ chains after the target-level pass; `driver_name` reports
 command writes a known SCIP, `run_java` merges it; the unconfigured case
 reports `SkippedNotConfigured` with the target count, and a workspace with
 no targets reports `SkippedNoTargets`, or `SkippedNoTargetsForCommand`
-when the variable is set, without running the command). These
+when the variable is set, without running the command). `run_rust` is
+unit-tested the same way: with targets and no root `Cargo.toml` it reports
+`SkippedNotConfigured` naming `ENGRAPH_BAZEL_SCIP_RUST_CMD`, and a
+configured command is merged even without a `Cargo.toml`. `LANGS` is
+pinned to carry the Rust rule classes and no `rust_.*` pattern. `run_ts`
+is tested the same way; its not-configured test also puts a fake
+`scip-typescript` that leaves a marker ahead of the real one on `PATH`, to
+show that neither the PATH probe nor an index run starts it (unix only:
+on Windows `Command` does not resolve a script without `.exe`). The `ts`
+entry is pinned to count the `js_*` rules, and the `ts` argv to carry
+`--infer-tsconfig`. These
 use a fake `bazel` that answers queries with `label_kind` lines: a shell
 script on unix, a batch file on Windows (`Command` runs a `.cmd` through
 `cmd.exe`). On unix a child process writes the script, so a parallel test's
@@ -2371,11 +2472,34 @@ workload trips them):
   them per repo; `docs/plans/completed/03-all-go-modules-plan.md` describes
   the in-engraph alternative (synthesized go.mod) as an optional step that
   was not done.
-- **scip-typescript + rules_ts node_modules**: cold runs may fail until a
-  prior `bazel build //...` populates the package-local `node_modules`
-  symlinks; likely delegated like Java.
+- **TypeScript without a root `node_modules`**: the native pass needs the
+  packages installed at the root. The example driver installs them, which
+  writes `node_modules` into the repo and runs the packages' install
+  scripts; after that the native pass can run without it. Plain `.js`/`.jsx`
+  files reach the graph only through the driver's second pass; the native
+  pass indexes what the projects' tsconfigs cover. With `--pnpm-workspaces`,
+  scip-typescript itself runs `pnpm ls`, so the pnpm on `PATH` must read the
+  repo's lockfile version; the driver checks this for its install, and the
+  native pass rewrites the scip-typescript failure
+  (`pnpm_broken_lockfile_help`) — both report the same two fixes: upgrade
+  the lockfile with `pnpm install --lockfile-only`, or put the pnpm that
+  writes that version on `PATH`.
 - **scip-python rules_python venv**: per-project environment resolution
-  is unbuilt (Phase D).
+  is unbuilt; ray did not need it (about 93% of `ray.get` call sites
+  resolve). A repo whose imports stay unresolved shows it as few
+  relations, not as a failure.
+- **scip-python module names follow the path from `--cwd`**: ray's
+  `python/ray/_private/worker.py` is module `python.ray._private.worker`,
+  while its code imports `ray._private.worker`. Inside the repo the ids
+  match; another repo that imports `ray` makes `ray._private.worker` ids, so
+  cross-repo stitching does not link the two. Changing it is an id rule
+  (a `NORMALIZATION_VERSION` bump, §14.10).
+- **Rust without a root `Cargo.toml`**: only the root is checked; a repo
+  whose Cargo workspaces sit in subdirectories, or that has no Cargo at
+  all, needs `ENGRAPH_BAZEL_SCIP_RUST_CMD`. A command built on `rules_rust`'s
+  `rust-project.json` (`@rules_rust//tools/rust_analyzer:gen_rust_project`),
+  which rust-analyzer accepts in place of Cargo, is the expected route; it
+  is not tested.
 - **Cross-repo moniker collisions**: Java first-party monikers carry a
   constant empty version (`semanticdb maven . . …`) — cross-commit
   stable but cross-repo collision-prone; `scip_loader::normalize_moniker`
@@ -2426,6 +2550,5 @@ v18).
 
 The roadmap (`docs/ROADMAP.md`, one plan per item in `docs/plans/`)
 tracks features that aren't built, ranked by expected impact. The codegraph is shipped (target-level §14.8,
-symbol-level §14.9); its open items there are Bazel
-symbols for TypeScript and Python, and stable symbol ids (normalization
-plus a stability suite).
+symbol-level §14.9, stable symbol ids §14.10); its open items there are
+the code-graph bugs of plan 01.
