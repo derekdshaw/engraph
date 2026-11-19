@@ -119,7 +119,15 @@ the most difficult.
 
 ### Phase E: Rust
 
-Status (2026-11-18): steps 1 to 5 are complete. The validation is not done.
+Status (2026-11-18): steps 1 to 5 and the validation are complete. Validation
+results, on `bazel-lsp` commit `c8e653e` (step 1 of the validation):
+`symbol[rust]: indexed`, 714 symbols with `.rs` paths (975 symbol rows with
+external symbols), `CALLS` 997 and `REFERENCES` 1126 — the same counts as the
+standalone run. Step 2: `symbol[rust]: skipped (6 targets, set
+ENGRAPH_BAZEL_SCIP_RUST_CMD to index them)`. Step 3:
+`symbol[rust]: skipped (no targets in this workspace)`. The symbol load also
+deleted 3 of the 11 `bazel_target` entities (bug 23 of plan 01, not a phase E
+defect).
 
 1. Write a test for `LANGS`: it has an entry with the language `rust`, the
    binary `rust-analyzer`, and rule kinds that include `rust_library`,
@@ -153,7 +161,44 @@ Validation of phase E:
 
 ### Phase B: TypeScript and JavaScript
 
-Status (2026-11-18): steps 1 to 7 are complete. The validation is not done.
+Status (2026-11-18): steps 1 to 7 and the validation are complete. Validation
+results, on a sparse clone of `bazelbuild/examples` at `efab5bd` (the tip of
+the repository on 2026-11-18). Step 2: `symbol[ts]: skipped (248 targets, set
+ENGRAPH_BAZEL_SCIP_TS_CMD to index them)`, and a marker shows that
+scip-typescript did not start. The count includes the first-party `js_library`
+targets, but 187 of the 248 are `js_library` targets that
+`npm_link_all_packages` makes for third-party npm packages
+(`//:.aspect_rules_js/node_modules/<pkg>`, …); only 61 are first-party. The
+count now leaves out each label with `node_modules` in it
+(`target_count_query`), so the same run gives
+`symbol[ts]: skipped (61 targets, …)`; the Rust (6) and Java (2) counts of
+the phase E validation do not change. Step 3
+passes on a clean clone with pnpm 8 on `PATH`. The lockfile is version 6.0,
+which pnpm 12 does not read: with pnpm 12 on `PATH` the driver stops before
+it installs and names the two fixes (`pnpm install --lockfile-only`, which
+pnpm 12 can do — it rewrites the lockfile as version 9 — or pnpm 8 on
+`PATH`), and changes nothing in the repo. The lockfile of `efab5bd` is not up to date with
+`react/package.json` (vite), so the driver installs with
+`--no-frozen-lockfile` and restores the lockfile after. Result:
+`symbol[ts]: indexed (100330 SCIP bytes)`, 283 symbols (74 `.tsx`, 58 `.js`,
+55 `.ts`, 5 `.jsx`, 5 `.mjs`, 4 `.mts`), with symbols from `.js` and from
+`.ts` files as step 3 asks. The JavaScript symbols come from the driver's
+second pass: the workspace pass reads each project through its tsconfig,
+and a tsconfig without `allowJs` skips `.js`/`.jsx` files, so the driver
+indexes, in one more scip-typescript run, exactly the JS files no project
+covers (12 here; `astro.config.mjs` is covered — astro turns `allowJs` on
+through `extends` — and stays single). `--infer-tsconfig` does not close
+this gap: its file walk enters `node_modules` and the first `.d.ts` makes
+it write `{}`, the TypeScript-only config (the same in scip-typescript
+0.6.0 and 0.6.2), and it leaves the written `tsconfig.json` files in the
+repo — the driver and the native pass now remove the files it wrote
+(`remove_inferred_tsconfigs`), and the repo is clean after a run. The
+native path, with the installed `node_modules`, no command, and a pnpm on
+`PATH` that reads the lockfile version (scip-typescript runs `pnpm ls` for
+`--pnpm-workspaces`), gives the TypeScript-only index (78679 SCIP bytes);
+with a pnpm that cannot read it, `symbol[ts]: failed:` names the same two
+fixes as the driver (`pnpm_broken_lockfile_help`). The pass also deleted 32 `bazel_target` entities
+with no edges (bug 23 of plan 01).
 Step 1 decision: the language id stays `ts`. The id is only printed, never
 stored; `ts/js` breaks the output path `index-{language}.scip`; and `js`
 gives an incorrect name to the TypeScript targets. Step 5 uses the command of

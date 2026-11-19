@@ -2233,7 +2233,14 @@ flag is still available to opt in on a single-repo run.
 - **TypeScript and JavaScript** (`run_ts`, language id `ts`).
   scip-typescript indexes JavaScript too, so the count covers `ts_project`,
   `ts_library`, `js_library`, `js_binary`, and `js_test` (not
-  `js_run_binary`, which runs a tool at build time). The id stays `ts`: it
+  `js_run_binary`, which runs a tool at build time). Labels with
+  `node_modules` in them are not counted, for every language
+  (`target_count_query`: `let t = <kinds> in $t except
+  filter("node_modules", $t)`): `npm_link_all_packages` makes a `js_library`
+  per third-party npm package, 187 of the 248 matches on
+  `bazelbuild/examples` `frontend` (61 are first-party), and a repo that uses
+  rules_js only for a tool would otherwise start scip-typescript with no TS
+  or JS of its own. The id stays `ts`: it
   is only printed, never stored, and `ts/js` would break the
   `index-<language>.scip` output path. When `ENGRAPH_BAZEL_SCIP_TS_CMD` is
   set the pass delegates to it (`run_delegated`). Unset → with targets and
@@ -2244,11 +2251,40 @@ flag is still available to opt in on a single-repo run.
   With a root `node_modules`, `scip-typescript index --infer-tsconfig` runs
   with the standalone driver's command (`driver::typescript_command`, so the
   same `--pnpm-workspaces` / `--yarn-workspaces <root>` rule, §14.7);
-  `--infer-tsconfig` because a Bazel root often has no `tsconfig.json`. A
+  `--infer-tsconfig` because a Bazel root often has no `tsconfig.json`. That
+  flag writes the inferred `tsconfig.json` into the repo and leaves it, so
+  after the run engraph removes each `tsconfig.json` that is new since the
+  run started and whose content is exactly one of the two the flag writes
+  (`remove_inferred_tsconfigs`); a user's own file is never touched. The
+  native pass indexes TypeScript only: each project is read through its
+  tsconfig, and one without `allowJs` skips the `.js`/`.jsx` files
+  (`--infer-tsconfig` does not help — its file walk enters `node_modules`
+  and the first `.d.ts` there makes it write `{}`, the TypeScript-only
+  config). The example driver below covers JavaScript with a second pass. A
   ready-made driver that installs the packages with the package manager of
   the lock file (`pnpm install --frozen-lockfile`, `yarn install
   --immutable`, or `--frozen-lockfile` on yarn 1, `npm ci`) and then runs the
-  same command ships as `docs/examples/scip-typescript-bazel-index.sh`.
+  same command ships as `docs/examples/scip-typescript-bazel-index.sh`. When
+  the pnpm on `PATH` cannot read the lockfile version (pnpm 12 refuses a v6
+  lockfile, and a rules_js repo often pins no pnpm), the frozen install
+  fails at once with `ERR_PNPM_BROKEN_LOCKFILE`; that is the check, so no
+  table of which pnpm reads which version. The driver then stops and names
+  the two fixes: upgrade the lockfile with `pnpm install --lockfile-only`
+  (pnpm 12 rewrites a v6 lockfile as v9), or put the pnpm that writes that
+  version on `PATH` (7 for v5, 8 for v6). It never runs another pnpm
+  itself. When the lockfile is out of date with a `package.json` (`ERR_PNPM_OUTDATED_LOCKFILE`,
+  as at `bazelbuild/examples` `efab5bd`), it installs with
+  `--no-frozen-lockfile` and restores the lockfile after; the drifted
+  packages then resolve from `package.json`, not from the lockfile Bazel
+  builds with. yarn and npm stay strict. After the workspace pass the driver
+  runs scip-typescript once more over a generated project (`allowJs`, in a
+  temp directory outside the repo) whose `files` are exactly the JS files no
+  project's tsconfig covers — a Node helper resolves every tsconfig with the
+  TypeScript that ships inside scip-typescript, so an `extends` chain into
+  `node_modules` counts (astro turns `allowJs` on that way) and no file is
+  indexed twice (a duplicate document doubles its relations) — and
+  concatenates the two SCIP indexes. The driver removes the `tsconfig.json`
+  files `--infer-tsconfig` wrote, like the native pass.
 - **Rust** (`run_rust`, Go's shape with one root). When
   `ENGRAPH_BAZEL_SCIP_RUST_CMD` is set the pass delegates to it
   (`run_delegated`, the Java contract). Unset → count the targets of
@@ -2423,7 +2459,15 @@ workload trips them):
 - **TypeScript without a root `node_modules`**: the native pass needs the
   packages installed at the root. The example driver installs them, which
   writes `node_modules` into the repo and runs the packages' install
-  scripts; after that the native pass can run without it.
+  scripts; after that the native pass can run without it. Plain `.js`/`.jsx`
+  files reach the graph only through the driver's second pass; the native
+  pass indexes what the projects' tsconfigs cover. With `--pnpm-workspaces`,
+  scip-typescript itself runs `pnpm ls`, so the pnpm on `PATH` must read the
+  repo's lockfile version; the driver checks this for its install, and the
+  native pass rewrites the scip-typescript failure
+  (`pnpm_broken_lockfile_help`) — both report the same two fixes: upgrade
+  the lockfile with `pnpm install --lockfile-only`, or put the pnpm that
+  writes that version on `PATH`.
 - **scip-python rules_python venv**: per-project environment resolution
   is unbuilt (Phase D).
 - **Rust without a root `Cargo.toml`**: only the root is checked; a repo
