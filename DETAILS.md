@@ -653,34 +653,16 @@ Shared with the native `PreToolUse(Grep)` path:
   ambiguous to be a useful neighborhood. The deny reason suggests the
   path as typed, so `engraph subgraph Config::new` resolves the same
   single symbol even when bare `new` has dozens.
-- **Branch divergence** (`divergence.rs`): before denying, it runs
-  `git diff --name-only <indexed commit> -- <matched files>` in the
-  session's checkout (the hook payload's `cwd`). If the checkout has
-  changed any matched symbol's file since the index (committed on its
-  branch or not), the grep passes through: the graph would show the
-  indexed version, not this branch's. The check applies only when the
-  project key is `cwd`'s repo (`canonical_repo_key`, so a linked
-  worktree counts; monorepo sub-projects index into it, §14) and
-  `index_state` (§12.1 v9/v10) has a commit for it. Each file is
-  compared with the commit of the most specific indexed subtree covering
-  it, so a sub-project indexed earlier than its siblings is checked
-  against its own index commit.
-  With no recorded commit the redirect behaves as before. If git can't
-  compare (the commit was rebased or gc'd away), every file counts as
-  changed. `engraph subgraph` runs the same check over every file in
-  the neighborhood and prints a "Changed since the index" note naming
-  them above the markdown (not in `--json`).
-  The recorded commit is `git stash create` when the tree is dirty, so
-  files indexed from uncommitted edits aren't flagged. Nothing
-  references that object, so `git gc` prunes it after `gc.pruneExpire`
-  (2 weeks by default). After that the diff fails and every file counts
-  as changed until the next `engraph index`.
-  `git diff` never reports a file that is untracked now and absent from
-  the recorded commit (`stash create` excludes untracked files too), so
-  a matched file that is untracked (`git ls-files --others
-  --exclude-standard`) counts as changed when its mtime is later than
-  the covering subtree's `index_state.indexed_at` — written at
-  sub-second precision for exactly this comparison.
+- **The view of the checkout** (`view.rs`, plan 10 step 13): before
+  matching, the redirect installs this checkout's view, so what it finds
+  is the base graph with that checkout's overlay over it. The per-file
+  branch-divergence check that preceded it is gone (step 14): a file the
+  branch changed no longer turns the redirect off, because the overlay
+  carries that file once the worktree's index run lands. `engraph
+  subgraph` reads the same view and prints one note above the markdown
+  (not in `--json`) when the graph is behind this checkout —
+  `divergence::graph_behind_note`, which asks whether the base is stale
+  in the base checkout and whether the overlay is stale anywhere else.
 
 The gate matters: a permissive heuristic would deny on common
 identifiers like `new` / `run` / `parse` (any of which has dozens of
@@ -1105,9 +1087,9 @@ via `ingestion_log`, per-file errors are logged and skipped, and a
 
 After the brief's sections are gathered, the hook checks
 `engraph_codegraph::indexed_commits(project)`. If the project has at least one
-`index_state` row — i.e. someone ran `engraph index` on it before — and `cwd`
-is in the repo's main worktree, it spawns `engraph index --if-changed --auto
-<cwd>` (`spawn_detached_index`, `hooks.rs`) and does not wait: stdin is null,
+`index_state` row — i.e. someone ran `engraph index` on it before — it spawns
+`engraph index --if-changed --auto <cwd>` (`spawn_detached_index`, `hooks.rs`)
+from any checkout, base or worktree, and does not wait: stdin is null,
 stdout/stderr append to `auto-index.log` in the data directory beside the
 database — the hook writes a dated header line (`=== <UTC> engraph index
 --if-changed --auto <cwd> …`) before handing the file over, since the child's
@@ -1120,17 +1102,24 @@ The "indexed before" gate is deliberate: a cold index can run for minutes and
 download toolchains, which is a commitment the user makes once with an explicit
 `engraph index`; from then on, every session start pays only for what changed.
 
-The main-worktree gate (`divergence::in_linked_worktree`) follows from the
-codegraph being one index per repo (§5.5, §14): a refresh from a linked
-worktree would re-index that shared index from its branch, and sessions in
-different worktrees would then keep re-indexing over each other. Linked
-worktrees rely on the per-file divergence check instead: greps on symbols
-whose files their branch changed pass through, and `subgraph` flags those
-files. An explicit `engraph index` from a linked worktree still runs, with a
-warning that it replaces the shared index. In a bare-repo layout (`git clone
---bare` plus `git worktree add`) git lists the bare directory as the main
-worktree, so every checkout counts as linked and no session refreshes the
-index automatically; run `engraph index` by hand there.
+In a checkout that is not the base checkout, the child brings that worktree's
+**overlay** up to date instead of touching the base (§8.0.1a), and only when
+the overlay no longer describes the checkout (`divergence::overlay_stale`):
+the base graph was indexed again (the digest of `index_state`'s
+`(subtree, commit)` rows moved), the tracked working tree changed (the tree
+hash of the `git stash create`/HEAD pair differs — the tree, because a stash
+commit's id embeds its timestamp), or an untracked file was written after the
+overlay (`overlay_state.indexed_at`, same mtime rule as the base refresh). A
+current overlay prints `overlay up to date` and indexes nothing, so a session
+start in an unchanged worktree costs a few git commands. An untracked file
+*removed* after the overlay is not seen — the same blind spot the base
+refresh's untracked check has — and heals with the next change. What each
+overlay was computed from is recorded in `overlay_state` (§12.1 v21) after
+every overlay run, captured *before* the indexer starts, so an edit made
+while it runs leaves the overlay stale rather than falsely covered. In a
+bare-repo layout no checkout is the main worktree; the first full index run
+(or `--full`) makes its checkout the base, and the others get overlays like
+any worktree.
 
 `--if-changed` itself (`Cmd::Index`, `main.rs`) resolves the project key with
 `index_scope`, lists the subtrees `divergence::changed_subtrees` reports — one
@@ -1171,6 +1160,94 @@ the outcome — nothing to do, lock held, every subtree failed — and before th
 run's own error exit, so the hook's firing rate and cost are always visible.
 A dry run records nothing. Plain `engraph index <repo>` keeps its one row per
 run keyed by driver name.
+
+### 8.0.1a Where an index run writes: base or overlay
+
+`main::index_route` decides, per run, whether rows go to the base graph every
+worktree reads or to this checkout's overlay:
+
+- `--full` → **base**, and the checkout becomes the base checkout
+  (`record_base`). Moving the base to another checkout prints a warning, since
+  every other worktree will then compute its overlay against this branch.
+- The project's **first** index run → base. An overlay is a difference from a
+  base, so something has to write one; this is also how a bare-repo layout,
+  where no checkout is the main worktree, gets a base at all.
+- Otherwise: the base checkout (`index::base_checkout`) → base; **any other
+  worktree → its overlay**, for a plain `engraph index` and for
+  `--if-changed` alike. A session in one worktree can no longer replace the
+  graph the others read, which is what the old `in_linked_worktree` gate was
+  protecting against by refusing to run.
+- A `--scip-manifest` load always writes the base: a manifest describes the
+  whole project, not a difference from it.
+
+Files under a subtree indexed from **prebuilt SCIP** are kept out of overlays
+(`divergence::driver_indexed_only`). Their base rows come from whatever
+produced that file, and engraph's own drivers need not reproduce those ids, so
+overlay rows for them would not join the base rows — the same reason
+`--if-changed` refuses to refresh such a subtree.
+
+### 8.0.1b Overlay index runs (`engraph index --overlay`)
+
+An overlay run indexes what a checkout changed, not the repo. It asks
+`divergence::overlay_files` which files differ from the base commit (§8.0.1),
+runs the indexers over the units holding them, and loads **only those
+documents** into `overlay_*` under the checkout's path
+(`index::index_overlay` → `scip_loader::load_overlay`). Every unchanged file
+keeps its base rows, which the worktree's view reads. A checkout that matches
+the base clears its overlay (`clear_overlay`); deletions alone still write the
+`overlay_files` listing, since that is what hides the base rows.
+
+**One loader, two destinations.** `scip_loader::RowSink` is `Base` or
+`Overlay { worktree }`, and `load_document` — definition anchors with their
+specificity tiebreaks, CALLS/REFERENCES resolution, `enclosing_range`
+locations — stays a single implementation that both use, so the two can't
+drift. The overlay sink differs in one rule: it writes a stub row only for a
+symbol the base does not have, so an overlay never copies the external symbols
+an unchanged dependency names. Overlay edges to base symbols are the normal
+case (34 of 47 in the Go fixture), which is why `overlay_relations` has no
+foreign key (§12.1 v20).
+
+**Narrowing.** `Driver::narrow` returns the runs covering the changed files:
+one per crate (rust-analyzer), package (scip-typescript), or Maven/Gradle
+module (scip-java); scip-go instead runs once in the module root with a
+`./<dir>/...` pattern per changed directory, since a package below it has no
+`go.mod`; scip-python does not narrow. Narrowing is id-safe — a narrowed run
+emits a subset of the full run's ids, verified per indexer (plan 10,
+"Findings") — which is what lets overlay rows join base rows. Above
+`index::MAX_NARROW_RUNS` (3) units the run falls back to one pass over the
+checkout: each narrowed run restarts the indexer, and the resulting rows are
+identical either way, so the threshold trades time only. A run started below
+the repo writes paths relative to its own directory and is rebased to
+repo-relative before loading.
+
+### 8.0.1c The view of a checkout
+
+Every lookup reads the **view** of the checkout it runs in: the base graph
+with that checkout's overlay over it. `view::install_worktree_view` installs
+it as two temp views **named `entities` and `relations`**, which shadow the
+base tables for that connection — SQLite resolves an unqualified name in the
+temp schema first — so the neighborhood queries, `MATCH_WHERE_SQL`, the grep
+redirect and the post-read listing all read the view **without a single query
+changing**. The base tables stay reachable as `main.entities` /
+`main.relations`, which is what the view definitions and every writer use, and
+a write through a view is refused by SQLite, which keeps a loader off a
+connection that has one installed. Temp views die with the connection, and a
+lookup is one process, so nothing leaks between runs.
+
+A row of the view is every overlay row of this worktree, plus every base row
+the worktree has not replaced: not a symbol the overlay defines, and not in a
+file the overlay covers — which is how a changed file's old symbols and a
+deleted file's rows disappear. A base edge goes when the file of its *source*
+is one the overlay covers; an edge to a symbol the view no longer has drops
+out by itself, since the neighborhood queries join the other end against
+`entities`. Rows of other projects are never hidden, so a monorepo sibling and
+a cross-repo reference read as before.
+
+The three read paths install it: `engraph subgraph` (`main.rs`), the grep
+redirect (`redirect.rs`, from the pre-grep/pre-bash hooks) and the
+PostToolUse(Read) listing (`hooks.rs`, keyed on the directory of the file that
+was read). Installing is best-effort: on failure the lookup reads the base
+graph, as before plan 10.
 
 ### 8.0.2 One index run per project
 
@@ -1438,7 +1515,7 @@ but logs a warning if it ever happens.
 | 9 | `index_state` table: the commit each codegraph project was last indexed at (`engraph index` records `git stash create`, a commit of the working tree it indexed, else HEAD; it clears the row outside git), so lookups can detect files a worktree's branch has changed since (§5.5). |
 | 10 | `index_state` keyed by `(project, subtree)`: a monorepo sub-project index (§14) records its own commit; a run replaces the commits of subtrees nested under it. Table rebuilt (SQLite can't change a primary key); v9 rows become subtree `''`. Known gap: the commit is per subtree, not per indexer, so after a Rust-only root run a sub-project's TypeScript symbols (indexed by an earlier sub-project run) are checked against the root's newer commit, and a TypeScript change between the two runs goes unflagged. |
 | 11 | `index_state` records how each subtree was indexed: `source` (`drivers` run by engraph, or prebuilt `scip` / `manifest`), the `--lang` pin, and `bazel_symbols`, so `index --if-changed` repeats the same run (§8.0.1). Older rows default to a plain driver run. |
-| 12 | `entities.qualified_name` + `idx_entities_qualified_name`: the SCIP descriptors after the namespace joined with `.` (`Config.full_path_base`, `Config`), so `subgraph` and the grep redirect can match a qualified lookup (§5.5, §14.4). NULL until the project is indexed again; Bazel targets never have one. Names change in the same load, so v12 also clears the commit of every driver run (`source = 'drivers'`): git can't resolve `''`, which counts as changed, so the next SessionStart refresh re-indexes the project. Until then the per-file divergence check treats its files as changed, and greps on them pass through. Prebuilt SCIP subtrees keep their commit, since the refresh skips them; repos without an automatic refresh (linked worktrees, bare-repo layouts) need one manual `engraph index`. |
+| 12 | `entities.qualified_name` + `idx_entities_qualified_name`: the SCIP descriptors after the namespace joined with `.` (`Config.full_path_base`, `Config`), so `subgraph` and the grep redirect can match a qualified lookup (§5.5, §14.4). NULL until the project is indexed again; Bazel targets never have one. Names change in the same load, so v12 also clears the commit of every driver run (`source = 'drivers'`): git can't resolve `''`, which counts as changed, so the next SessionStart refresh re-indexes the project. Until then `subgraph` notes that the graph is behind the checkout (§5.5). Prebuilt SCIP subtrees keep their commit, since the refresh skips them. |
 
 | 13 | SCIP local symbols per project and document (§14.3). `entities.scheme`: the SCIP scheme of the indexer that wrote a symbol (the first word of a global id; for a local, the scheme of its document; NULL for Bazel targets), filled for existing global symbols. The old `local <n>` rows, one row for the locals of all documents and projects, are deleted with their edges. Like v12, v13 clears the commit of every driver run, so the next refresh writes the local edges again. |
 | 14 | `relations.line`: the line of the occurrence (call or reference) an edge comes from, NULL for relationship edges, Bazel dependencies, and sources defined in more than one document (a Go package) (§14.4). Clears the commit of every driver run, as v12 does, so the next refresh writes the lines. |
@@ -1446,8 +1523,11 @@ but logs a warning if it ever happens.
 | 16 | `index_state.go_tests`: whether the run had `--go-tests`, so `index --if-changed` lets the Bazel Go pass index `_test.go` files again (§8.0.1). Older rows default to 0; no commit is cleared. |
 | 17 | `events.path_hash` + `events.read_range` + partial index `idx_events_reads (session_id, path_hash, read_range)`: the SHA-256 of the file path of a `read` event and the part of the file it returned (§5.6), so a report can find reads of a file, or of a range of it, that the session read before. NULL for all other events. |
 | 18 | `index_state.normalization`: the version of the symbol-id normalization rules (`scip_loader::NORMALIZATION_VERSION`) the run's ids were written with. `engraph index` lists the projects whose rows carry another version (NULL, from before the rules, counts as 0) and recommends a full `engraph index <repo>` of each: their ids and newly indexed ids do not connect until then (plan 05, part 2, steps 11 to 13). |
+| 19 | `project_base (project, base_worktree, base_commit, indexed_at)`: the checkout whose index run wrote the project's base rows — the base checkout — and the commit it read (plan 10, part 2, step 4). Every other worktree of the repo diffs its files against that commit and stores only the difference, so indexing a worktree never re-indexes the repo and engraph keeps no checkout of its own. One row per project, written by a full index run; no row means the main worktree is the base checkout (`index::base_checkout` falls back to the project key when that key is a working tree root), which is how a repo indexed before plan 10 carries on. A bare repo's key is no checkout, so one of its worktrees must claim the base with a full run. |
+| 20 | `overlay_files`, `overlay_entities`, `overlay_relations`: the overlay of each checkout (plan 10, part 3) — the rows for the files whose content differs from the base commit, keyed by `worktree` (the checkout path, as `git worktree list` names it). `overlay_files` lists the files the overlay covers, deleted ones included: a base row whose file is listed is hidden from that worktree, so a deleted file has a row there and none in `overlay_entities`. The row tables key on `(worktree, id)` because one symbol id exists in the base and in every worktree that changed it, which `entities.id TEXT PRIMARY KEY` cannot hold. `overlay_relations` deliberately has no foreign key to `entities` (the base `relations` does, and `foreign_keys` is ON): an overlay edge can end at a symbol only that worktree has. Columns match what the lookups read; `valid_from` and `source_message_id`, which the codegraph never writes, are left out. |
+| 21 | `overlay_state (worktree, project, checkout_tree, base_digest, indexed_at)`: what each overlay was computed from (plan 10, part 3, step 11) — the tree hash of the checkout's `git stash create`/HEAD commit (the tree, since a stash commit's id embeds its timestamp) and a digest of the `index_state` rows the overlay diffed against. `divergence::overlay_stale` compares both with the state now (§8.0.1); one row per worktree, replaced on each overlay run, removed with the overlay's rows. |
 
-(`SCHEMA_VERSION = 17`; the `MIGRATIONS` array has 17 entries.)
+(`SCHEMA_VERSION = 21`; the `MIGRATIONS` array has 21 entries.)
 
 ---
 
@@ -1608,7 +1688,7 @@ crate that does cross-file `who-calls` across Rust/Python/Go/TS/Java.
 | Driver | `detect()` trigger | `command()` |
 |---|---|---|
 | `RustAnalyzer` | `Cargo.toml` | `rust-analyzer scip <repo> --output <out>` (chdir into repo) |
-| `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <out> --project-name <name> --project-version 0.0.0`, where `<name>` is `[project].name` of `pyproject.toml`, else `[tool.poetry].name`, else the repo's basename (`python_project_name`; plan 05 rule R1, so the ids do not depend on the checkout directory); `NODE_OPTIONS` carries the Node heap ceiling (`set_node_heap`, §14.9) |
+| `ScipPython` | `pyproject.toml` or `setup.py` | `scip-python index --cwd <repo> --output <out> --project-name <name> --project-version 0.0.0`, where `<name>` is `[project].name` of `pyproject.toml`, else `[tool.poetry].name`, else the basename of the repo's main worktree (`python_project_name`; plan 05 rule R1 with plan 10 part 1 step 4, so the ids do not depend on the checkout directory or on which worktree indexed it); `NODE_OPTIONS` carries the Node heap ceiling (`set_node_heap`, §14.9) |
 | `ScipGo` | `go.mod` or `go.work` | `scip-go --module-root <repo> --module-version 0.0.0 --output <out>` (chdir into repo); with a `go.work`, also one `./<dir>/...` package pattern per `use` directory, since scip-go's default `./...` covers only the root module; `GOWORK=off` when the nearest `go.work` above the repo does not list it (`outside_its_go_work`), since Go then builds nothing there; with `--go-tags <a,b>`, `GOFLAGS="$GOFLAGS -tags=a,b"` (`apply_go_tags`; scip-go has no tags flag, but its package loader reads `GOFLAGS`, and the last `-tags` wins) |
 | `ScipTypescript` | `package.json` + `tsconfig.json` | `scip-typescript index --output <out>` (chdir into repo); in a pnpm or yarn workspace (`TsWorkspace`), also `--pnpm-workspaces` / `--yarn-workspaces <repo>`; `NODE_OPTIONS` carries the Node heap ceiling (`set_node_heap`, §14.9) |
 | `ScipJava` | `pom.xml` / `build.gradle*` / `build.sbt` / `build.sc` | `scip-java index --output <out>` (chdir into repo) |
@@ -2531,7 +2611,14 @@ the fixture manifests.
 
 **Rules.** `driver::python_project_name` gives scip-python `--project-name`
 from `pyproject.toml` (`[project].name`, else `[tool.poetry].name`), not
-the checkout directory's name. `scip_loader::normalize_moniker` applies, in
+the checkout directory's name. Without a name there it falls back to the
+basename of the repo's **main worktree** (`utils::main_worktree`), so the
+worktrees of one repo — `engraph/` and a `git worktree add ../elm` beside it —
+write one id for a symbol instead of `scip-python python engraph …` and
+`scip-python python elm …`. A project below the checkout root keeps its own
+basename, which is already part of the repo (`services/api` is `api`
+everywhere); only a project at the root took the name the user gave the
+checkout. `scip_loader::normalize_moniker` applies, in
 one pass over the parsed index before any row is written: the project tag
 as version for a `semanticdb` id with the empty package name (Java package
 symbols, otherwise one row for every repo with that package name), and the
@@ -2546,9 +2633,48 @@ version of each run, and `engraph index` names the projects indexed under
 older rules and recommends a full `engraph index <repo>` of each (§12.1
 v18).
 
+### 14.11 Separate graphs per worktree (plan 10)
+
+Several worktrees of one repo share one codegraph without overwriting each
+other. The repo has a **base graph** — the rows a full index run wrote, owned
+by a **base checkout** — and every other checkout has an **overlay**: rows for
+the files whose content differs from the base commit. A lookup reads the
+**view** of the checkout it runs in, the overlay over the base, so an agent in
+a worktree sees its own branch and never another worktree's.
+
+Nothing of engraph lives in the repo. The base is a *commit*, not a directory:
+worktrees share one object store, so a checkout diffs its files against a base
+commit on another branch without a copy of it on disk, and engraph writes no
+refs, no checkouts and no commits (the plan's decision 3).
+
+The pieces, each described where it belongs:
+
+- **Where a run writes** — base or overlay, `--full` to move the base, the
+  first run of a project claiming it: §8.0.1a.
+- **Overlay index runs** — the narrowed indexer runs, the one loader with two
+  destinations (`RowSink`), the `MAX_NARROW_RUNS` threshold: §8.0.1b.
+- **The view** — temp views shadowing `entities`/`relations`, installed by the
+  three read paths: §8.0.1c.
+- **Staying current** — `overlay_state`, `divergence::overlay_stale`, the
+  SessionStart refresh in every checkout, and pruning the overlay of a
+  worktree git no longer lists: §8.0.1.
+- **Tables** — `project_base` (v19), `overlay_files`/`overlay_entities`/
+  `overlay_relations` (v20), `overlay_state` (v21): §12.1.
+
+What makes it work is that a narrowed index run produces the *same symbol ids*
+as a full one — verified per indexer for Go, Rust, TypeScript, Python and Java
+— so overlay rows join base rows. The same requirement is why
+`driver::python_project_name` takes its fallback from the repo's main worktree
+(§14.8): two worktrees of one repo must spell a symbol the same way.
+
+Known limits: a subtree indexed from prebuilt SCIP gets no overlay (engraph's
+drivers need not reproduce that indexer's ids); an untracked file *removed*
+after an overlay run is not noticed until the next change; and a base commit
+`git gc` has pruned costs one full-repo overlay until the next base refresh.
+
 ## 15. Forward pointers
 
 The roadmap (`docs/ROADMAP.md`, one plan per item in `docs/plans/`)
 tracks features that aren't built, ranked by expected impact. The codegraph is shipped (target-level §14.8,
-symbol-level §14.9, stable symbol ids §14.10); its open items there are
-the code-graph bugs of plan 01.
+symbol-level §14.9, stable symbol ids §14.10, per-worktree graphs §14.11);
+its open items there are the code-graph bugs of plan 01.

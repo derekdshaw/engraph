@@ -194,6 +194,85 @@ pub fn record_indexed_commit(
     Ok(())
 }
 
+/// The checkout a project's base graph was built from, and the commit it was
+/// built at (plan 10, part 2, step 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseState {
+    /// The checkout the base graph belongs to — the base checkout. Only an
+    /// index run there changes the base rows; every other worktree of the repo
+    /// writes an overlay against them.
+    pub base_worktree: String,
+    /// The commit of the last base index run: what each worktree diffs its
+    /// files against to build its overlay.
+    pub commit: String,
+}
+
+/// Record that the base graph of `project` was indexed in `base_worktree` at
+/// `commit`. One row for each project: a later run replaces it, so a full run
+/// in another checkout moves the base there.
+pub fn record_base(
+    conn: &PooledConn,
+    project: &str,
+    base_worktree: &str,
+    commit: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO project_base (project, base_worktree, base_commit, indexed_at)
+         VALUES (?1, ?2, ?3, strftime('%Y-%m-%d %H:%M:%f','now'))
+         ON CONFLICT(project) DO UPDATE SET
+             base_worktree = excluded.base_worktree,
+             base_commit = excluded.base_commit,
+             indexed_at = excluded.indexed_at",
+        rusqlite::params![project, base_worktree, commit],
+    )?;
+    Ok(())
+}
+
+/// The base of `project`, or `None` when no run recorded one. The caller asks
+/// two things of it: whether the checkout it is in is the base checkout (only
+/// that one refreshes the base), and which commit the overlays diff against.
+pub fn base_state(conn: &PooledConn, project: &str) -> Result<Option<BaseState>> {
+    let mut stmt =
+        conn.prepare("SELECT base_worktree, base_commit FROM project_base WHERE project = ?1")?;
+    let mut rows = stmt.query_map([project], |r| {
+        Ok(BaseState {
+            base_worktree: r.get(0)?,
+            commit: r.get(1)?,
+        })
+    })?;
+    Ok(rows.next().transpose()?)
+}
+
+/// The checkout that owns the base graph of `project` — the one whose index
+/// runs write the base rows, while every other worktree of the repo writes an
+/// overlay against them (plan 10, part 2, step 5).
+///
+/// The recorded base checkout wins, so `engraph index --full` in a worktree
+/// moves ownership there. Without a row it is the repo's main worktree, which
+/// is the project key itself: a repo engraph indexed before this plan thus has
+/// a base already and needs no new index run. `None` when the key is no
+/// checkout — a bare repo (its worktrees are all linked, so one of them must
+/// claim the base with a full run), a directory outside git, or an explicit
+/// `--project` key that names no path.
+pub fn base_checkout(conn: &PooledConn, project: &str) -> Result<Option<String>> {
+    if let Some(state) = base_state(conn, project)? {
+        return Ok(Some(state.base_worktree));
+    }
+    Ok(main_worktree_at(project))
+}
+
+/// `project` when the key is the root of a working tree, else `None`. The key
+/// of a git repo is its main worktree (`cli::canonical_repo_key`), so the two
+/// agree exactly when that main worktree is a checkout: `rev-parse
+/// --show-toplevel` fails in a bare repo and outside git.
+fn main_worktree_at(project: &str) -> Option<String> {
+    let top = engraph_core::utils::current_toplevel(Path::new(project))?;
+    let top = top.canonicalize().unwrap_or(top);
+    let key = Path::new(project);
+    let key = key.canonicalize().unwrap_or_else(|_| key.to_path_buf());
+    (top == key).then(|| project.to_string())
+}
+
 /// The projects with an `index_state` row written under other symbol-id
 /// normalization rules than the current `NORMALIZATION_VERSION` — a row from
 /// before the rules (NULL) counts as version 0 — each with the oldest version
@@ -622,6 +701,124 @@ fn run_driver_to_scip(
     run_driver_into(&scip_output_dir(repo), repo, drv, go_tags)
 }
 
+/// How many narrowed runs an overlay index run is worth (plan 10, part 3,
+/// step 10). Each one starts the indexer again — rust-analyzer loads the
+/// whole workspace every time — so past a few units one run over the project
+/// is the cheaper way to the same rows. The overlay keeps the changed
+/// documents either way, so this is a question of time, never of what the
+/// worktree sees.
+pub const MAX_NARROW_RUNS: usize = 3;
+
+/// Index the overlay of the checkout at `checkout`: run the indexers over the
+/// units holding `files`, and keep the rows of those files alone (plan 10,
+/// part 3, step 10).
+///
+/// `worktree` keys the overlay; `project` is the base the rows join. An empty
+/// `files` clears the overlay without running anything — the checkout matches
+/// the base. A driver that cannot narrow, or whose units are too many
+/// (`MAX_NARROW_RUNS`), runs over the whole checkout; the overlay still keeps
+/// only the changed documents, so the rows are the same and only the time
+/// differs.
+pub fn index_overlay(
+    conn: &PooledConn,
+    checkout: &Path,
+    project: &str,
+    worktree: &str,
+    files: &[scip_loader::OverlayFile],
+    go: GoOptions,
+) -> Result<scip_loader::OverlayStats> {
+    if files.is_empty() {
+        return scip_loader::clear_overlay(conn, worktree);
+    }
+    let checkout = &checkout
+        .canonicalize()
+        .with_context(|| format!("resolving checkout path {}", checkout.display()))?;
+    let changed: Vec<&str> = files
+        .iter()
+        .filter(|f| !f.deleted)
+        .map(|f| f.path.as_str())
+        .collect();
+    if changed.is_empty() {
+        // Deletions only: no document to index, but the listing must land so
+        // the view hides the base rows.
+        return scip_loader::load_overlay(conn, project, worktree, files, &empty_index()?);
+    }
+
+    let matching: Vec<Box<dyn driver::Driver>> = driver::registry()
+        .into_iter()
+        .filter(|d| d.detect(checkout))
+        .collect();
+    if matching.is_empty() {
+        anyhow::bail!("no driver matched {}", checkout.display());
+    }
+    let out_dir = scip_output_dir(checkout);
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    for drv in &matching {
+        let runs = drv
+            .narrow(checkout, &changed)
+            .filter(|r| r.len() <= MAX_NARROW_RUNS)
+            .unwrap_or_else(|| {
+                vec![driver::NarrowRun {
+                    dir: checkout.clone(),
+                    args: Vec::new(),
+                }]
+            });
+        for run in runs {
+            match run_narrowed(&out_dir, &run, &**drv, go.tags) {
+                // A run below the repo writes paths relative to its own
+                // directory; the overlay stores repo-relative ones.
+                Ok(bytes) => match rebase_run(&bytes, checkout, &run.dir) {
+                    Ok(rebased) => parts.push(rebased),
+                    Err(e) => tracing::warn!(error = %e, "overlay: rebasing documents failed"),
+                },
+                Err(e) => tracing::warn!(
+                    driver = drv.name(),
+                    dir = %run.dir.display(),
+                    error = %e,
+                    "overlay: narrowed run failed; continuing",
+                ),
+            }
+        }
+    }
+    if parts.is_empty() {
+        anyhow::bail!("every indexer failed for the overlay of {worktree}");
+    }
+    let merged = if parts.len() == 1 {
+        parts.into_iter().next().unwrap()
+    } else {
+        bazel_symbols::merge_scip_bytes(&parts)?
+    };
+    scip_loader::load_overlay(conn, project, worktree, files, &merged)
+}
+
+/// `run_driver_into` with a narrowed run's directory and extra arguments.
+fn run_narrowed(
+    out_dir: &Path,
+    run: &driver::NarrowRun,
+    drv: &dyn driver::Driver,
+    go_tags: Option<&str>,
+) -> Result<Vec<u8>> {
+    if run.args.is_empty() {
+        return run_driver_into(out_dir, &run.dir, drv, go_tags);
+    }
+    run_driver_into_with_args(out_dir, &run.dir, drv, go_tags, &run.args)
+}
+
+/// Document paths of a run started at `dir` made repo-relative to `checkout`.
+fn rebase_run(bytes: &[u8], checkout: &Path, dir: &Path) -> Result<Vec<u8>> {
+    let prefix = dir.strip_prefix(checkout).unwrap_or(Path::new(""));
+    if prefix.as_os_str().is_empty() {
+        return Ok(bytes.to_vec());
+    }
+    bazel_symbols::rebase_subtree_documents(bytes, prefix, dir)
+}
+
+/// An empty SCIP index, for an overlay of deletions alone.
+fn empty_index() -> Result<Vec<u8>> {
+    use protobuf::Message;
+    Ok(scip::types::Index::new().write_to_bytes()?)
+}
+
 /// `run_driver_to_scip` with the output directory given, so a test does not
 /// write under the user's data directory.
 fn run_driver_into(
@@ -630,10 +827,23 @@ fn run_driver_into(
     drv: &dyn driver::Driver,
     go_tags: Option<&str>,
 ) -> Result<Vec<u8>> {
+    run_driver_into_with_args(out_dir, repo, drv, go_tags, &[])
+}
+
+/// `run_driver_into` with extra arguments appended to the driver's command,
+/// for a narrowed run that limits the indexer by pattern (scip-go).
+fn run_driver_into_with_args(
+    out_dir: &Path,
+    repo: &Path,
+    drv: &dyn driver::Driver,
+    go_tags: Option<&str>,
+    extra: &[String],
+) -> Result<Vec<u8>> {
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("creating SCIP output dir {}", out_dir.display()))?;
     let scip_path = out_dir.join("index.scip");
     let mut cmd = drv.command(repo, &scip_path);
+    cmd.args(extra);
     drv.set_go_tags(&mut cmd, go_tags);
     tracing::info!(driver = drv.name(), ?cmd, "running SCIP indexer");
     // Capture rather than inherit: rust-analyzer is noisy on stderr (load
@@ -1431,6 +1641,116 @@ mod tests {
         );
     }
 
+    /// Plan 10, part 2, step 4: the base of a project is one row, and a later
+    /// base index run replaces it.
+    #[test]
+    fn base_state_records_the_ref_and_the_commit_of_the_last_base_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = engraph_core::db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        // No base graph yet.
+        assert_eq!(base_state(&conn, "/repo").unwrap(), None);
+
+        record_base(&conn, "/repo", "/repo", "aaa").unwrap();
+        assert_eq!(
+            base_state(&conn, "/repo").unwrap(),
+            Some(BaseState {
+                base_worktree: "/repo".to_string(),
+                commit: "aaa".to_string(),
+            })
+        );
+
+        // The base checkout was indexed again: one row, the new commit.
+        record_base(&conn, "/repo", "/repo", "bbb").unwrap();
+        assert_eq!(
+            base_state(&conn, "/repo").unwrap().unwrap().commit,
+            "bbb".to_string()
+        );
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_base", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+
+        // `engraph index --full` in a worktree moves the base there.
+        record_base(&conn, "/repo", "/worktrees/elm", "ccc").unwrap();
+        assert_eq!(
+            base_state(&conn, "/repo").unwrap(),
+            Some(BaseState {
+                base_worktree: "/worktrees/elm".to_string(),
+                commit: "ccc".to_string(),
+            })
+        );
+
+        // Another project has its own base.
+        record_base(&conn, "/other", "/other", "ddd").unwrap();
+        assert_eq!(
+            base_state(&conn, "/other").unwrap().unwrap().commit,
+            "ddd".to_string()
+        );
+        assert_eq!(
+            base_state(&conn, "/repo").unwrap().unwrap().commit,
+            "ccc".to_string()
+        );
+    }
+
+    /// Plan 10, part 2, step 5: which checkout owns the base graph. A repo
+    /// engraph indexed before the plan has no `project_base` row, and it must
+    /// not need a new index run to get a base: its main worktree is the base
+    /// checkout.
+    #[test]
+    fn base_checkout_is_the_recorded_one_else_the_main_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = engraph_core::db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+
+        // A repo with a linked worktree. The project key is the main worktree.
+        let main = dir.path().join("engraph");
+        std::fs::create_dir_all(&main).unwrap();
+        git_init(&main);
+        git_in(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let wt = dir.path().join("elm");
+        git_in(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                wt.to_str().unwrap(),
+            ],
+        );
+        let project = main.canonicalize().unwrap().to_string_lossy().into_owned();
+
+        // No row: the main worktree, whichever worktree asks.
+        assert_eq!(
+            base_checkout(&conn, &project).unwrap().as_deref(),
+            Some(project.as_str())
+        );
+
+        // A recorded base checkout wins, so `--full` in a worktree moves it.
+        let elm = wt.canonicalize().unwrap().to_string_lossy().into_owned();
+        record_base(&conn, &project, &elm, "aaa").unwrap();
+        assert_eq!(
+            base_checkout(&conn, &project).unwrap().as_deref(),
+            Some(elm.as_str())
+        );
+
+        // A bare repo has no checkout to fall back to: no base until a full
+        // index run records one.
+        let bare = dir.path().join("bare.git");
+        git_in(
+            &main,
+            &["clone", "-q", "--bare", ".", bare.to_str().unwrap()],
+        );
+        let bare_key = bare.canonicalize().unwrap().to_string_lossy().into_owned();
+        assert_eq!(base_checkout(&conn, &bare_key).unwrap(), None);
+
+        // A project key that is no checkout at all (an explicit --project, or
+        // a directory outside git) has none either.
+        assert_eq!(base_checkout(&conn, "/no/such/project").unwrap(), None);
+    }
+
     #[test]
     fn plan_repo_bazel_wins_over_lang_markers() {
         let dir = tempfile::tempdir().unwrap();
@@ -1740,6 +2060,27 @@ mod tests {
             .output()
             .unwrap();
         assert!(out.status.success(), "git init failed: {out:?}");
+    }
+
+    /// `git -C dir <args>` with an identity, for the tests that commit.
+    fn git_in(dir: &Path, args: &[&str]) {
+        let out = engraph_core::utils::git_cmd(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]

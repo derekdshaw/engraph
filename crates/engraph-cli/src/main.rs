@@ -287,6 +287,8 @@ async fn main() -> Result<()> {
             dry_run,
             if_changed,
             auto,
+            overlay,
+            full,
         } => {
             let start = Instant::now();
             let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
@@ -323,7 +325,24 @@ async fn main() -> Result<()> {
             } else {
                 workspace.clone()
             };
-            if if_changed {
+            if overlay {
+                // The overlay of this checkout: only the files that differ
+                // from the base commit, under this checkout's key, so no
+                // other worktree's view changes.
+                let project = canonical_repo_key(&repo);
+                let worktree =
+                    checkout_path(&repo).unwrap_or_else(|| repo.to_string_lossy().into_owned());
+                run_overlay_index(
+                    &conn,
+                    &repo,
+                    &project,
+                    &worktree,
+                    go,
+                    dry_run,
+                    session_id.as_deref(),
+                    start,
+                )?;
+            } else if if_changed {
                 // Refresh only the recorded parts of this repo's index whose
                 // files moved on since their index commit. Nothing recorded
                 // means the repo was never indexed by hand; leave it alone.
@@ -333,15 +352,46 @@ async fn main() -> Result<()> {
                 };
                 let recorded = engraph_codegraph::indexed_commits(&conn, &project_key)?;
                 let modes = engraph_codegraph::index_modes(&conn, &project_key)?;
-                // The shared index follows the main worktree; a linked one
-                // relies on the per-file divergence check (see
-                // `in_linked_worktree`).
-                let linked = divergence::in_linked_worktree(&repo);
+                // The base graph follows the base checkout. In any other
+                // worktree the refresh brings that worktree's overlay up to
+                // date instead, so a session in one worktree never replaces
+                // the graph the others read (plan 10, step 7).
+                // The overlays of worktrees git no longer lists go here: this
+                // run is what the SessionStart hook starts, in every checkout
+                // (plan 10, step 15).
+                if !dry_run {
+                    for gone in divergence::prune_overlays(&conn, &project_key, &repo) {
+                        println!("removed the overlay of {gone}: no such worktree");
+                    }
+                }
+                let overlay_here = !recorded.is_empty()
+                    && index_route(&conn, &repo, &project_key, false)? == IndexRoute::Overlay;
+                if overlay_here {
+                    let worktree =
+                        checkout_path(&repo).unwrap_or_else(|| repo.to_string_lossy().into_owned());
+                    // "If changed": a current overlay is left alone, which is
+                    // what lets the SessionStart hook start this run in every
+                    // worktree without indexing anything that did not move.
+                    if !dry_run && !divergence::overlay_stale(&conn, &project_key, &repo) {
+                        println!("overlay up to date: {worktree}");
+                    } else {
+                        run_overlay_index(
+                            &conn,
+                            &repo,
+                            &project_key,
+                            &worktree,
+                            go,
+                            dry_run,
+                            session_id.as_deref(),
+                            start,
+                        )?;
+                    }
+                }
                 // A dry run takes no lock; a real one holds it across every
                 // subtree. A best-effort refresh yields to whatever run is
                 // active instead of failing.
                 let lock: std::result::Result<Option<IndexLock>, String> =
-                    if recorded.is_empty() || linked || dry_run {
+                    if recorded.is_empty() || overlay_here || dry_run {
                         Ok(None)
                     } else {
                         take_index_lock(&project_key)?.map(Some)
@@ -357,11 +407,7 @@ async fn main() -> Result<()> {
                     _ if recorded.is_empty() => {
                         println!("no index recorded for {project_key}; run `engraph index` first");
                     }
-                    _ if linked => println!(
-                        "skipped: {} is a linked worktree; only the main worktree refreshes \
-                         the shared index of {project_key}",
-                        top.display()
-                    ),
+                    _ if overlay_here => {}
                     Err(held) => println!("skipped: {held}"),
                     Ok(_lock) => {
                         let changed = divergence::outermost_subtrees(divergence::changed_subtrees(
@@ -606,11 +652,14 @@ async fn main() -> Result<()> {
                 // monorepo sub-project refreshes its subtree of it.
                 let (project_key, subtree) = match project {
                     Some(p) => (p, String::new()),
-                    None => {
-                        warn_if_linked_worktree(&repo);
-                        divergence::index_scope(&repo)
-                    }
+                    None => divergence::index_scope(&repo),
                 };
+                // A manifest describes the whole project, not a difference
+                // from it, so it always writes the base graph.
+                warn_if_base_moves(
+                    &repo,
+                    engraph_codegraph::base_checkout(&conn, &project_key)?.as_deref(),
+                );
                 let scope = engraph_codegraph::IndexScope {
                     project: &project_key,
                     subtree: &subtree,
@@ -660,35 +709,68 @@ async fn main() -> Result<()> {
                 // monorepo sub-project refreshes its subtree of it.
                 let (project_key, subtree) = match project {
                     Some(p) => (p, String::new()),
-                    None => {
-                        warn_if_linked_worktree(&repo);
-                        divergence::index_scope(&repo)
-                    }
+                    None => divergence::index_scope(&repo),
                 };
-                let _lock = engraph_codegraph::acquire_index_lock_wait(&project_key)?;
-                let stats = index_single(
-                    &conn,
-                    &repo,
-                    scip.as_deref(),
-                    lang.as_deref(),
-                    &project_key,
-                    &subtree,
-                    effective_bazel_symbols,
-                    go,
-                    effective_gc,
-                )?;
-                telemetry::record_event(
-                    &conn,
-                    EventInput {
-                        session_id: session_id.as_deref(),
-                        kind: EventKind::Index,
-                        feature: "codegraph_index",
-                        filter_id: Some(stats.driver_name),
-                        input_tokens: stats.scip_bytes as i64,
-                        output_tokens: 0,
-                        latency_ms: start.elapsed().as_millis() as i64,
-                    },
-                )?;
+                // Only the base checkout writes the base graph; any other
+                // worktree writes its own overlay (plan 10, step 7).
+                if index_route(&conn, &repo, &project_key, full)? == IndexRoute::Overlay {
+                    let worktree =
+                        checkout_path(&repo).unwrap_or_else(|| repo.to_string_lossy().into_owned());
+                    println!(
+                        "{worktree} is not the base checkout of {project_key}: indexing its \
+                         overlay (use --full to move the base here)"
+                    );
+                    run_overlay_index(
+                        &conn,
+                        &repo,
+                        &project_key,
+                        &worktree,
+                        go,
+                        dry_run,
+                        session_id.as_deref(),
+                        start,
+                    )?;
+                } else {
+                    warn_if_base_moves(
+                        &repo,
+                        engraph_codegraph::base_checkout(&conn, &project_key)?.as_deref(),
+                    );
+                    let _lock = engraph_codegraph::acquire_index_lock_wait(&project_key)?;
+                    let stats = index_single(
+                        &conn,
+                        &repo,
+                        scip.as_deref(),
+                        lang.as_deref(),
+                        &project_key,
+                        &subtree,
+                        effective_bazel_symbols,
+                        go,
+                        effective_gc,
+                    )?;
+                    // A full run of the whole project makes this checkout the
+                    // base checkout, and records the commit it read.
+                    if subtree.is_empty()
+                        && let Some(worktree) = checkout_path(&repo)
+                        && let Some((_, commit)) =
+                            engraph_codegraph::indexed_commits(&conn, &project_key)?
+                                .into_iter()
+                                .find(|(sub, _)| sub.is_empty())
+                    {
+                        engraph_codegraph::record_base(&conn, &project_key, &worktree, &commit)?;
+                    }
+                    telemetry::record_event(
+                        &conn,
+                        EventInput {
+                            session_id: session_id.as_deref(),
+                            kind: EventKind::Index,
+                            feature: "codegraph_index",
+                            filter_id: Some(stats.driver_name),
+                            input_tokens: stats.scip_bytes as i64,
+                            output_tokens: 0,
+                            latency_ms: start.elapsed().as_millis() as i64,
+                        },
+                    )?;
+                }
             }
             if let Some(note) =
                 output::stale_normalization_note(&engraph_codegraph::stale_normalization(&conn)?)
@@ -702,6 +784,11 @@ async fn main() -> Result<()> {
             json,
         } => {
             let start = Instant::now();
+            // The lookup reads the view of this checkout: its overlay over
+            // the base graph.
+            if let Ok(cwd) = std::env::current_dir() {
+                use_worktree_view(&conn, &cwd);
+            }
             // The caller's project goes first in an ambiguous match list.
             let current_project = std::env::current_dir().ok().map(|c| canonical_repo_key(&c));
             let neighborhood = engraph_codegraph::subgraph_for_in(
@@ -720,7 +807,7 @@ async fn main() -> Result<()> {
             } else {
                 let note = std::env::current_dir()
                     .ok()
-                    .and_then(|c| divergence::stale_note(&conn, &c, &neighborhood));
+                    .and_then(|c| divergence::graph_behind_note(&conn, &c));
                 note.unwrap_or_default()
                     + &engraph_codegraph::format_markdown(
                         &neighborhood,
@@ -1246,17 +1333,151 @@ fn take_index_lock(project_key: &str) -> Result<std::result::Result<IndexLock, S
     })
 }
 
-/// An explicit index from a linked worktree still writes the repo's one shared
-/// index, so every other worktree then sees this branch's code. Allowed — the
-/// user asked for it — but said out loud.
-fn warn_if_linked_worktree(repo: &std::path::Path) {
-    if divergence::in_linked_worktree(repo) {
+/// `engraph index --full` from a checkout that is not the base moves the base
+/// graph there: every other worktree then reads this branch's code as its
+/// base, and computes its overlay against it. Allowed — the user asked for it
+/// — but said out loud.
+fn warn_if_base_moves(repo: &std::path::Path, base: Option<&str>) {
+    let Some(base) = base else { return };
+    let here = checkout_path(repo);
+    if here.as_deref() != Some(base) {
         eprintln!(
-            "warning: {} is a linked worktree; this replaces the index that every worktree of \
-             the repo shares with this branch's code",
+            "warning: the base graph moves from {base} to {}; every worktree of the repo will \
+             read this checkout's code as its base",
             repo.display()
         );
     }
+}
+
+/// The canonical path of the checkout containing `repo`, which is how an
+/// overlay and `project_base` name a checkout.
+fn checkout_path(repo: &std::path::Path) -> Option<String> {
+    git_current_toplevel(repo)
+        .and_then(|t| t.canonicalize().ok())
+        .map(|t| t.to_string_lossy().into_owned())
+}
+
+/// Index the overlay of `worktree`: the files that differ from the base, and
+/// only those. Shared by `--overlay` and by a plain index run in a checkout
+/// that is not the base checkout.
+#[allow(clippy::too_many_arguments)]
+fn run_overlay_index(
+    conn: &db::PooledConn,
+    repo: &std::path::Path,
+    project: &str,
+    worktree: &str,
+    go: engraph_codegraph::GoOptions,
+    dry_run: bool,
+    session_id: Option<&str>,
+    start: Instant,
+) -> Result<()> {
+    let differing = divergence::overlay_files(conn, project, repo);
+    let files = divergence::driver_indexed_only(conn, project, differing.clone());
+    if files.len() != differing.len() {
+        // Prebuilt-SCIP subtrees: engraph cannot produce rows that join their
+        // base rows, so their files stay out of the overlay.
+        println!(
+            "  skip {} file(s) under a subtree indexed from prebuilt SCIP",
+            differing.len() - files.len()
+        );
+    }
+    if dry_run {
+        println!(
+            "dry-run: overlay of {worktree}: {} file(s) differ from the base",
+            files.len()
+        );
+        for f in files.iter().take(20) {
+            println!("  {}{}", f.path, if f.deleted { " (deleted)" } else { "" });
+        }
+        return Ok(());
+    }
+    // The state the overlay is computed from, captured before the indexer
+    // runs: an edit made while it runs then leaves the overlay stale, and the
+    // next check runs it again, instead of reading as covered when it is not.
+    let tree = divergence::working_tree_id(repo);
+    let digest = divergence::base_digest(conn, project);
+    if files.is_empty() && !differing.is_empty() {
+        // Every differing file is under a prebuilt-SCIP subtree: nothing
+        // engraph can index, and nothing to store — but the decision was made
+        // from this state, so record it and let the staleness check go quiet.
+        println!("overlay {worktree}: nothing engraph can index; left as it was");
+        engraph_codegraph::record_overlay_state(conn, worktree, project, tree.as_deref(), &digest)?;
+        return Ok(());
+    }
+    let _lock = engraph_codegraph::acquire_index_lock_wait(project)?;
+    let stats = engraph_codegraph::index_overlay(conn, repo, project, worktree, &files, go)?;
+    engraph_codegraph::record_overlay_state(conn, worktree, project, tree.as_deref(), &digest)?;
+    println!(
+        "overlay {worktree}: {} file(s), {} document(s) indexed, {} entities, {} relations ({}ms)",
+        stats.files,
+        stats.documents_loaded,
+        stats.entities_inserted,
+        stats.relations_inserted,
+        start.elapsed().as_millis()
+    );
+    telemetry::record_event(
+        conn,
+        EventInput {
+            session_id,
+            kind: EventKind::Index,
+            feature: "codegraph_index",
+            filter_id: Some("overlay"),
+            input_tokens: 0,
+            output_tokens: 0,
+            latency_ms: start.elapsed().as_millis() as i64,
+        },
+    )?;
+    Ok(())
+}
+
+/// Point this connection's lookups at the view of the checkout `cwd` is in:
+/// the base graph with that checkout's overlay over it (plan 10, step 13).
+/// Best effort — without it the lookups read the base graph, as before.
+pub(crate) fn use_worktree_view(conn: &db::PooledConn, cwd: &std::path::Path) {
+    let Some(worktree) = checkout_path(cwd) else {
+        return;
+    };
+    let project = canonical_repo_key(cwd);
+    if let Err(e) = engraph_codegraph::install_worktree_view(conn, &project, &worktree) {
+        tracing::warn!(error = %e, "worktree view: reading the base graph instead");
+    }
+}
+
+/// What an index run in this checkout writes (plan 10, part 2, step 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexRoute {
+    /// The base graph that every worktree of the repo reads.
+    Base,
+    /// The overlay of this checkout alone.
+    Overlay,
+}
+
+/// Where an index run in `repo` files its rows.
+///
+/// `--full` always writes the base, and so does the first index run of a
+/// project: an overlay is a difference from a base, so something must write
+/// one first — which is also how a bare-repo layout, where no checkout is the
+/// main worktree, gets a base at all. After that only the base checkout
+/// (`index::base_checkout`) writes the base; every other worktree writes its
+/// overlay, so a session in one worktree cannot replace the graph the others
+/// read.
+fn index_route(
+    conn: &db::PooledConn,
+    repo: &std::path::Path,
+    project: &str,
+    full: bool,
+) -> Result<IndexRoute> {
+    if full {
+        return Ok(IndexRoute::Base);
+    }
+    if engraph_codegraph::indexed_commits(conn, project)?.is_empty() {
+        return Ok(IndexRoute::Base);
+    }
+    Ok(if divergence::is_base_checkout(conn, project, repo) {
+        IndexRoute::Base
+    } else {
+        IndexRoute::Overlay
+    })
 }
 
 /// Index one repo — or one sub-project of a monorepo, when `subtree` is
@@ -1313,6 +1534,10 @@ fn index_single(
     Ok(stats)
 }
 
+/// The current worktree's root. Lives in `engraph-core` because the codegraph
+/// drivers need the same git identity (`driver::python_project_name`).
+pub(crate) use engraph_core::utils::current_toplevel as git_current_toplevel;
+
 /// Stable identity for the repo containing `start`, used as the `project` scope
 /// key. For a git repo this is the **main worktree** path — shared across every
 /// linked worktree — so all worktrees of a repo map to one logical index instead
@@ -1320,7 +1545,7 @@ fn index_single(
 /// canonicalized path when `start` isn't in a git repo (or git is unavailable),
 /// which also collapses symlinked checkouts to one key.
 pub(crate) fn canonical_repo_key(start: &std::path::Path) -> String {
-    if let Some(root) = git_main_worktree(start) {
+    if let Some(root) = engraph_core::utils::main_worktree(start) {
         return root;
     }
     start
@@ -1328,67 +1553,6 @@ pub(crate) fn canonical_repo_key(start: &std::path::Path) -> String {
         .unwrap_or_else(|_| start.to_path_buf())
         .to_string_lossy()
         .into_owned()
-}
-
-/// The repo's main worktree path via `git worktree list --porcelain`, whose
-/// first entry is always the main worktree. `None` when `start` isn't a git
-/// working tree or git can't be run.
-fn git_main_worktree(start: &std::path::Path) -> Option<String> {
-    let out = engraph_core::utils::git_cmd(start)
-        .args(["worktree", "list", "--porcelain"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8(out.stdout).ok()?;
-    let mut first = stdout.split("\n\n").next()?.lines();
-    let path = first.next()?.strip_prefix("worktree ")?.trim();
-    if path.is_empty() {
-        return None;
-    }
-    let p = std::path::Path::new(path);
-    // In a submodule, the first entry is the gitdir (<parent>/.git/modules/
-    // <name>), not a checkout. Unlike a bare repo's directory — also listed
-    // first, with a `bare` attribute, and kept as the shared key of its
-    // worktrees — the gitdir is no key: fall back to this checkout's own
-    // root, so the submodule scopes to itself and `in_linked_worktree` stays
-    // false for it.
-    if !first.any(|l| l.trim() == "bare") && !p.join(".git").exists() {
-        return git_current_toplevel(start).map(|top| {
-            top.canonicalize()
-                .unwrap_or(top)
-                .to_string_lossy()
-                .into_owned()
-        });
-    }
-    Some(
-        p.canonicalize()
-            .unwrap_or_else(|_| p.to_path_buf())
-            .to_string_lossy()
-            .into_owned(),
-    )
-}
-
-/// The *current* worktree's root (`git rev-parse --show-toplevel` of `start`) —
-/// the checkout you're actually working in, on its branch. Used to resolve a
-/// stored relative `file_path` to live source, so subgraph reads the worktree
-/// copy, not the (possibly stale or absent) indexed checkout. `None` outside a
-/// git working tree.
-pub(crate) fn git_current_toplevel(start: &std::path::Path) -> Option<std::path::PathBuf> {
-    let out = engraph_core::utils::git_cmd(start)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let top = String::from_utf8(out.stdout).ok()?;
-    let top = top.trim();
-    if top.is_empty() {
-        return None;
-    }
-    Some(std::path::PathBuf::from(top))
 }
 
 /// Keep the original Cow when nothing collapsed (it may still borrow the

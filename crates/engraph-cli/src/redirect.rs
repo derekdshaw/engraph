@@ -204,6 +204,10 @@ pub(crate) fn try_subgraph_redirect(
     cwd: Option<&Path>,
 ) -> Option<String> {
     let query = extract_symbol(pattern)?;
+    // Everything below reads the view of this checkout (plan 10, step 13).
+    if let Some(cwd) = cwd {
+        crate::use_worktree_view(conn, cwd);
+    }
     // A path (`Config::new`) is matched as a whole against `qualified_name`
     // first; only when nothing has that qualified name does its last segment
     // count as a plain name lookup.
@@ -232,15 +236,6 @@ pub(crate) fn try_subgraph_redirect(
     }
     let count = rows.len();
     if !(1..=8).contains(&count) {
-        return None;
-    }
-    if let Some(cwd) = cwd
-        && crate::divergence::any_changed_since_index(
-            conn,
-            cwd,
-            rows.iter().map(|(p, f)| (p.as_deref(), f.as_deref())),
-        )
-    {
         return None;
     }
     let plural = if count == 1 { "" } else { "es" };

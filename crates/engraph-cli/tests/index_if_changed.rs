@@ -450,8 +450,12 @@ fn session_start_leaves_unindexed_and_opted_out_repos_alone() {
     );
 }
 
+/// Plan 10, step 7: a worktree that is not the base checkout writes its own
+/// overlay, never the base rows the other worktrees read. This project was
+/// indexed from prebuilt SCIP, which engraph cannot reproduce, so its overlay
+/// is left alone too — but the base is untouched either way.
 #[test]
-fn a_linked_worktree_does_not_refresh_the_shared_index() {
+fn a_linked_worktree_writes_an_overlay_not_the_shared_index() {
     let (dir, mono) = mono();
     let db = dir.path().join("e.db");
     let scip = dir.path().join("empty.scip");
@@ -478,31 +482,204 @@ fn a_linked_worktree_does_not_refresh_the_shared_index() {
     let wt = wt.canonicalize().unwrap();
     std::fs::write(wt.join("svc-a/src/lib.rs"), "pub fn alpha_handler() {}\n").unwrap();
 
-    // The hook starts nothing from the linked worktree.
-    session_start(&db, &wt, &[]);
-    std::thread::sleep(Duration::from_millis(1500));
-    assert!(
-        !dir.path().join("auto-index.log").exists(),
-        "spawned a refresh from a linked worktree"
-    );
-
-    // A refresh run by hand there skips, and records nothing.
+    // A refresh run by hand there goes to the overlay, and leaves the base
+    // rows of every other worktree as they are.
     let out = engraph(&db, &wt, &["index", "--if-changed", "."]);
-    assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = stdout(&out);
+    assert!(s.contains("overlay "), "{s}");
+    assert_eq!(index_state(&db), before, "the base graph is untouched");
+
+    // The same for a plain index run there: it names the overlay and points
+    // at --full for moving the base.
+    let out = engraph(&db, &wt, &["index", "."]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = stdout(&out);
     assert!(
-        s.starts_with("skipped: ") && s.contains("linked worktree"),
+        s.contains("not the base checkout") && s.contains("--full"),
         "{s}"
     );
-    assert_eq!(index_state(&db), before);
+    assert_eq!(index_state(&db), before, "the base graph is untouched");
+}
 
-    // An explicit index still runs there, with a warning.
-    let out = engraph(&db, &wt, &["index", ".", "--scip", scip.to_str().unwrap()]);
+/// Plan 10, steps 11 and 12: "--if-changed" in a worktree brings the overlay
+/// up to date once, and then leaves it alone until something moves.
+#[test]
+fn if_changed_in_a_worktree_runs_the_overlay_once_until_something_changes() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let scip = dir.path().join("empty.scip");
+    let out = engraph(
+        &db,
+        &mono,
+        &["index", ".", "--scip", scip.to_str().unwrap()],
+    );
     assert!(out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
+    let before = index_state(&db);
+    let wt = dir.path().join("wt");
+    git(
+        &mono,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            wt.to_str().unwrap(),
+        ],
+    );
+    let wt = wt.canonicalize().unwrap();
+
+    // A clean worktree: the first run computes the (empty) overlay and
+    // records what it was computed from; the second finds it current and
+    // indexes nothing.
+    let out = engraph(&db, &wt, &["index", "--if-changed", "."]);
+    assert!(out.status.success());
+    assert!(stdout(&out).contains("overlay "), "{}", stdout(&out));
+    let out = engraph(&db, &wt, &["index", "--if-changed", "."]);
+    assert!(out.status.success());
     assert!(
-        err.contains("warning:") && err.contains("linked worktree"),
-        "{err}"
+        stdout(&out).contains("overlay up to date"),
+        "{}",
+        stdout(&out)
+    );
+
+    // An edit makes it stale again. This project is prebuilt SCIP, so the
+    // run has nothing it can index — but it records the new state, and the
+    // check goes quiet again.
+    std::fs::write(wt.join("svc-a/src/lib.rs"), "pub fn alpha_handler() {}\n").unwrap();
+    let out = engraph(&db, &wt, &["index", "--if-changed", "."]);
+    assert!(out.status.success());
+    assert!(
+        stdout(&out).contains("nothing engraph can index"),
+        "{}",
+        stdout(&out)
+    );
+    let out = engraph(&db, &wt, &["index", "--if-changed", "."]);
+    assert!(out.status.success());
+    assert!(
+        stdout(&out).contains("overlay up to date"),
+        "{}",
+        stdout(&out)
+    );
+
+    assert_eq!(index_state(&db), before, "the base graph never moved");
+}
+
+/// Plan 10, step 12: the SessionStart hook starts the background refresh from
+/// a linked worktree too — the child brings that worktree's overlay up to
+/// date instead of touching the base.
+#[test]
+fn session_start_refreshes_a_worktree_overlay_in_the_background() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let scip = dir.path().join("empty.scip");
+    let out = engraph(
+        &db,
+        &mono,
+        &["index", ".", "--scip", scip.to_str().unwrap()],
+    );
+    assert!(out.status.success());
+    let before = index_state(&db);
+    let wt = dir.path().join("wt");
+    git(
+        &mono,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            wt.to_str().unwrap(),
+        ],
+    );
+    let wt = wt.canonicalize().unwrap();
+
+    session_start(&db, &wt, &[]);
+    let log = dir.path().join("auto-index.log");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let text = loop {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.contains("overlay ") || std::time::Instant::now() > deadline {
+            break text;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        text.contains("overlay "),
+        "the hook did not refresh the worktree overlay: {text}"
+    );
+    assert_eq!(index_state(&db), before, "the base graph never moved");
+}
+
+/// Plan 10, step 15: the overlay of a worktree git no longer lists goes with
+/// it, and the overlays of the worktrees that remain are untouched.
+#[test]
+fn a_removed_worktree_loses_its_overlay() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let scip = dir.path().join("empty.scip");
+    let out = engraph(
+        &db,
+        &mono,
+        &["index", ".", "--scip", scip.to_str().unwrap()],
+    );
+    assert!(out.status.success());
+
+    let mut paths = Vec::new();
+    for name in ["wt-a", "wt-b"] {
+        let wt = dir.path().join(name);
+        git(
+            &mono,
+            &["worktree", "add", "-q", "-b", name, wt.to_str().unwrap()],
+        );
+        let wt = wt.canonicalize().unwrap();
+        // Each worktree records an overlay of its own.
+        let out = engraph(&db, &wt, &["index", "--if-changed", "."]);
+        assert!(out.status.success(), "{}", stdout(&out));
+        paths.push(wt);
+    }
+    let overlays = |db: &Path| -> Vec<String> {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT worktree FROM overlay_state ORDER BY worktree")
+            .unwrap();
+        let mut rows: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        rows.sort();
+        rows
+    };
+    let mut expected: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    expected.sort();
+    assert_eq!(overlays(&db), expected);
+
+    // wt-a goes; the next refresh anywhere in the repo removes its overlay.
+    git(&mono, &["worktree", "remove", paths[0].to_str().unwrap()]);
+    let out = engraph(&db, &mono, &["index", "--if-changed", "."]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("removed the overlay of"),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(
+        overlays(&db),
+        vec![paths[1].to_string_lossy().into_owned()],
+        "the overlay of the worktree that remains was removed too"
     );
 }
 

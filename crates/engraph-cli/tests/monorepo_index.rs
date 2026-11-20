@@ -173,8 +173,10 @@ fn subproject_index_from_a_linked_worktree_uses_the_repo_key() {
     assert_eq!(index_state_keys(&db), vec![key(&mono)]);
 }
 
+/// The redirect answers for an indexed symbol whichever sub-project's file
+/// moved on: the view of the checkout carries the change (plan 10, step 14).
 #[test]
-fn divergence_checks_the_subprojects_own_file() {
+fn the_redirect_answers_for_a_subproject_whose_file_changed() {
     let (dir, mono) = mono();
     let db = dir.path().join("e.db");
     index_sub(dir.path(), &db, &mono, &mono, "svc-a", "alpha_handler");
@@ -197,12 +199,20 @@ fn divergence_checks_the_subprojects_own_file() {
         "pub fn alpha_handler() -> u32 { 2 }\n",
     )
     .unwrap();
-    assert_eq!(pre_grep(&db, &mono, "alpha_handler"), None);
-    assert_eq!(pre_grep(&db, &mono.join("svc-a"), "alpha_handler"), None);
+    assert_eq!(
+        pre_grep(&db, &mono, "alpha_handler").as_deref(),
+        Some("deny")
+    );
+    assert_eq!(
+        pre_grep(&db, &mono.join("svc-a"), "alpha_handler").as_deref(),
+        Some("deny")
+    );
 }
 
+/// A worktree reads its own view of a sub-project, so the redirect answers
+/// there too.
 #[test]
-fn divergence_for_a_subproject_in_a_linked_worktree() {
+fn the_redirect_answers_for_a_subproject_in_a_linked_worktree() {
     let (dir, mono) = mono();
     let db = dir.path().join("e.db");
     index_sub(dir.path(), &db, &mono, &mono, "svc-a", "alpha_handler");
@@ -217,15 +227,20 @@ fn divergence_for_a_subproject_in_a_linked_worktree() {
     )
     .unwrap();
     git(&wt, &["commit", "-q", "-am", "change alpha_handler"]);
-    assert_eq!(pre_grep(&db, &wt.join("svc-a"), "alpha_handler"), None);
+    assert_eq!(
+        pre_grep(&db, &wt.join("svc-a"), "alpha_handler").as_deref(),
+        Some("deny")
+    );
     assert_eq!(
         pre_grep(&db, &mono, "alpha_handler").as_deref(),
         Some("deny")
     );
 }
 
+/// The note is about the checkout, not the file: the per-file list went with
+/// the divergence check it came from (plan 10, step 14).
 #[test]
-fn subgraph_note_names_the_repo_relative_path() {
+fn subgraph_notes_that_the_graph_is_behind_a_subproject_checkout() {
     let (dir, mono) = mono();
     let db = dir.path().join("e.db");
     index_sub(dir.path(), &db, &mono, &mono, "svc-a", "alpha_handler");
@@ -236,8 +251,9 @@ fn subgraph_note_names_the_repo_relative_path() {
     .unwrap();
     let out = engraph(&db, &mono, &["subgraph", "alpha_handler"]);
     let out = String::from_utf8_lossy(&out.stdout);
-    assert!(out.contains("Changed since the index"), "{out}");
-    assert!(out.contains("`svc-a/src/lib.rs`"), "{out}");
+    assert!(out.contains("behind this checkout"), "{out}");
+    assert!(!out.contains("`svc-a/src/lib.rs`"), "{out}");
+    // The neighborhood itself still names where the symbol is defined.
     assert!(out.contains("defined in svc-a/src/lib.rs"), "{out}");
 }
 
@@ -271,7 +287,10 @@ fn workspace_run_merges_subprojects_and_tracks_divergence() {
         "pub fn alpha_handler() -> u32 { 2 }\n",
     )
     .unwrap();
-    assert_eq!(pre_grep(&db, &mono, "alpha_handler"), None);
+    assert_eq!(
+        pre_grep(&db, &mono, "alpha_handler").as_deref(),
+        Some("deny")
+    );
 }
 
 #[test]
@@ -315,7 +334,7 @@ fn root_workspace_and_member_indexes_converge() {
 }
 
 #[test]
-fn each_subproject_is_checked_against_the_commit_it_was_indexed_at() {
+fn each_subproject_keeps_the_commit_it_was_indexed_at() {
     let (dir, mono) = mono();
     let db = dir.path().join("e.db");
     index_sub(dir.path(), &db, &mono, &mono, "svc-a", "alpha_handler");
@@ -327,8 +346,14 @@ fn each_subproject_is_checked_against_the_commit_it_was_indexed_at() {
     .unwrap();
     git(&mono, &["commit", "-q", "-am", "change alpha_handler"]);
     index_sub(dir.path(), &db, &mono, &mono, "svc-b", "beta_handler");
-    // The graph still has svc-a as first indexed: don't trust it.
-    assert_eq!(pre_grep(&db, &mono, "alpha_handler"), None);
+    // The graph still has svc-a as first indexed. The redirect answers for
+    // both — the view, not a per-file check, is what carries a changed file
+    // now — and the subtree commits stay apart, which is what this test is
+    // about (`changed_subtrees` re-indexes svc-a alone).
+    assert_eq!(
+        pre_grep(&db, &mono, "alpha_handler").as_deref(),
+        Some("deny")
+    );
     assert_eq!(
         pre_grep(&db, &mono, "beta_handler").as_deref(),
         Some("deny")
@@ -378,5 +403,8 @@ fn nested_subproject_subtree_uses_forward_slashes() {
         "pub fn gamma_handler() -> u32 { 2 }\n",
     )
     .unwrap();
-    assert_eq!(pre_grep(&db, &mono, "gamma_handler"), None);
+    assert_eq!(
+        pre_grep(&db, &mono, "gamma_handler").as_deref(),
+        Some("deny")
+    );
 }

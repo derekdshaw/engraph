@@ -18,6 +18,65 @@ pub trait Driver: Send + Sync {
     fn command(&self, repo: &Path, out: &Path) -> Command;
     /// Give the run's `--go-tags` to `cmd`. Only scip-go takes them.
     fn set_go_tags(&self, _cmd: &mut Command, _tags: Option<&str>) {}
+
+    /// The runs that cover `files` (repo-relative) without indexing the rest
+    /// of `repo`, for an overlay index run (plan 10, part 3, step 10).
+    /// `None` when this indexer has no unit below the repo — the caller then
+    /// indexes the repo as usual and keeps only the changed documents.
+    ///
+    /// Narrowing is safe for the symbol ids: the ids of a narrowed run are
+    /// the ids of the full run for the same code, verified per indexer
+    /// (plan 10, "Findings"). A narrowed run sees fewer symbols, never other
+    /// ones, so its rows join the base rows.
+    fn narrow(&self, _repo: &Path, _files: &[&str]) -> Option<Vec<NarrowRun>> {
+        None
+    }
+}
+
+/// One narrowed index run: where to start it, and the arguments that limit it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NarrowRun {
+    /// The directory the indexer runs in and indexes — a crate, a package, or
+    /// a module below the repo, or the repo itself when `args` do the
+    /// limiting.
+    pub dir: std::path::PathBuf,
+    /// Extra arguments appended to the driver's command, for an indexer that
+    /// takes patterns instead of a directory (scip-go).
+    pub args: Vec<String>,
+}
+
+/// The directory of the unit containing `file`: the nearest ancestor at or
+/// below `repo` holding one of `markers`. `None` when only `repo` itself has
+/// one — there is nothing to narrow to.
+fn unit_dir(repo: &Path, file: &str, markers: &[&str]) -> Option<std::path::PathBuf> {
+    let mut dir = repo.join(file).parent()?.to_path_buf();
+    while dir.starts_with(repo) && dir != repo {
+        if markers.iter().any(|m| dir.join(m).is_file()) {
+            return Some(dir);
+        }
+        dir = dir.parent()?.to_path_buf();
+    }
+    None
+}
+
+/// One run per unit the changed files fall in, or `None` when any file is
+/// outside a unit (it needs the whole repo anyway).
+fn runs_per_unit(repo: &Path, files: &[&str], markers: &[&str]) -> Option<Vec<NarrowRun>> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    for f in files {
+        let dir = unit_dir(repo, f, markers)?;
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    (!dirs.is_empty()).then(|| {
+        dirs.into_iter()
+            .map(|dir| NarrowRun {
+                dir,
+                args: Vec::new(),
+            })
+            .collect()
+    })
 }
 
 pub fn registry() -> Vec<Box<dyn Driver>> {
@@ -38,6 +97,12 @@ pub struct RustAnalyzer;
 impl Driver for RustAnalyzer {
     fn name(&self) -> &'static str {
         "rust-analyzer"
+    }
+    /// One run per crate: rust-analyzer started in a workspace member indexes
+    /// that member, with the other crates as dependencies, and gives the
+    /// member's symbols the ids the workspace run gives them.
+    fn narrow(&self, repo: &Path, files: &[&str]) -> Option<Vec<NarrowRun>> {
+        runs_per_unit(repo, files, &["Cargo.toml"])
     }
     fn detect(&self, repo: &Path) -> bool {
         repo.join("Cargo.toml").is_file()
@@ -77,7 +142,13 @@ pub(crate) const SCIP_PYTHON_VERSION: &str = PINNED_VERSION;
 /// directory happens to have (a worktree named `elm` gave other ids than a
 /// clone named `engraph`). `[tool.poetry].name` answers for a Poetry project
 /// without a `[project]` table. Without a `pyproject.toml`, or without a name
-/// in either table, the directory's basename, as before.
+/// in either table, the basename of the **main worktree** of the repo: every
+/// worktree of a repo answers the same name, so the base graph and the overlay
+/// of a worktree write one id for a symbol (plan 10, part 1, step 4). A
+/// project below the root of the repo already had a name that does not change
+/// (`services/api` is `api` in each checkout); this rule is for a project at
+/// the root, where the basename is the name the user gave the checkout. The
+/// directory's basename outside a repo, as before.
 ///
 /// This is an id rule: a change to what it returns changes symbol ids and
 /// bumps `scip_loader::NORMALIZATION_VERSION`.
@@ -85,11 +156,30 @@ pub(crate) fn python_project_name(repo: &Path) -> String {
     std::fs::read_to_string(repo.join("pyproject.toml"))
         .ok()
         .and_then(|text| pyproject_name(&text))
+        .or_else(|| main_worktree_name(repo))
         .unwrap_or_else(|| {
             repo.file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "project".to_string())
         })
+}
+
+/// The basename of the main worktree of the repo, when `repo` is the root of
+/// its own checkout: the worktree `elm/` and the main worktree `engraph/` then
+/// both answer `engraph`. `None` outside git, and for a project below the root
+/// of its checkout — `services/api` is `api` in every checkout already, so the
+/// caller's own basename is right for it.
+fn main_worktree_name(repo: &Path) -> Option<String> {
+    let top = engraph_core::utils::current_toplevel(repo)?
+        .canonicalize()
+        .ok()?;
+    if repo.canonicalize().ok()? != top {
+        return None;
+    }
+    let main = engraph_core::utils::main_worktree(repo)?;
+    Path::new(&main)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
 }
 
 /// The project name in `pyproject.toml` text: `[project].name`, else
@@ -223,6 +313,31 @@ pub struct ScipGo;
 impl Driver for ScipGo {
     fn name(&self) -> &'static str {
         "scip-go"
+    }
+    /// scip-go takes package patterns, not a directory: a run in a package
+    /// below the module root has no `go.mod` to work from. One run in the
+    /// module root with `./<dir>/...` for each directory holding a changed
+    /// file, which gives those packages the ids the whole-module run gives
+    /// them. A changed file at the module root makes `./...`, which narrows
+    /// nothing, so there is no run to give.
+    fn narrow(&self, repo: &Path, files: &[&str]) -> Option<Vec<NarrowRun>> {
+        let mut args: Vec<String> = Vec::new();
+        for f in files {
+            let dir = Path::new(f).parent()?;
+            if dir.as_os_str().is_empty() {
+                return None;
+            }
+            let pattern = format!("./{}/...", dir.to_string_lossy().replace('\\', "/"));
+            if !args.contains(&pattern) {
+                args.push(pattern);
+            }
+        }
+        (!args.is_empty()).then(|| {
+            vec![NarrowRun {
+                dir: repo.to_path_buf(),
+                args,
+            }]
+        })
     }
     fn detect(&self, repo: &Path) -> bool {
         repo.join("go.mod").is_file() || repo.join("go.work").is_file()
@@ -398,6 +513,12 @@ impl Driver for ScipTypescript {
     fn name(&self) -> &'static str {
         "scip-typescript"
     }
+    /// One run per package: scip-typescript started in a package indexes its
+    /// `tsconfig.json` project, with package-relative document paths that the
+    /// caller rebases.
+    fn narrow(&self, repo: &Path, files: &[&str]) -> Option<Vec<NarrowRun>> {
+        runs_per_unit(repo, files, &["tsconfig.json"])
+    }
     fn detect(&self, repo: &Path) -> bool {
         repo.join("package.json").is_file() && repo.join("tsconfig.json").is_file()
     }
@@ -413,6 +534,16 @@ pub struct ScipJava;
 impl Driver for ScipJava {
     fn name(&self) -> &'static str {
         "scip-java"
+    }
+    /// One run per module: scip-java started in a Maven or Gradle module
+    /// builds that module alone and gives its symbols the ids the whole
+    /// reactor gives them.
+    fn narrow(&self, repo: &Path, files: &[&str]) -> Option<Vec<NarrowRun>> {
+        runs_per_unit(
+            repo,
+            files,
+            &["pom.xml", "build.gradle", "build.gradle.kts"],
+        )
     }
     fn detect(&self, repo: &Path) -> bool {
         // scip-java's `index` command auto-detects {Maven, Gradle, sbt, mill}.
@@ -671,6 +802,59 @@ mod tests {
         assert!(args.contains(&"elm".to_string()));
     }
 
+    /// Plan 10, part 1, step 4: the fallback name must be the same in every
+    /// checkout of a repo. A `pyproject.toml` with no name at the root of a
+    /// repo would otherwise put the name of the checkout directory into every
+    /// first-party id, and a worktree's overlay rows would not join the base
+    /// rows (the ids differ in the package field).
+    #[test]
+    fn python_project_name_is_the_same_in_every_worktree_of_a_repo() {
+        fn git(cwd: &Path, args: &[&str]) {
+            let out = engraph_core::utils::git_cmd(cwd)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("engraph");
+        std::fs::create_dir_all(&main).unwrap();
+        // A [project] table without a name, so the fallback decides.
+        std::fs::write(main.join("pyproject.toml"), "[project]\nversion = \"1\"\n").unwrap();
+        git(&main, &["init", "-q"]);
+        git(&main, &["add", "-A"]);
+        git(&main, &["commit", "-q", "-m", "init"]);
+        let wt = dir.path().join("elm");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                wt.to_str().unwrap(),
+            ],
+        );
+
+        // Both checkouts name the repo by its main worktree, not by their own
+        // directory.
+        assert_eq!(python_project_name(&main), "engraph");
+        assert_eq!(python_project_name(&wt), "engraph");
+    }
+
     #[test]
     fn pyproject_name_handles_real_toml() {
         // Shapes a line reader misses: a header with a trailing comment, a
@@ -862,5 +1046,66 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ts_args(flow.path(), &all), plain);
+    }
+
+    /// Plan 10, part 3, step 10: a narrowed run covers the changed files
+    /// without indexing the rest of the repo.
+    #[test]
+    fn rust_narrows_to_the_crates_holding_the_changed_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        std::fs::write(repo.join("Cargo.toml"), "[workspace]\n").unwrap();
+        for c in ["alpha", "beta"] {
+            let crate_dir = repo.join("crates").join(c);
+            std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+            std::fs::write(crate_dir.join("Cargo.toml"), "[package]\n").unwrap();
+        }
+        // Two crates changed: one run each, in the crate directories.
+        let runs = RustAnalyzer
+            .narrow(repo, &["crates/alpha/src/lib.rs", "crates/beta/src/lib.rs"])
+            .unwrap();
+        assert_eq!(
+            runs.iter().map(|r| r.dir.clone()).collect::<Vec<_>>(),
+            vec![repo.join("crates/alpha"), repo.join("crates/beta")]
+        );
+        assert!(runs.iter().all(|r| r.args.is_empty()));
+
+        // Two files of one crate are one run.
+        let runs = RustAnalyzer
+            .narrow(
+                repo,
+                &["crates/alpha/src/lib.rs", "crates/alpha/src/other.rs"],
+            )
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+
+        // A file that belongs to no crate below the repo cannot be narrowed:
+        // the run must cover the repo.
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        assert_eq!(RustAnalyzer.narrow(repo, &["src/main.rs"]), None);
+    }
+
+    #[test]
+    fn go_narrows_by_package_pattern_from_the_module_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let runs = ScipGo.narrow(repo, &["ops/ops.go", "models/m.go", "ops/more.go"]);
+        let runs = runs.unwrap();
+        assert_eq!(runs.len(), 1, "scip-go runs once, in the module root");
+        assert_eq!(runs[0].dir, repo);
+        assert_eq!(
+            runs[0].args,
+            vec!["./ops/...".to_string(), "./models/...".to_string()]
+        );
+        // A file in the module root would make `./...`, which narrows nothing.
+        assert_eq!(ScipGo.narrow(repo, &["main.go"]), None);
+    }
+
+    /// scip-python has no unit below its project: the overlay run indexes the
+    /// project and keeps the changed documents.
+    #[test]
+    fn python_does_not_narrow() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(ScipPython.narrow(dir.path(), &["pkg/mod.py"]), None);
     }
 }
