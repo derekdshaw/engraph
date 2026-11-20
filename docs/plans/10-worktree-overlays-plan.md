@@ -57,11 +57,15 @@ commit is on another branch and no checkout of it is on disk. `divergence::
 diff_names` does this at this time, from a linked worktree, for the "Changed
 since the index" note.
 
-`record_index_commit` writes a `git stash create` commit when the working tree
-of the base checkout is not clean. That commit has no ref, thus `git gc` can
-remove it, and a base commit that git cannot resolve makes each file count as
-different (`diff_names`) — an overlay of the full repo. The base index run
-therefore puts the commit on the ref `refs/engraph/base/<project tag>`.
+The base commit is what `record_index_commit` records at this time: HEAD of
+the base checkout, or a `git stash create` commit when its working tree is not
+clean (the recorded commit must contain what was indexed, or another worktree
+sees the uncommitted edits of the base checkout as its own code). A stash
+commit has no ref, thus `git gc` can remove it; engraph accepts this and does
+not write to the repo (refer to decision 3). A base commit that git cannot
+resolve makes each file count as different (`diff_names`) — one overlay of the
+full repo — and the next refresh of the base records a commit that resolves
+again.
 
 ### Overlay
 
@@ -158,9 +162,12 @@ this plan. Add it only if telemetry shows that overlay index runs are too slow
    for it, and no index run in a worktree can replace the graph that the other
    worktrees read by accident.
 
-3. **The base commit gets a ref.** `refs/engraph/base/<project tag>` keeps the
-   commit of the last base index run, thus `git gc` cannot remove a `git stash
-   create` commit that the overlays compare with.
+3. **engraph does not write to the repo.** No refs, no checkouts, no commits:
+   engraph only reads the repo and records commit hashes in its own database.
+   The cost is that `git gc` can remove a `git stash create` commit that the
+   overlays compare with. That loss is accepted: it makes one overlay of the
+   full repo, the next refresh of the base heals it, and nothing of engraph is
+   left in the repo of the user.
 
 ## Findings
 
@@ -264,9 +271,11 @@ keeps the base commit safe.
    not a part of it: a project with no row has no base commit to give, but its
    `index_state` rows have the commit of each subtree, which is what the
    overlays of part 3 compare with.
-6. Write the base commit to `refs/engraph/base/<project tag>` in each base
-   index run, so `git gc` keeps it (refer to decision 3). Remove the ref with
-   the rows of a project.
+6. Removed. An earlier version of this step wrote the base commit to a ref
+   (`refs/engraph/base/…`), so `git gc` keeps it. Decision 3 removes it:
+   engraph does not write to the repo. The recorded commit in `index_state` is
+   the base, and a commit that git cannot resolve heals at the next refresh of
+   the base.
 7. Add `engraph index --full`: a full index run that writes the base graph from
    the checkout it runs in and makes that checkout the base checkout. Without
    it, an index run in a linked worktree writes an overlay (part 3), and the
@@ -313,7 +322,10 @@ keeps the base commit safe.
 - `engraph index --full` in a linked worktree writes the base graph and makes
   that checkout the base checkout.
 - An overlay of a worktree is computed against a base commit that no branch
-  contains (a `git stash create` commit), also after `git gc --prune=now`.
+  contains (a `git stash create` commit).
+- When the base commit does not resolve (after `git gc --prune=now`), the view
+  of a worktree is still correct, and the next refresh of the base makes the
+  overlays small again.
 
 ## Risks
 
@@ -326,10 +338,12 @@ keeps the base commit safe.
   is small. The user controls this: keep the base checkout on the branch that
   the work starts from, or make another checkout the base with
   `engraph index --full`.
-- A base commit that git cannot resolve makes each file count as different, thus
-  an overlay of the full repo. The ref of decision 3 stops the usual cause
-  (`git gc` of a `git stash create` commit); a user who removes the ref, or
-  re-makes the repo, gets one full overlay index run.
+- A base commit that git cannot resolve (`git gc` of a `git stash create`
+  commit, or a re-made repo) makes each file count as different, thus one
+  overlay of the full repo until the next refresh of the base. Accepted, per
+  decision 3. If telemetry shows this occurs often, index the base only when
+  its working tree is clean, so the recorded commit is always a reachable
+  HEAD.
 - If symbol ids change between commits, the overlay must contain all files of
   the affected language. Then it gives no saving. The test of part 1, step 2
   shows that no installed indexer does this (refer to "Findings").
