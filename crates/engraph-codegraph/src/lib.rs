@@ -9,6 +9,7 @@ pub mod scip_loader;
 pub mod subgraph;
 #[cfg(test)]
 mod test_env;
+pub mod view;
 mod which;
 
 pub use bazel::{BazelStats, detect_bazel, index_bazel_workspace};
@@ -40,3 +41,4 @@ pub use subgraph::{
     MATCH_WHERE_SQL, Neighborhood, format_markdown, normalize_qualified, qualified_candidates,
     subgraph_for, subgraph_for_in,
 };
+pub use view::{clear_worktree_view, install_worktree_view};

@@ -620,6 +620,69 @@ fn session_start_refreshes_a_worktree_overlay_in_the_background() {
     assert_eq!(index_state(&db), before, "the base graph never moved");
 }
 
+/// Plan 10, step 15: the overlay of a worktree git no longer lists goes with
+/// it, and the overlays of the worktrees that remain are untouched.
+#[test]
+fn a_removed_worktree_loses_its_overlay() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let scip = dir.path().join("empty.scip");
+    let out = engraph(
+        &db,
+        &mono,
+        &["index", ".", "--scip", scip.to_str().unwrap()],
+    );
+    assert!(out.status.success());
+
+    let mut paths = Vec::new();
+    for name in ["wt-a", "wt-b"] {
+        let wt = dir.path().join(name);
+        git(
+            &mono,
+            &["worktree", "add", "-q", "-b", name, wt.to_str().unwrap()],
+        );
+        let wt = wt.canonicalize().unwrap();
+        // Each worktree records an overlay of its own.
+        let out = engraph(&db, &wt, &["index", "--if-changed", "."]);
+        assert!(out.status.success(), "{}", stdout(&out));
+        paths.push(wt);
+    }
+    let overlays = |db: &Path| -> Vec<String> {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT worktree FROM overlay_state ORDER BY worktree")
+            .unwrap();
+        let mut rows: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        rows.sort();
+        rows
+    };
+    let mut expected: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    expected.sort();
+    assert_eq!(overlays(&db), expected);
+
+    // wt-a goes; the next refresh anywhere in the repo removes its overlay.
+    git(&mono, &["worktree", "remove", paths[0].to_str().unwrap()]);
+    let out = engraph(&db, &mono, &["index", "--if-changed", "."]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("removed the overlay of"),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(
+        overlays(&db),
+        vec![paths[1].to_string_lossy().into_owned()],
+        "the overlay of the worktree that remains was removed too"
+    );
+}
+
 #[test]
 fn a_refresh_skips_subtrees_indexed_from_prebuilt_scip() {
     let (dir, mono) = mono();

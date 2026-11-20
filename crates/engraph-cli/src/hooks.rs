@@ -632,6 +632,11 @@ pub(crate) fn run_post_read_hook(conn: &db::PooledConn) -> Result<()> {
         Some((project, rel)) => (Some(project), rel),
         None => (None, file_path.to_string()),
     };
+    // The listing comes from the view of the checkout the file is in, so a
+    // worktree sees the symbols of its own copy (plan 10, step 13).
+    if let Some(dir) = Path::new(file_path).parent() {
+        crate::use_worktree_view(conn, dir);
+    }
     let entities =
         engraph_codegraph::subgraph::entities_in_file(conn, project.as_deref(), &indexed_path, 30);
     let context = match &entities {

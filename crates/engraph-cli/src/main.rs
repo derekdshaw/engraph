@@ -356,6 +356,14 @@ async fn main() -> Result<()> {
                 // worktree the refresh brings that worktree's overlay up to
                 // date instead, so a session in one worktree never replaces
                 // the graph the others read (plan 10, step 7).
+                // The overlays of worktrees git no longer lists go here: this
+                // run is what the SessionStart hook starts, in every checkout
+                // (plan 10, step 15).
+                if !dry_run {
+                    for gone in divergence::prune_overlays(&conn, &project_key, &repo) {
+                        println!("removed the overlay of {gone}: no such worktree");
+                    }
+                }
                 let overlay_here = !recorded.is_empty()
                     && index_route(&conn, &repo, &project_key, false)? == IndexRoute::Overlay;
                 if overlay_here {
@@ -776,6 +784,11 @@ async fn main() -> Result<()> {
             json,
         } => {
             let start = Instant::now();
+            // The lookup reads the view of this checkout: its overlay over
+            // the base graph.
+            if let Ok(cwd) = std::env::current_dir() {
+                use_worktree_view(&conn, &cwd);
+            }
             // The caller's project goes first in an ambiguous match list.
             let current_project = std::env::current_dir().ok().map(|c| canonical_repo_key(&c));
             let neighborhood = engraph_codegraph::subgraph_for_in(
@@ -794,7 +807,7 @@ async fn main() -> Result<()> {
             } else {
                 let note = std::env::current_dir()
                     .ok()
-                    .and_then(|c| divergence::stale_note(&conn, &c, &neighborhood));
+                    .and_then(|c| divergence::graph_behind_note(&conn, &c));
                 note.unwrap_or_default()
                     + &engraph_codegraph::format_markdown(
                         &neighborhood,
@@ -1417,6 +1430,19 @@ fn run_overlay_index(
     Ok(())
 }
 
+/// Point this connection's lookups at the view of the checkout `cwd` is in:
+/// the base graph with that checkout's overlay over it (plan 10, step 13).
+/// Best effort — without it the lookups read the base graph, as before.
+pub(crate) fn use_worktree_view(conn: &db::PooledConn, cwd: &std::path::Path) {
+    let Some(worktree) = checkout_path(cwd) else {
+        return;
+    };
+    let project = canonical_repo_key(cwd);
+    if let Err(e) = engraph_codegraph::install_worktree_view(conn, &project, &worktree) {
+        tracing::warn!(error = %e, "worktree view: reading the base graph instead");
+    }
+}
+
 /// What an index run in this checkout writes (plan 10, part 2, step 7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IndexRoute {
@@ -1447,14 +1473,10 @@ fn index_route(
     if engraph_codegraph::indexed_commits(conn, project)?.is_empty() {
         return Ok(IndexRoute::Base);
     }
-    let base = engraph_codegraph::base_checkout(conn, project)?;
-    let here = checkout_path(repo);
-    Ok(match (base, here) {
-        // Outside git, or a project key that names no checkout: there is no
-        // worktree to hold an overlay, so the run writes the base as before.
-        (None, _) | (_, None) => IndexRoute::Base,
-        (Some(base), Some(here)) if base == here => IndexRoute::Base,
-        _ => IndexRoute::Overlay,
+    Ok(if divergence::is_base_checkout(conn, project, repo) {
+        IndexRoute::Base
+    } else {
+        IndexRoute::Overlay
     })
 }
 

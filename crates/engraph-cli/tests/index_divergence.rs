@@ -1,9 +1,12 @@
-//! The codegraph records the commit each project was indexed at, and lookups
-//! from a worktree whose copy of an indexed file has moved on stop trusting the
-//! graph for that file:
+//! The codegraph records the commit each project was indexed at, and a lookup
+//! reads the view of the checkout it runs in (plan 10, step 13). The per-file
+//! divergence check that preceded the view is gone (step 14): a changed file
+//! no longer turns the redirect off, because the overlay of the checkout
+//! carries that file once its index run lands. What remains is one note when
+//! the graph is behind the checkout:
 //! - `engraph index` records the repo's HEAD commit
-//! - pre-grep redirect: unchanged file → deny; changed file → passthrough
-//! - subgraph: changed file → a "changed since the index" note
+//! - pre-grep redirect: an indexed symbol → deny, changed file or not
+//! - subgraph: a graph behind this checkout → one note above the output
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -128,8 +131,10 @@ fn edit_to_another_file_still_redirects() {
     );
 }
 
+/// An uncommitted edit no longer turns the redirect off: the symbol is still
+/// indexed, and `subgraph` says the graph is behind this checkout.
 #[test]
-fn uncommitted_edit_to_the_symbols_file_passes_through() {
+fn uncommitted_edit_to_the_symbols_file_still_redirects() {
     let (dir, repo) = repo();
     let db = dir.path().join("e.db");
     index_with_symbol(dir.path(), &repo, &db);
@@ -138,11 +143,17 @@ fn uncommitted_edit_to_the_symbols_file_passes_through() {
         "fn widget_count() -> usize { 2 }\n",
     )
     .unwrap();
-    assert_eq!(decision(&pre_grep(&db, &repo, "widget_count")), None);
+    assert_eq!(
+        decision(&pre_grep(&db, &repo, "widget_count")).as_deref(),
+        Some("deny")
+    );
 }
 
+/// A worktree reads its own view, so an indexed symbol redirects there too —
+/// the branch's copy of the file reaches the graph through that worktree's
+/// overlay, not by turning the redirect off.
 #[test]
-fn linked_worktree_branch_that_changed_the_file_passes_through() {
+fn linked_worktree_branch_that_changed_the_file_still_redirects() {
     let (dir, repo) = repo();
     let db = dir.path().join("e.db");
     index_with_symbol(dir.path(), &repo, &db);
@@ -157,16 +168,22 @@ fn linked_worktree_branch_that_changed_the_file_passes_through() {
     )
     .unwrap();
     git(&wt, &["commit", "-q", "-am", "change widget_count"]);
-    // The agent in the worktree greps; the main checkout still matches the graph.
-    assert_eq!(decision(&pre_grep(&db, &wt, "widget_count")), None);
+    // The agent in the worktree greps, and so does one in the base checkout:
+    // both get the redirect, each against its own view.
+    assert_eq!(
+        decision(&pre_grep(&db, &wt, "widget_count")).as_deref(),
+        Some("deny")
+    );
     assert_eq!(
         decision(&pre_grep(&db, &repo, "widget_count")).as_deref(),
         Some("deny")
     );
 }
 
+/// A commit git cannot resolve made the old per-file check give up and pass
+/// the grep through. The redirect no longer asks: the symbol is indexed.
 #[test]
-fn unknown_indexed_commit_passes_through() {
+fn unknown_indexed_commit_still_redirects() {
     let (dir, repo) = repo();
     let db = dir.path().join("e.db");
     index_with_symbol(dir.path(), &repo, &db);
@@ -177,11 +194,14 @@ fn unknown_indexed_commit_passes_through() {
             [],
         )
         .unwrap();
-    assert_eq!(decision(&pre_grep(&db, &repo, "widget_count")), None);
+    assert_eq!(
+        decision(&pre_grep(&db, &repo, "widget_count")).as_deref(),
+        Some("deny")
+    );
 }
 
 #[test]
-fn bash_rg_in_a_changed_worktree_passes_through() {
+fn bash_rg_in_a_changed_worktree_still_redirects() {
     let (dir, repo) = repo();
     let db = dir.path().join("e.db");
     index_with_symbol(dir.path(), &repo, &db);
@@ -213,18 +233,18 @@ fn bash_rg_in_a_changed_worktree_passes_through() {
         .write_all(payload.as_bytes())
         .unwrap();
     let out = String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned();
-    assert_ne!(decision(&out).as_deref(), Some("deny"), "got: {out}");
+    assert_eq!(decision(&out).as_deref(), Some("deny"), "got: {out}");
 }
 
 #[test]
-fn subgraph_flags_a_file_changed_since_the_index() {
+fn subgraph_says_when_the_graph_is_behind_this_checkout() {
     let (dir, repo) = repo();
     let db = dir.path().join("e.db");
     index_with_symbol(dir.path(), &repo, &db);
     let clean = engraph(&db, &repo, &["subgraph", "widget_count"]);
     let clean = String::from_utf8_lossy(&clean.stdout);
     assert!(clean.contains("widget_count"), "{clean}");
-    assert!(!clean.contains("Changed since the index"), "{clean}");
+    assert!(!clean.contains("behind this checkout"), "{clean}");
 
     std::fs::write(
         repo.join("src/lib.rs"),
@@ -233,10 +253,14 @@ fn subgraph_flags_a_file_changed_since_the_index() {
     .unwrap();
     let out = engraph(&db, &repo, &["subgraph", "widget_count"]);
     let out = String::from_utf8_lossy(&out.stdout);
-    assert!(out.contains("Changed since the index"), "{out}");
-    assert!(out.contains("`src/lib.rs`"), "{out}");
+    assert!(out.contains("behind this checkout"), "{out}");
+    // One note about the checkout, not a list of files: the view covers what
+    // the overlay holds, and the note is about what it does not hold yet.
+    assert!(!out.contains("`src/lib.rs`"), "{out}");
 }
 
+/// The base checkout has no overlay by design, so the note must come from
+/// the base's own staleness there — not from a missing overlay.
 #[test]
 fn indexing_a_dirty_tree_does_not_flag_the_files_it_indexed() {
     let (dir, repo) = repo();
@@ -254,12 +278,14 @@ fn indexing_a_dirty_tree_does_not_flag_the_files_it_indexed() {
     );
     let out = engraph(&db, &repo, &["subgraph", "widget_count"]);
     let out = String::from_utf8_lossy(&out.stdout);
-    assert!(!out.contains("Changed since the index"), "{out}");
-    // A later edit still counts.
+    assert!(!out.contains("behind this checkout"), "{out}");
+    // A later edit does show up as the graph being behind.
     std::fs::write(
         repo.join("src/lib.rs"),
         "fn widget_count() -> usize { 3 }\n",
     )
     .unwrap();
-    assert_eq!(decision(&pre_grep(&db, &repo, "widget_count")), None);
+    let out = engraph(&db, &repo, &["subgraph", "widget_count"]);
+    let out = String::from_utf8_lossy(&out.stdout);
+    assert!(out.contains("behind this checkout"), "{out}");
 }

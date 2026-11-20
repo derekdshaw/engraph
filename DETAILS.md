@@ -653,34 +653,16 @@ Shared with the native `PreToolUse(Grep)` path:
   ambiguous to be a useful neighborhood. The deny reason suggests the
   path as typed, so `engraph subgraph Config::new` resolves the same
   single symbol even when bare `new` has dozens.
-- **Branch divergence** (`divergence.rs`): before denying, it runs
-  `git diff --name-only <indexed commit> -- <matched files>` in the
-  session's checkout (the hook payload's `cwd`). If the checkout has
-  changed any matched symbol's file since the index (committed on its
-  branch or not), the grep passes through: the graph would show the
-  indexed version, not this branch's. The check applies only when the
-  project key is `cwd`'s repo (`canonical_repo_key`, so a linked
-  worktree counts; monorepo sub-projects index into it, §14) and
-  `index_state` (§12.1 v9/v10) has a commit for it. Each file is
-  compared with the commit of the most specific indexed subtree covering
-  it, so a sub-project indexed earlier than its siblings is checked
-  against its own index commit.
-  With no recorded commit the redirect behaves as before. If git can't
-  compare (the commit was rebased or gc'd away), every file counts as
-  changed. `engraph subgraph` runs the same check over every file in
-  the neighborhood and prints a "Changed since the index" note naming
-  them above the markdown (not in `--json`).
-  The recorded commit is `git stash create` when the tree is dirty, so
-  files indexed from uncommitted edits aren't flagged. Nothing
-  references that object, so `git gc` prunes it after `gc.pruneExpire`
-  (2 weeks by default). After that the diff fails and every file counts
-  as changed until the next `engraph index`.
-  `git diff` never reports a file that is untracked now and absent from
-  the recorded commit (`stash create` excludes untracked files too), so
-  a matched file that is untracked (`git ls-files --others
-  --exclude-standard`) counts as changed when its mtime is later than
-  the covering subtree's `index_state.indexed_at` — written at
-  sub-second precision for exactly this comparison.
+- **The view of the checkout** (`view.rs`, plan 10 step 13): before
+  matching, the redirect installs this checkout's view, so what it finds
+  is the base graph with that checkout's overlay over it. The per-file
+  branch-divergence check that preceded it is gone (step 14): a file the
+  branch changed no longer turns the redirect off, because the overlay
+  carries that file once the worktree's index run lands. `engraph
+  subgraph` reads the same view and prints one note above the markdown
+  (not in `--json`) when the graph is behind this checkout —
+  `divergence::graph_behind_note`, which asks whether the base is stale
+  in the base checkout and whether the overlay is stale anywhere else.
 
 The gate matters: a permissive heuristic would deny on common
 identifiers like `new` / `run` / `parse` (any of which has dozens of
@@ -1238,6 +1220,35 @@ identical either way, so the threshold trades time only. A run started below
 the repo writes paths relative to its own directory and is rebased to
 repo-relative before loading.
 
+### 8.0.1c The view of a checkout
+
+Every lookup reads the **view** of the checkout it runs in: the base graph
+with that checkout's overlay over it. `view::install_worktree_view` installs
+it as two temp views **named `entities` and `relations`**, which shadow the
+base tables for that connection — SQLite resolves an unqualified name in the
+temp schema first — so the neighborhood queries, `MATCH_WHERE_SQL`, the grep
+redirect and the post-read listing all read the view **without a single query
+changing**. The base tables stay reachable as `main.entities` /
+`main.relations`, which is what the view definitions and every writer use, and
+a write through a view is refused by SQLite, which keeps a loader off a
+connection that has one installed. Temp views die with the connection, and a
+lookup is one process, so nothing leaks between runs.
+
+A row of the view is every overlay row of this worktree, plus every base row
+the worktree has not replaced: not a symbol the overlay defines, and not in a
+file the overlay covers — which is how a changed file's old symbols and a
+deleted file's rows disappear. A base edge goes when the file of its *source*
+is one the overlay covers; an edge to a symbol the view no longer has drops
+out by itself, since the neighborhood queries join the other end against
+`entities`. Rows of other projects are never hidden, so a monorepo sibling and
+a cross-repo reference read as before.
+
+The three read paths install it: `engraph subgraph` (`main.rs`), the grep
+redirect (`redirect.rs`, from the pre-grep/pre-bash hooks) and the
+PostToolUse(Read) listing (`hooks.rs`, keyed on the directory of the file that
+was read). Installing is best-effort: on failure the lookup reads the base
+graph, as before plan 10.
+
 ### 8.0.2 One index run per project
 
 Every index run — explicit, `--if-changed`, manifest, or each project of a
@@ -1504,7 +1515,7 @@ but logs a warning if it ever happens.
 | 9 | `index_state` table: the commit each codegraph project was last indexed at (`engraph index` records `git stash create`, a commit of the working tree it indexed, else HEAD; it clears the row outside git), so lookups can detect files a worktree's branch has changed since (§5.5). |
 | 10 | `index_state` keyed by `(project, subtree)`: a monorepo sub-project index (§14) records its own commit; a run replaces the commits of subtrees nested under it. Table rebuilt (SQLite can't change a primary key); v9 rows become subtree `''`. Known gap: the commit is per subtree, not per indexer, so after a Rust-only root run a sub-project's TypeScript symbols (indexed by an earlier sub-project run) are checked against the root's newer commit, and a TypeScript change between the two runs goes unflagged. |
 | 11 | `index_state` records how each subtree was indexed: `source` (`drivers` run by engraph, or prebuilt `scip` / `manifest`), the `--lang` pin, and `bazel_symbols`, so `index --if-changed` repeats the same run (§8.0.1). Older rows default to a plain driver run. |
-| 12 | `entities.qualified_name` + `idx_entities_qualified_name`: the SCIP descriptors after the namespace joined with `.` (`Config.full_path_base`, `Config`), so `subgraph` and the grep redirect can match a qualified lookup (§5.5, §14.4). NULL until the project is indexed again; Bazel targets never have one. Names change in the same load, so v12 also clears the commit of every driver run (`source = 'drivers'`): git can't resolve `''`, which counts as changed, so the next SessionStart refresh re-indexes the project. Until then the per-file divergence check treats its files as changed, and greps on them pass through. Prebuilt SCIP subtrees keep their commit, since the refresh skips them; repos without an automatic refresh (linked worktrees, bare-repo layouts) need one manual `engraph index`. |
+| 12 | `entities.qualified_name` + `idx_entities_qualified_name`: the SCIP descriptors after the namespace joined with `.` (`Config.full_path_base`, `Config`), so `subgraph` and the grep redirect can match a qualified lookup (§5.5, §14.4). NULL until the project is indexed again; Bazel targets never have one. Names change in the same load, so v12 also clears the commit of every driver run (`source = 'drivers'`): git can't resolve `''`, which counts as changed, so the next SessionStart refresh re-indexes the project. Until then `subgraph` notes that the graph is behind the checkout (§5.5). Prebuilt SCIP subtrees keep their commit, since the refresh skips them. |
 
 | 13 | SCIP local symbols per project and document (§14.3). `entities.scheme`: the SCIP scheme of the indexer that wrote a symbol (the first word of a global id; for a local, the scheme of its document; NULL for Bazel targets), filled for existing global symbols. The old `local <n>` rows, one row for the locals of all documents and projects, are deleted with their edges. Like v12, v13 clears the commit of every driver run, so the next refresh writes the local edges again. |
 | 14 | `relations.line`: the line of the occurrence (call or reference) an edge comes from, NULL for relationship edges, Bazel dependencies, and sources defined in more than one document (a Go package) (§14.4). Clears the commit of every driver run, as v12 does, so the next refresh writes the lines. |

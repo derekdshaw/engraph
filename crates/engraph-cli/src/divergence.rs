@@ -2,7 +2,6 @@
 //! and commit — so a lookup from a worktree on another branch can tell which
 //! indexed files no longer match.
 
-use engraph_codegraph::Neighborhood;
 use engraph_core::db;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -320,77 +319,6 @@ fn mtime_epoch(path: &Path) -> Option<f64> {
         .map(|d| d.as_secs_f64())
 }
 
-/// The subset of `files` (repo-relative, indexed under `project`) whose copy in
-/// the checkout containing `cwd` differs from the commit they were indexed at —
-/// committed on this branch or not. Each file is compared with the commit of
-/// the most specific indexed subtree covering it. Empty when no commit was
-/// recorded or `cwd` is in another repo: the graph is trusted as before.
-fn changed_since_index(
-    conn: &db::PooledConn,
-    project: &str,
-    cwd: &Path,
-    files: &BTreeSet<&str>,
-) -> Vec<String> {
-    if files.is_empty() {
-        return Vec::new();
-    }
-    let commits = match engraph_codegraph::indexed_commits(conn, project) {
-        Ok(c) if !c.is_empty() => c,
-        _ => return Vec::new(),
-    };
-    if crate::canonical_repo_key(cwd) != project {
-        return Vec::new();
-    }
-    let Some(top) = crate::git_current_toplevel(cwd) else {
-        return Vec::new();
-    };
-    let mut by_commit: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for &f in files {
-        if let Some((_, sha)) = covering_subtree(&commits, f) {
-            by_commit.entry(sha.as_str()).or_default().push(f);
-        }
-    }
-    let mut changed: Vec<String> = by_commit
-        .into_iter()
-        .flat_map(|(sha, files)| diff_names(&top, sha, &files))
-        .collect();
-    // `git diff` never reports a file that is untracked now and absent from
-    // the recorded commit (indexed while untracked): compare its mtime with
-    // the index time of the covering subtree. A file tracked at index time
-    // but untracked now shows up in both lists, hence the dedup.
-    let indexed_at = engraph_codegraph::indexed_at_by_subtree(conn, project).unwrap_or_default();
-    let all: Vec<&str> = files.iter().copied().collect();
-    for f in untracked_files(&top, &all) {
-        let Some((sub, _)) = covering_subtree(&commits, &f) else {
-            continue;
-        };
-        let Some(at) = indexed_at.get(sub) else {
-            continue;
-        };
-        if mtime_epoch(&top.join(&f)).is_some_and(|m| m > *at) && !changed.contains(&f) {
-            changed.push(f);
-        }
-    }
-    changed
-}
-
-/// `git diff --name-only <sha> -- <files>` in `top`. When git can't compare
-/// (the commit was rebased or gc'd away) every file counts as changed, since an
-/// unneeded grep costs less than a stale graph.
-fn diff_names(top: &Path, sha: &str, files: &[&str]) -> Vec<String> {
-    let out = engraph_core::utils::git_cmd(top)
-        .args(["diff", "--name-only", sha, "--"])
-        .args(files)
-        .output();
-    match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect(),
-        _ => files.iter().map(|f| f.to_string()).collect(),
-    }
-}
-
 /// The indexed subtrees of `project` (`""` for a whole-project index) whose
 /// contents in the checkout containing `cwd` differ from the commit they were
 /// indexed at, in `index_state` order. One `git diff --quiet <commit> --
@@ -487,58 +415,124 @@ fn subtree_changed(
         .any(|f| mtime_epoch(&top.join(f)).is_some_and(|m| m > indexed_at))
 }
 
-/// Indexed files grouped by project, from `(project, file_path)` pairs.
-fn files_by_project<'a>(
-    rows: impl IntoIterator<Item = (Option<&'a str>, Option<&'a str>)>,
-) -> BTreeMap<&'a str, BTreeSet<&'a str>> {
-    let mut by_project: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-    for (project, file) in rows {
-        if let (Some(p), Some(f)) = (project, file) {
-            by_project.entry(p).or_default().insert(f);
-        }
-    }
-    by_project
-}
-
-/// Whether any of the `(project, file_path)` rows names a file `cwd`'s
-/// checkout has changed since the index.
-pub(crate) fn any_changed_since_index<'a>(
-    conn: &db::PooledConn,
-    cwd: &Path,
-    rows: impl IntoIterator<Item = (Option<&'a str>, Option<&'a str>)>,
-) -> bool {
-    files_by_project(rows)
-        .iter()
-        .any(|(project, files)| !changed_since_index(conn, project, cwd, files).is_empty())
-}
-
-/// A warning to put above a subgraph when files it draws on have changed in
-/// `cwd`'s checkout since the index, naming them; `None` when none have.
-pub(crate) fn stale_note(conn: &db::PooledConn, cwd: &Path, n: &Neighborhood) -> Option<String> {
-    let rows = n
-        .matches
-        .iter()
-        .chain(n.outgoing.iter().map(|e| &e.other))
-        .chain(n.incoming.iter().map(|e| &e.other))
-        .chain(n.siblings.iter())
-        .map(|r| (r.project.as_deref(), r.file_path.as_deref()));
-    let changed: Vec<String> = files_by_project(rows)
-        .iter()
-        .flat_map(|(project, files)| changed_since_index(conn, project, cwd, files))
-        .collect();
-    if changed.is_empty() {
+/// A warning to put above a subgraph when the overlay of this checkout no
+/// longer describes it — the index run that would refresh it has not finished
+/// (or has not started). The view is correct for everything the overlay does
+/// cover, so this is one line about the checkout, not a list of files: the
+/// per-file divergence check that preceded the view is gone (plan 10, step
+/// 14). `None` when the overlay is current.
+pub(crate) fn graph_behind_note(conn: &db::PooledConn, cwd: &Path) -> Option<String> {
+    let project = crate::canonical_repo_key(cwd);
+    if engraph_codegraph::indexed_commits(conn, &project)
+        .map(|c| c.is_empty())
+        .unwrap_or(true)
+    {
         return None;
     }
-    let list = changed
-        .iter()
-        .map(|f| format!("`{f}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!(
-        "> **Changed since the index:** {list} differ in this checkout from the commit the \
-         graph was built at. Signatures, line numbers and edges from them may be stale; read \
-         the file for current code.\n\n"
-    ))
+    // In the base checkout the graph the lookup reads is the base itself, and
+    // what refreshes it is a base index run; everywhere else it is the
+    // overlay. Asking the wrong one would put the note over every lookup in
+    // the base checkout, which has no overlay by design.
+    let behind = if is_base_checkout(conn, &project, cwd) {
+        !changed_subtrees(conn, &project, cwd).is_empty()
+    } else {
+        overlay_stale(conn, &project, cwd)
+    };
+    if !behind {
+        return None;
+    }
+    Some(
+        "> **The graph is behind this checkout:** files changed after the last index run for \
+         it, so signatures, line numbers and edges from them may be stale; read the file for \
+         current code. A refresh runs in the background at the next session start, or run \
+         `engraph index --if-changed .`.\n\n"
+            .to_string(),
+    )
+}
+
+/// Remove the overlays of worktrees of `project` that `git worktree list` no
+/// longer shows (plan 10, part 3, step 15): a `git worktree remove` takes the
+/// checkout, and its rows would otherwise sit in the database for good.
+///
+/// Returns the worktrees it removed. Best effort: when git cannot list them
+/// nothing is removed, since an empty list would read as "every worktree is
+/// gone".
+pub(crate) fn prune_overlays(conn: &db::PooledConn, project: &str, cwd: &Path) -> Vec<String> {
+    let Some(live) = live_worktrees(cwd) else {
+        return Vec::new();
+    };
+    // Both tables, because an overlay with no differing files has a state row
+    // and no file rows, and a run interrupted before its state row has the
+    // file rows alone.
+    let recorded: Vec<String> = match conn
+        .prepare(
+            "SELECT worktree FROM overlay_state WHERE project = ?1
+             UNION
+             SELECT worktree FROM overlay_files WHERE project = ?1",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map([project], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()
+        }) {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "overlay prune: cannot list the overlays");
+            return Vec::new();
+        }
+    };
+    let mut removed = Vec::new();
+    for worktree in recorded {
+        if live.contains(&worktree) {
+            continue;
+        }
+        match engraph_codegraph::clear_overlay(conn, &worktree) {
+            Ok(_) => removed.push(worktree),
+            Err(e) => tracing::warn!(error = %e, worktree, "overlay prune: cannot remove"),
+        }
+    }
+    removed
+}
+
+/// The checkouts `git worktree list` shows for the repo containing `cwd`,
+/// canonical, as an overlay names them. `None` when git cannot answer.
+fn live_worktrees(cwd: &Path) -> Option<BTreeSet<String>> {
+    let out = engraph_core::utils::git_cmd(cwd)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    Some(
+        text.lines()
+            .filter_map(|l| l.strip_prefix("worktree "))
+            .map(|p| {
+                let p = Path::new(p.trim());
+                p.canonicalize()
+                    .unwrap_or_else(|_| p.to_path_buf())
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect(),
+    )
+}
+
+/// Whether the checkout containing `cwd` is the base checkout of `project` —
+/// the one whose index runs write the base rows (plan 10, step 7).
+pub(crate) fn is_base_checkout(conn: &db::PooledConn, project: &str, cwd: &Path) -> bool {
+    let here = crate::git_current_toplevel(cwd).and_then(|t| t.canonicalize().ok());
+    match (
+        engraph_codegraph::base_checkout(conn, project)
+            .ok()
+            .flatten(),
+        here,
+    ) {
+        (Some(base), Some(here)) => Path::new(&base) == here,
+        // Outside git, or a project key that names no checkout: there is no
+        // worktree to hold an overlay, so this is the base.
+        _ => true,
+    }
 }
 
 #[cfg(test)]
@@ -1021,46 +1015,6 @@ mod tests {
         // A new `.rs` file is.
         std::fs::write(repo.join("svc-b/gen.rs"), "fn gen() {}\n").unwrap();
         assert_eq!(changed_subtrees(&conn, &project, &repo), vec!["svc-b"]);
-    }
-
-    #[test]
-    fn changed_since_index_flags_a_modified_untracked_indexed_file() {
-        let (dir, repo, head) = repo();
-        let pool = db::open_pool(&dir.path().join("t.db")).unwrap();
-        let conn = pool.get().unwrap();
-        let project = crate::canonical_repo_key(&repo);
-        // `svc-a/gen.rs` was untracked when it was indexed: it is in the
-        // graph, but neither HEAD nor the recorded commit contains it.
-        // Its mtime is set a minute back: `indexed_at` has millisecond
-        // precision and APFS/NTFS mtimes are finer, so a file written in the
-        // same millisecond as the record would read as newer than the index.
-        let gen_rs = repo.join("svc-a/gen.rs");
-        std::fs::write(&gen_rs, "fn gen() {}\n").unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(&gen_rs)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
-            .unwrap();
-        engraph_codegraph::record_indexed_commit(
-            &conn,
-            &project,
-            "",
-            Some(&head),
-            &Default::default(),
-        )
-        .unwrap();
-        let files: BTreeSet<&str> = ["svc-a/gen.rs", "svc-a/a.rs"].into_iter().collect();
-        // Indexed after the file was written: nothing diverged.
-        assert!(changed_since_index(&conn, &project, &repo, &files).is_empty());
-        // Modified after the index: the untracked file counts as diverged;
-        // the tracked unmodified one does not.
-        backdate_index(&conn, 10);
-        std::fs::write(&gen_rs, "fn gen() { 1 }\n").unwrap();
-        assert_eq!(
-            changed_since_index(&conn, &project, &repo, &files),
-            vec!["svc-a/gen.rs"]
-        );
     }
 
     #[test]

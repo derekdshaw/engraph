@@ -379,12 +379,32 @@ keeps the base commit safe.
     file that is *removed* after the overlay is not seen — the untracked check
     of `--if-changed` has the same blind spot — and heals with the next
     change. `divergence::in_linked_worktree` is removed with its gate.
-13. Add the view function. Use it in `subgraph_for`, in the grep redirect, and
-    in the PostToolUse(Read) hook.
-14. When the view function operates, remove the per-file divergence check from
+13. ~~Add the view function. Use it in `subgraph_for`, in the grep redirect, and
+    in the PostToolUse(Read) hook.~~ Complete: `view::install_worktree_view`
+    makes two temp views with the names `entities` and `relations`, which
+    shadow the base tables for that connection. SQLite reads a name in the
+    temp schema before the main one, thus each query of the three read paths
+    uses the view and no query changes. The base tables keep the names
+    `main.entities` and `main.relations`, which the view and each writer use,
+    and SQLite refuses a write through a view, thus a loader cannot run on a
+    connection that has one.
+14. ~~When the view function operates, remove the per-file divergence check from
     the grep redirect and from `engraph subgraph`. The view of the worktree
-    replaces it.
-15. Remove the overlays of worktrees that `git worktree list` does not show.
+    replaces it.~~ Complete: `changed_since_index`, `any_changed_since_index`,
+    `diff_names` and `stale_note` are removed. A changed file no longer stops
+    the redirect, because the overlay of the checkout carries that file.
+    `divergence::graph_behind_note` keeps one note above a subgraph when the
+    graph is behind the checkout: in the base checkout it asks whether the
+    base is stale (`changed_subtrees`), in any other worktree whether the
+    overlay is (`overlay_stale`). The note is about the checkout, not a list
+    of files.
+15. ~~Remove the overlays of worktrees that `git worktree list` does not
+    show.~~ Complete: `divergence::prune_overlays`, from each
+    `engraph index --if-changed` run, which is what the SessionStart hook
+    starts in every checkout. It reads the worktrees from `overlay_state` and
+    `overlay_files`, because an overlay with no differing files has a state
+    row alone. If git cannot list the worktrees nothing is removed: an empty
+    list would read as "every worktree is gone".
 
 ## Tests
 
