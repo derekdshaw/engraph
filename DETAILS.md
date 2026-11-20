@@ -2633,9 +2633,48 @@ version of each run, and `engraph index` names the projects indexed under
 older rules and recommends a full `engraph index <repo>` of each (§12.1
 v18).
 
+### 14.11 Separate graphs per worktree (plan 10)
+
+Several worktrees of one repo share one codegraph without overwriting each
+other. The repo has a **base graph** — the rows a full index run wrote, owned
+by a **base checkout** — and every other checkout has an **overlay**: rows for
+the files whose content differs from the base commit. A lookup reads the
+**view** of the checkout it runs in, the overlay over the base, so an agent in
+a worktree sees its own branch and never another worktree's.
+
+Nothing of engraph lives in the repo. The base is a *commit*, not a directory:
+worktrees share one object store, so a checkout diffs its files against a base
+commit on another branch without a copy of it on disk, and engraph writes no
+refs, no checkouts and no commits (the plan's decision 3).
+
+The pieces, each described where it belongs:
+
+- **Where a run writes** — base or overlay, `--full` to move the base, the
+  first run of a project claiming it: §8.0.1a.
+- **Overlay index runs** — the narrowed indexer runs, the one loader with two
+  destinations (`RowSink`), the `MAX_NARROW_RUNS` threshold: §8.0.1b.
+- **The view** — temp views shadowing `entities`/`relations`, installed by the
+  three read paths: §8.0.1c.
+- **Staying current** — `overlay_state`, `divergence::overlay_stale`, the
+  SessionStart refresh in every checkout, and pruning the overlay of a
+  worktree git no longer lists: §8.0.1.
+- **Tables** — `project_base` (v19), `overlay_files`/`overlay_entities`/
+  `overlay_relations` (v20), `overlay_state` (v21): §12.1.
+
+What makes it work is that a narrowed index run produces the *same symbol ids*
+as a full one — verified per indexer for Go, Rust, TypeScript, Python and Java
+— so overlay rows join base rows. The same requirement is why
+`driver::python_project_name` takes its fallback from the repo's main worktree
+(§14.8): two worktrees of one repo must spell a symbol the same way.
+
+Known limits: a subtree indexed from prebuilt SCIP gets no overlay (engraph's
+drivers need not reproduce that indexer's ids); an untracked file *removed*
+after an overlay run is not noticed until the next change; and a base commit
+`git gc` has pruned costs one full-repo overlay until the next base refresh.
+
 ## 15. Forward pointers
 
 The roadmap (`docs/ROADMAP.md`, one plan per item in `docs/plans/`)
 tracks features that aren't built, ranked by expected impact. The codegraph is shipped (target-level §14.8,
-symbol-level §14.9, stable symbol ids §14.10); its open items there are
-the code-graph bugs of plan 01.
+symbol-level §14.9, stable symbol ids §14.10, per-worktree graphs §14.11);
+its open items there are the code-graph bugs of plan 01.

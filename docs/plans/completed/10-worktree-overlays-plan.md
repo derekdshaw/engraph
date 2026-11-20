@@ -1,6 +1,6 @@
 # Plan 10: Separate code graphs for worktrees
 
-Read [the general information for all plans](00-general-info-plan.md)
+Read [the general information for all plans](../00-general-info-plan.md)
 before you use this plan. It gives the rules for the work and the sequence
 of the plans.
 
@@ -17,7 +17,7 @@ of the plans.
 
 ## Condition at this time (2026-11-19)
 
-The `add-auto-indexing` branch is in `main`. [Plan 05](completed/05-stable-symbol-ids-plan.md)
+The `add-auto-indexing` branch is in `main`. [Plan 05](05-stable-symbol-ids-plan.md)
 is complete, thus the symbol ids are stable (refer to "Findings").
 
 - The code graph is one graph for each repo. The project key is the path of the
@@ -241,7 +241,7 @@ a worktree would not join the base rows. Step 4 corrects it.
 
 ### Part 1: prerequisites
 
-1. ~~Do step 1 of part 2 of [plan 05](completed/05-stable-symbol-ids-plan.md) (a
+1. ~~Do step 1 of part 2 of [plan 05](05-stable-symbol-ids-plan.md) (a
    fixed `--module-version` for the standard Go driver).~~ Complete: plan 05 is
    in `docs/plans/completed/`.
 2. ~~Find out if other indexers give ids that change between commits. Do this

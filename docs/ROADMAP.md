@@ -27,12 +27,6 @@ A failed driver of a multi-manifest repo is in the summary. The code graph has n
 
 Plan: [`docs/plans/01-code-graph-bugs-plan.md`](plans/01-code-graph-bugs-plan.md). Parts 1 to 15 and 17 to 19 are complete, and the plan does not have them. The numbers of the other parts do not change.
 
-## 10. Separate code graphs for worktrees
-
-An agent in a worktree sees the base graph together with the changes of that worktree, and not the changes of other worktrees. A merge to the base branch updates the base graph and each overlay.
-
-Plan: [`docs/plans/10-worktree-overlays-plan.md`](plans/10-worktree-overlays-plan.md)
-
 ## 4. Measurement of file reads
 
 Telemetry shows the tokens that file reads use. It also shows the tokens of reads of a file that the session read before. With these data, you can decide if a change to file reads is worth the work. `engraph gain` also shows the index runs for each type of run.
