@@ -384,6 +384,77 @@ const MIGRATIONS: &[&str] = &[
         indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     "#,
+    // v20 — the overlay of each checkout (plan 10, part 3, step 8): the rows
+    // for the files whose content differs from the base commit, so a worktree
+    // sees its own code without a second index of the repo. `worktree` is the
+    // path of the checkout, which is what `git worktree list` names and what
+    // the cleanup of a removed worktree keys on.
+    //
+    // `overlay_files` is the list of files the overlay covers, deleted ones
+    // included: a base row whose file is in it is hidden from that worktree,
+    // and the overlay rows take its place. A deleted file therefore has a row
+    // here and none in `overlay_entities`, which is how it hides the base.
+    //
+    // The two row tables carry every column the lookups read (`subgraph`,
+    // `MATCH_WHERE_SQL`, the grep redirect), so the view of a worktree is a
+    // union of the base rows and these. They key on `(worktree, id)`, since
+    // one symbol id is in the base and in the overlay of each worktree that
+    // changed it; `entities.id` alone is a primary key and cannot hold more
+    // than one version. `overlay_relations` has no foreign key to `entities`
+    // on purpose (the base `relations` has one, and `foreign_keys` is ON): an
+    // overlay edge can end at a symbol that only the overlay has, which is not
+    // in `entities`. The columns the codegraph never writes (`valid_from`,
+    // `source_message_id`) are left out; `valid_to` is here because the
+    // neighborhood queries filter on it.
+    r#"
+    CREATE TABLE IF NOT EXISTS overlay_files (
+        worktree TEXT NOT NULL,
+        project TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        deleted INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (worktree, file_path)
+    );
+    CREATE INDEX IF NOT EXISTS idx_overlay_files_project ON overlay_files(project);
+
+    CREATE TABLE IF NOT EXISTS overlay_entities (
+        worktree TEXT NOT NULL,
+        id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        name TEXT NOT NULL,
+        qualified_name TEXT,
+        project TEXT,
+        file_path TEXT,
+        line_range TEXT,
+        signature TEXT,
+        scheme TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (worktree, id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_overlay_entities_kind_name
+        ON overlay_entities(worktree, kind, name);
+    CREATE INDEX IF NOT EXISTS idx_overlay_entities_qualified_name
+        ON overlay_entities(worktree, qualified_name);
+    CREATE INDEX IF NOT EXISTS idx_overlay_entities_file_path
+        ON overlay_entities(worktree, file_path);
+
+    CREATE TABLE IF NOT EXISTS overlay_relations (
+        worktree TEXT NOT NULL,
+        id TEXT NOT NULL,
+        src_entity TEXT NOT NULL,
+        dst_entity TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        provenance TEXT NOT NULL DEFAULT 'extracted'
+            CHECK (provenance IN ('extracted','inferred','ambiguous','generated')),
+        confidence REAL NOT NULL DEFAULT 1.0,
+        valid_to TEXT,
+        line INTEGER,
+        PRIMARY KEY (worktree, id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_overlay_relations_src
+        ON overlay_relations(worktree, src_entity);
+    CREATE INDEX IF NOT EXISTS idx_overlay_relations_dst
+        ON overlay_relations(worktree, dst_entity);
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {
@@ -444,6 +515,81 @@ pub fn check_drift(conn: &Connection, expected: i64) -> Result<()> {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    /// Plan 10, part 3, step 8. The overlay tables must hold what the base
+    /// tables cannot: one symbol id in several versions, and an edge to a
+    /// symbol that only one worktree has.
+    #[test]
+    fn overlay_tables_hold_a_symbol_id_per_worktree() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+
+        // The same symbol id in the base and in two worktrees: three rows,
+        // where `entities.id` alone could keep only one.
+        conn.execute(
+            "INSERT INTO entities (id, kind, name, project, file_path)
+             VALUES ('x cargo p 0.0.0 ops/f().', 'symbol', 'f', '/repo', 'src/ops.rs')",
+            [],
+        )
+        .unwrap();
+        for wt in ["/repo", "/wt/elm"] {
+            conn.execute(
+                "INSERT INTO overlay_entities (worktree, id, kind, name, project, file_path)
+                 VALUES (?1, 'x cargo p 0.0.0 ops/f().', 'symbol', 'f', '/repo', 'src/ops.rs')",
+                [wt],
+            )
+            .unwrap();
+        }
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM overlay_entities", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+
+        // One worktree cannot hold the same id twice.
+        assert!(
+            conn.execute(
+                "INSERT INTO overlay_entities (worktree, id, kind, name)
+                 VALUES ('/wt/elm', 'x cargo p 0.0.0 ops/f().', 'symbol', 'f')",
+                [],
+            )
+            .is_err()
+        );
+
+        // An overlay edge may end at a symbol only this worktree has: the base
+        // `relations` has a foreign key to `entities`, the overlay must not.
+        conn.execute(
+            "INSERT INTO overlay_relations (worktree, id, src_entity, dst_entity, kind)
+             VALUES ('/wt/elm', 'r1', 'x cargo p 0.0.0 ops/f().',
+                     'x cargo p 0.0.0 ops/only_in_elm().', 'CALLS')",
+            [],
+        )
+        .unwrap();
+        // The same edge id in another worktree is another row.
+        conn.execute(
+            "INSERT INTO overlay_relations (worktree, id, src_entity, dst_entity, kind)
+             VALUES ('/repo', 'r1', 'a', 'b', 'CALLS')",
+            [],
+        )
+        .unwrap();
+
+        // A deleted file has a row in overlay_files and none in
+        // overlay_entities: that is how it hides the base rows.
+        conn.execute(
+            "INSERT INTO overlay_files (worktree, project, file_path, deleted)
+             VALUES ('/wt/elm', '/repo', 'src/gone.rs', 1)",
+            [],
+        )
+        .unwrap();
+        let hidden: Vec<String> = conn
+            .prepare("SELECT file_path FROM overlay_files WHERE worktree = '/wt/elm'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(hidden, vec!["src/gone.rs".to_string()]);
+    }
 
     #[test]
     fn migrations_apply_idempotently() {

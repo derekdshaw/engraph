@@ -285,8 +285,13 @@ keeps the base commit safe.
 
 ### Part 3: overlays
 
-8. Add the tables `overlay_entities`, `overlay_relations`, and
-   `overlay_files`.
+8. ~~Add the tables `overlay_entities`, `overlay_relations`, and
+   `overlay_files`.~~ Complete (schema v20). `worktree` is the path of the
+   checkout, and the row tables key on `(worktree, id)`. `overlay_files` lists
+   the files of the overlay with a `deleted` flag: a deleted file has a row
+   there and none in `overlay_entities`, thus it hides the base rows.
+   `overlay_relations` has no foreign key to `entities`, because an overlay
+   edge can end at a symbol that only that worktree has.
 9. Add a function that finds the files of a checkout that are different from
    the base commit: changed, untracked, and deleted files.
 10. Add an overlay index run: index the packages that contain these files, and
