@@ -701,6 +701,124 @@ fn run_driver_to_scip(
     run_driver_into(&scip_output_dir(repo), repo, drv, go_tags)
 }
 
+/// How many narrowed runs an overlay index run is worth (plan 10, part 3,
+/// step 10). Each one starts the indexer again — rust-analyzer loads the
+/// whole workspace every time — so past a few units one run over the project
+/// is the cheaper way to the same rows. The overlay keeps the changed
+/// documents either way, so this is a question of time, never of what the
+/// worktree sees.
+pub const MAX_NARROW_RUNS: usize = 3;
+
+/// Index the overlay of the checkout at `checkout`: run the indexers over the
+/// units holding `files`, and keep the rows of those files alone (plan 10,
+/// part 3, step 10).
+///
+/// `worktree` keys the overlay; `project` is the base the rows join. An empty
+/// `files` clears the overlay without running anything — the checkout matches
+/// the base. A driver that cannot narrow, or whose units are too many
+/// (`MAX_NARROW_RUNS`), runs over the whole checkout; the overlay still keeps
+/// only the changed documents, so the rows are the same and only the time
+/// differs.
+pub fn index_overlay(
+    conn: &PooledConn,
+    checkout: &Path,
+    project: &str,
+    worktree: &str,
+    files: &[scip_loader::OverlayFile],
+    go: GoOptions,
+) -> Result<scip_loader::OverlayStats> {
+    if files.is_empty() {
+        return scip_loader::clear_overlay(conn, worktree);
+    }
+    let checkout = &checkout
+        .canonicalize()
+        .with_context(|| format!("resolving checkout path {}", checkout.display()))?;
+    let changed: Vec<&str> = files
+        .iter()
+        .filter(|f| !f.deleted)
+        .map(|f| f.path.as_str())
+        .collect();
+    if changed.is_empty() {
+        // Deletions only: no document to index, but the listing must land so
+        // the view hides the base rows.
+        return scip_loader::load_overlay(conn, project, worktree, files, &empty_index()?);
+    }
+
+    let matching: Vec<Box<dyn driver::Driver>> = driver::registry()
+        .into_iter()
+        .filter(|d| d.detect(checkout))
+        .collect();
+    if matching.is_empty() {
+        anyhow::bail!("no driver matched {}", checkout.display());
+    }
+    let out_dir = scip_output_dir(checkout);
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    for drv in &matching {
+        let runs = drv
+            .narrow(checkout, &changed)
+            .filter(|r| r.len() <= MAX_NARROW_RUNS)
+            .unwrap_or_else(|| {
+                vec![driver::NarrowRun {
+                    dir: checkout.clone(),
+                    args: Vec::new(),
+                }]
+            });
+        for run in runs {
+            match run_narrowed(&out_dir, &run, &**drv, go.tags) {
+                // A run below the repo writes paths relative to its own
+                // directory; the overlay stores repo-relative ones.
+                Ok(bytes) => match rebase_run(&bytes, checkout, &run.dir) {
+                    Ok(rebased) => parts.push(rebased),
+                    Err(e) => tracing::warn!(error = %e, "overlay: rebasing documents failed"),
+                },
+                Err(e) => tracing::warn!(
+                    driver = drv.name(),
+                    dir = %run.dir.display(),
+                    error = %e,
+                    "overlay: narrowed run failed; continuing",
+                ),
+            }
+        }
+    }
+    if parts.is_empty() {
+        anyhow::bail!("every indexer failed for the overlay of {worktree}");
+    }
+    let merged = if parts.len() == 1 {
+        parts.into_iter().next().unwrap()
+    } else {
+        bazel_symbols::merge_scip_bytes(&parts)?
+    };
+    scip_loader::load_overlay(conn, project, worktree, files, &merged)
+}
+
+/// `run_driver_into` with a narrowed run's directory and extra arguments.
+fn run_narrowed(
+    out_dir: &Path,
+    run: &driver::NarrowRun,
+    drv: &dyn driver::Driver,
+    go_tags: Option<&str>,
+) -> Result<Vec<u8>> {
+    if run.args.is_empty() {
+        return run_driver_into(out_dir, &run.dir, drv, go_tags);
+    }
+    run_driver_into_with_args(out_dir, &run.dir, drv, go_tags, &run.args)
+}
+
+/// Document paths of a run started at `dir` made repo-relative to `checkout`.
+fn rebase_run(bytes: &[u8], checkout: &Path, dir: &Path) -> Result<Vec<u8>> {
+    let prefix = dir.strip_prefix(checkout).unwrap_or(Path::new(""));
+    if prefix.as_os_str().is_empty() {
+        return Ok(bytes.to_vec());
+    }
+    bazel_symbols::rebase_subtree_documents(bytes, prefix, dir)
+}
+
+/// An empty SCIP index, for an overlay of deletions alone.
+fn empty_index() -> Result<Vec<u8>> {
+    use protobuf::Message;
+    Ok(scip::types::Index::new().write_to_bytes()?)
+}
+
 /// `run_driver_to_scip` with the output directory given, so a test does not
 /// write under the user's data directory.
 fn run_driver_into(
@@ -709,10 +827,23 @@ fn run_driver_into(
     drv: &dyn driver::Driver,
     go_tags: Option<&str>,
 ) -> Result<Vec<u8>> {
+    run_driver_into_with_args(out_dir, repo, drv, go_tags, &[])
+}
+
+/// `run_driver_into` with extra arguments appended to the driver's command,
+/// for a narrowed run that limits the indexer by pattern (scip-go).
+fn run_driver_into_with_args(
+    out_dir: &Path,
+    repo: &Path,
+    drv: &dyn driver::Driver,
+    go_tags: Option<&str>,
+    extra: &[String],
+) -> Result<Vec<u8>> {
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("creating SCIP output dir {}", out_dir.display()))?;
     let scip_path = out_dir.join("index.scip");
     let mut cmd = drv.command(repo, &scip_path);
+    cmd.args(extra);
     drv.set_go_tags(&mut cmd, go_tags);
     tracing::info!(driver = drv.name(), ?cmd, "running SCIP indexer");
     // Capture rather than inherit: rust-analyzer is noisy on stderr (load

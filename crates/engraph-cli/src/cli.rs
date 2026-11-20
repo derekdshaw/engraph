@@ -223,6 +223,13 @@ pub(crate) enum Cmd {
         /// SessionStart hook runs this in the background.
         #[arg(long, conflicts_with_all = ["scip", "scip_manifest", "lang", "project", "workspace", "recursive"])]
         if_changed: bool,
+        /// Index this checkout's **overlay**: the files that differ from the
+        /// base commit, and only those. The indexers run over the crates,
+        /// packages or modules holding those files, and the rows land under
+        /// this checkout, so the graph every other worktree reads is
+        /// unchanged. A checkout that matches the base clears its overlay.
+        #[arg(long, conflicts_with_all = ["scip", "scip_manifest", "lang", "project", "workspace", "recursive", "if_changed"])]
+        overlay: bool,
         /// Mark this `--if-changed` run as started automatically (the
         /// SessionStart hook passes it): its telemetry event is recorded with
         /// filter `auto` instead of `if_changed`.

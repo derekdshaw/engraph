@@ -1172,6 +1172,40 @@ run's own error exit, so the hook's firing rate and cost are always visible.
 A dry run records nothing. Plain `engraph index <repo>` keeps its one row per
 run keyed by driver name.
 
+### 8.0.1a Overlay index runs (`engraph index --overlay`)
+
+An overlay run indexes what a checkout changed, not the repo. It asks
+`divergence::overlay_files` which files differ from the base commit (§8.0.1),
+runs the indexers over the units holding them, and loads **only those
+documents** into `overlay_*` under the checkout's path
+(`index::index_overlay` → `scip_loader::load_overlay`). Every unchanged file
+keeps its base rows, which the worktree's view reads. A checkout that matches
+the base clears its overlay (`clear_overlay`); deletions alone still write the
+`overlay_files` listing, since that is what hides the base rows.
+
+**One loader, two destinations.** `scip_loader::RowSink` is `Base` or
+`Overlay { worktree }`, and `load_document` — definition anchors with their
+specificity tiebreaks, CALLS/REFERENCES resolution, `enclosing_range`
+locations — stays a single implementation that both use, so the two can't
+drift. The overlay sink differs in one rule: it writes a stub row only for a
+symbol the base does not have, so an overlay never copies the external symbols
+an unchanged dependency names. Overlay edges to base symbols are the normal
+case (34 of 47 in the Go fixture), which is why `overlay_relations` has no
+foreign key (§12.1 v20).
+
+**Narrowing.** `Driver::narrow` returns the runs covering the changed files:
+one per crate (rust-analyzer), package (scip-typescript), or Maven/Gradle
+module (scip-java); scip-go instead runs once in the module root with a
+`./<dir>/...` pattern per changed directory, since a package below it has no
+`go.mod`; scip-python does not narrow. Narrowing is id-safe — a narrowed run
+emits a subset of the full run's ids, verified per indexer (plan 10,
+"Findings") — which is what lets overlay rows join base rows. Above
+`index::MAX_NARROW_RUNS` (3) units the run falls back to one pass over the
+checkout: each narrowed run restarts the indexer, and the resulting rows are
+identical either way, so the threshold trades time only. A run started below
+the repo writes paths relative to its own directory and is rebased to
+repo-relative before loading.
+
 ### 8.0.2 One index run per project
 
 Every index run — explicit, `--if-changed`, manifest, or each project of a

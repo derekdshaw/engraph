@@ -294,6 +294,141 @@ pub fn load(conn: &PooledConn, project: &str, scip_bytes: &[u8]) -> Result<LoadS
     load_with_options(conn, project, scip_bytes, LoadOptions::default())
 }
 
+/// A file of a checkout whose content differs from the base commit, thus a
+/// file of that checkout's overlay (plan 10, part 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayFile {
+    /// Repo-relative, `/`-separated, as `entities.file_path` stores it.
+    pub path: String,
+    /// The checkout does not have the file, but the base does. It gets no
+    /// overlay rows; the row in `overlay_files` hides the base rows.
+    pub deleted: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayStats {
+    pub entities_inserted: usize,
+    pub relations_inserted: usize,
+    /// Documents of the SCIP blob that the overlay kept — the changed files.
+    pub documents_loaded: usize,
+    /// Files of the overlay, deleted ones included.
+    pub files: usize,
+}
+
+/// Remove the overlay of `worktree`: its checkout matches the base, so every
+/// lookup from it reads base rows.
+pub fn clear_overlay(conn: &PooledConn, worktree: &str) -> Result<OverlayStats> {
+    for sql in [
+        "DELETE FROM overlay_entities WHERE worktree = ?1",
+        "DELETE FROM overlay_relations WHERE worktree = ?1",
+        "DELETE FROM overlay_files WHERE worktree = ?1",
+    ] {
+        conn.execute(sql, [worktree])?;
+    }
+    Ok(OverlayStats::default())
+}
+
+/// Replace the overlay of `worktree` with the rows of `files` (plan 10, part
+/// 3, step 10).
+///
+/// `scip_bytes` is the output of an index run in that checkout, with
+/// repo-relative document paths. Only the documents of `files` are loaded:
+/// the run analyses whole packages, because SCIP indexers do, but every
+/// unchanged file keeps its base rows, which the view of the worktree reads.
+/// A deleted file has no document and gets a row in `overlay_files` alone,
+/// which is what hides its base rows.
+///
+/// The overlay of a checkout is replaced whole, not merged: `files` is what
+/// differs from the base now, so a file that stopped differing must lose its
+/// rows. One transaction, as the base load.
+pub fn load_overlay(
+    conn: &PooledConn,
+    project: &str,
+    worktree: &str,
+    files: &[OverlayFile],
+    scip_bytes: &[u8],
+) -> Result<OverlayStats> {
+    let mut index = Index::parse_from_bytes(scip_bytes).context("decoding SCIP protobuf")?;
+    scope_local_symbols(&mut index, project);
+    normalize_index(&mut index, project);
+
+    let wanted: HashSet<&str> = files
+        .iter()
+        .filter(|f| !f.deleted)
+        .map(|f| f.path.as_str())
+        .collect();
+
+    // The kind of every symbol, as the base load gathers it: the CALLS vs
+    // REFERENCES choice reads the *target* symbol's kind, which often lives
+    // in a document this overlay does not keep.
+    let mut sym_kind: HashMap<String, SymKind> = HashMap::new();
+    let mut current_symbols: HashSet<String> = HashSet::new();
+    for doc in &index.documents {
+        for s in &doc.symbols {
+            if !s.symbol.is_empty() {
+                current_symbols.insert(s.symbol.clone());
+                sym_kind.insert(s.symbol.clone(), enum_or_unspecified(&s.kind));
+            }
+        }
+    }
+    for s in &index.external_symbols {
+        if !s.symbol.is_empty() {
+            sym_kind
+                .entry(s.symbol.clone())
+                .or_insert_with(|| enum_or_unspecified(&s.kind));
+        }
+    }
+    let multi_document = MultiDocument::of(&index);
+    let schemes = LoadSchemes::of(&index, &current_symbols);
+
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let mut guard = TxGuard { conn, done: false };
+    for sql in [
+        "DELETE FROM overlay_entities WHERE worktree = ?1",
+        "DELETE FROM overlay_relations WHERE worktree = ?1",
+        "DELETE FROM overlay_files WHERE worktree = ?1",
+    ] {
+        conn.execute(sql, [worktree])?;
+    }
+    {
+        let mut ins = conn.prepare_cached(
+            "INSERT INTO overlay_files (worktree, project, file_path, deleted)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for f in files {
+            ins.execute(rusqlite::params![worktree, project, f.path, f.deleted])?;
+        }
+    }
+
+    let sink = RowSink::Overlay { worktree };
+    let mut stats = LoadStats::default();
+    let mut documents_loaded = 0usize;
+    for doc in &index.documents {
+        if !wanted.contains(doc.relative_path.as_str()) {
+            continue;
+        }
+        documents_loaded += 1;
+        stats.documents_seen += 1;
+        load_document(
+            conn,
+            project,
+            doc,
+            &sym_kind,
+            &multi_document,
+            &schemes,
+            &sink,
+            &mut stats,
+        )?;
+    }
+    guard.commit()?;
+    Ok(OverlayStats {
+        entities_inserted: stats.entities_inserted,
+        relations_inserted: stats.relations_inserted,
+        documents_loaded,
+        files: files.len(),
+    })
+}
+
 pub fn load_with_options(
     conn: &PooledConn,
     project: &str,
@@ -425,6 +560,7 @@ pub fn load_with_options(
             &sym_kind,
             &multi_document,
             &schemes,
+            &RowSink::Base,
             &mut stats,
         )?;
     }
@@ -456,6 +592,7 @@ fn prune_stale_symbols(conn: &PooledConn, project: &str, prefix: &str) -> Result
     Ok(pruned)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn load_document(
     conn: &PooledConn,
     project: &str,
@@ -463,6 +600,7 @@ fn load_document(
     sym_kind: &HashMap<String, SymKind>,
     multi_document: &MultiDocument,
     schemes: &LoadSchemes,
+    sink: &RowSink<'_>,
     stats: &mut LoadStats,
 ) -> Result<()> {
     // Insert one entity per SymbolInformation in this doc. We capture
@@ -493,24 +631,13 @@ fn load_document(
     }
 
     // Insert/upsert one entity row per SymbolInformation in this document.
-    // On conflict we claim ownership: a real definition takes the `project`
-    // away from any earlier placeholder. Phase 2.2 relies on this so that
+    // In the base, a conflict claims ownership: a real definition takes the
+    // `project` away from any earlier placeholder. Phase 2.2 relies on that so
     // `entities.project` always names the *defining* repo, never the first
     // referrer. The name is replaced too: the existing row may be a
     // placeholder a reference wrote (`ensure_placeholder_entity`, which only
-    // guesses from the id), or a row an older loader named differently.
-    let mut entity_insert = conn.prepare_cached(
-        "INSERT INTO entities (id, kind, name, qualified_name, project, file_path, line_range, signature, scheme)
-         VALUES (?1, 'symbol', ?2, ?7, ?3, ?4, ?5, ?6, ?8)
-         ON CONFLICT(id) DO UPDATE SET
-            name = excluded.name,
-            qualified_name = excluded.qualified_name,
-            project = excluded.project,
-            scheme = COALESCE(excluded.scheme, entities.scheme),
-            file_path = COALESCE(excluded.file_path, entities.file_path),
-            line_range = COALESCE(excluded.line_range, entities.line_range),
-            signature = COALESCE(excluded.signature, entities.signature)",
-    )?;
+    // guesses from the id), or a row an older loader named differently. The
+    // sink holds the statement for its table (`RowSink::entity`).
     for s in &doc.symbols {
         if s.symbol.is_empty() {
             continue;
@@ -537,16 +664,19 @@ fn load_document(
             },
         };
         let signature = signature_text(s);
-        entity_insert.execute(rusqlite::params![
-            &s.symbol,
-            &display_name,
-            project,
-            file_path,
-            line_range,
-            signature,
-            names.qualified,
-            symbol_scheme(&s.symbol, doc_scheme),
-        ])?;
+        sink.entity(
+            conn,
+            &EntityRow {
+                id: &s.symbol,
+                name: &display_name,
+                qualified: names.qualified.as_deref(),
+                project,
+                file_path: file_path.as_deref(),
+                line_range: line_range.as_deref(),
+                signature: signature.as_deref(),
+                scheme: symbol_scheme(&s.symbol, doc_scheme),
+            },
+        )?;
         stats.entities_inserted += 1;
 
         // Relationship-derived edges. is_implementation → IMPLEMENTS,
@@ -556,9 +686,9 @@ fn load_document(
             if rel.symbol.is_empty() {
                 continue;
             }
-            ensure_placeholder_entity(conn, &rel.symbol, project, doc_scheme)?;
+            sink.placeholder(conn, &rel.symbol, project, doc_scheme)?;
             if rel.is_implementation {
-                insert_relation(
+                sink.relation(
                     conn,
                     &s.symbol,
                     &rel.symbol,
@@ -568,7 +698,7 @@ fn load_document(
                 )?;
                 stats.relations_inserted += 1;
             } else if rel.is_reference {
-                insert_relation(
+                sink.relation(
                     conn,
                     &s.symbol,
                     &rel.symbol,
@@ -640,7 +770,7 @@ fn load_document(
         // Insert a placeholder entity row for it so the FK holds; the real
         // row (if present elsewhere in this Index) will overwrite via
         // ON CONFLICT.
-        ensure_placeholder_entity(conn, &occ.symbol, project, doc_scheme)?;
+        sink.placeholder(conn, &occ.symbol, project, doc_scheme)?;
 
         let target_kind = sym_kind.get(&occ.symbol).copied();
         let provenance = if role_set(roles, SymbolRole::Generated) {
@@ -680,10 +810,10 @@ fn load_document(
         // files, so its line would point into the wrong file.
         let line = (!multi_document.contains(&src_sym)).then_some(start_line + 1);
         if !listed.contains(src_sym.as_str()) && !unlisted_with_row.contains(&src_sym) {
-            ensure_placeholder_entity(conn, &src_sym, project, doc_scheme)?;
+            sink.placeholder(conn, &src_sym, project, doc_scheme)?;
             unlisted_with_row.insert(src_sym.clone());
         }
-        insert_relation(conn, &src_sym, &occ.symbol, rel_kind, provenance, line)?;
+        sink.relation(conn, &src_sym, &occ.symbol, rel_kind, provenance, line)?;
         stats.relations_inserted += 1;
     }
 
@@ -785,25 +915,168 @@ fn nearest_enclosing(
     best.map(|(_, _, s)| s.to_string())
 }
 
-/// `line`: the 1-based line of the occurrence the edge comes from, in the
-/// document of `src`; `None` for an edge from a `SymbolInformation`
-/// relationship, which has no occurrence, and for a `src` defined in more
-/// than one document.
-fn insert_relation(
-    conn: &PooledConn,
-    src: &str,
-    dst: &str,
-    kind: RelationKind,
-    provenance: &str,
-    line: Option<i32>,
-) -> Result<()> {
-    let id = Uuid::now_v7().to_string();
-    conn.execute(
-        "INSERT INTO relations (id, src_entity, dst_entity, kind, provenance, confidence, line)
-         VALUES (?1, ?2, ?3, ?4, ?5, 1.0, ?6)",
-        rusqlite::params![id, src, dst, kind.as_str(), provenance, line],
-    )?;
-    Ok(())
+/// One symbol row as `load_document` computes it, before a sink files it in
+/// the base tables or in the overlay of a worktree.
+pub(crate) struct EntityRow<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) name: &'a str,
+    pub(crate) qualified: Option<&'a str>,
+    pub(crate) project: &'a str,
+    pub(crate) file_path: Option<&'a str>,
+    pub(crate) line_range: Option<&'a str>,
+    pub(crate) signature: Option<&'a str>,
+    pub(crate) scheme: Option<&'a str>,
+}
+
+/// Where a load files its rows. `load_document` computes the same rows for
+/// both — the anchor heuristics, the relation kinds and the locations are one
+/// implementation — and the sink decides the table (plan 10, part 3, step 10).
+pub(crate) enum RowSink<'a> {
+    /// `entities` and `relations`: the base graph of the project.
+    Base,
+    /// `overlay_entities` and `overlay_relations` of one checkout.
+    Overlay { worktree: &'a str },
+}
+
+impl RowSink<'_> {
+    /// Upsert the symbol row. The base claims ownership of a placeholder a
+    /// reference wrote (`project`, and the name an older loader derived); the
+    /// overlay row belongs to its worktree alone, so it replaces in place.
+    fn entity(&self, conn: &PooledConn, row: &EntityRow<'_>) -> Result<()> {
+        match self {
+            RowSink::Base => {
+                let mut stmt = conn.prepare_cached(
+                    "INSERT INTO entities (id, kind, name, qualified_name, project, file_path, line_range, signature, scheme)
+                     VALUES (?1, 'symbol', ?2, ?7, ?3, ?4, ?5, ?6, ?8)
+                     ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        qualified_name = excluded.qualified_name,
+                        project = excluded.project,
+                        scheme = COALESCE(excluded.scheme, entities.scheme),
+                        file_path = COALESCE(excluded.file_path, entities.file_path),
+                        line_range = COALESCE(excluded.line_range, entities.line_range),
+                        signature = COALESCE(excluded.signature, entities.signature)",
+                )?;
+                stmt.execute(rusqlite::params![
+                    row.id,
+                    row.name,
+                    row.project,
+                    row.file_path,
+                    row.line_range,
+                    row.signature,
+                    row.qualified,
+                    row.scheme,
+                ])?;
+            }
+            RowSink::Overlay { worktree } => {
+                let mut stmt = conn.prepare_cached(
+                    "INSERT INTO overlay_entities (worktree, id, kind, name, qualified_name, project, file_path, line_range, signature, scheme)
+                     VALUES (?9, ?1, 'symbol', ?2, ?7, ?3, ?4, ?5, ?6, ?8)
+                     ON CONFLICT(worktree, id) DO UPDATE SET
+                        name = excluded.name,
+                        qualified_name = excluded.qualified_name,
+                        project = excluded.project,
+                        scheme = COALESCE(excluded.scheme, overlay_entities.scheme),
+                        file_path = COALESCE(excluded.file_path, overlay_entities.file_path),
+                        line_range = COALESCE(excluded.line_range, overlay_entities.line_range),
+                        signature = COALESCE(excluded.signature, overlay_entities.signature)",
+                )?;
+                stmt.execute(rusqlite::params![
+                    row.id,
+                    row.name,
+                    row.project,
+                    row.file_path,
+                    row.line_range,
+                    row.signature,
+                    row.qualified,
+                    row.scheme,
+                    worktree,
+                ])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `line`: the 1-based line of the occurrence the edge comes from, in the
+    /// document of `src`; `None` for an edge from a `SymbolInformation`
+    /// relationship, which has no occurrence, and for a `src` defined in more
+    /// than one document.
+    fn relation(
+        &self,
+        conn: &PooledConn,
+        src: &str,
+        dst: &str,
+        kind: RelationKind,
+        provenance: &str,
+        line: Option<i32>,
+    ) -> Result<()> {
+        let id = Uuid::now_v7().to_string();
+        match self {
+            RowSink::Base => {
+                conn.execute(
+                    "INSERT INTO relations (id, src_entity, dst_entity, kind, provenance, confidence, line)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 1.0, ?6)",
+                    rusqlite::params![id, src, dst, kind.as_str(), provenance, line],
+                )?;
+            }
+            RowSink::Overlay { worktree } => {
+                conn.execute(
+                    "INSERT INTO overlay_relations (worktree, id, src_entity, dst_entity, kind, provenance, confidence, line)
+                     VALUES (?7, ?1, ?2, ?3, ?4, ?5, 1.0, ?6)",
+                    rusqlite::params![id, src, dst, kind.as_str(), provenance, line, worktree],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A stub row for a symbol this load references but no document defines.
+    ///
+    /// The base needs one for every such symbol: `relations` has a foreign key
+    /// to `entities`. The overlay has no foreign key (schema v20), and the
+    /// view of a worktree falls back to the base rows, so it writes a stub
+    /// only for a symbol the base does not have — a symbol this worktree
+    /// introduced. Without that rule every external symbol an unchanged
+    /// dependency names would be copied into every overlay.
+    fn placeholder(
+        &self,
+        conn: &PooledConn,
+        sym: &str,
+        project: &str,
+        doc_scheme: Option<&str>,
+    ) -> Result<()> {
+        match self {
+            RowSink::Base => ensure_placeholder_entity(conn, sym, project, doc_scheme),
+            RowSink::Overlay { worktree } => {
+                let in_base: bool = conn
+                    .prepare_cached("SELECT 1 FROM entities WHERE id = ?1")?
+                    .exists([sym])?;
+                if in_base {
+                    return Ok(());
+                }
+                let names = symbol_names(sym);
+                conn.execute(
+                    "INSERT INTO overlay_entities (worktree, id, kind, name, qualified_name, project, scheme)
+                     VALUES (?1, ?2, 'symbol', ?3, ?4, ?5, ?6)
+                     ON CONFLICT(worktree, id) DO UPDATE SET
+                        name = excluded.name,
+                        qualified_name = excluded.qualified_name
+                      WHERE overlay_entities.file_path IS NULL
+                        AND (overlay_entities.name IS NOT excluded.name
+                             OR overlay_entities.qualified_name IS NOT excluded.qualified_name)",
+                    rusqlite::params![
+                        worktree,
+                        sym,
+                        names.name,
+                        names.qualified,
+                        project,
+                        symbol_scheme(sym, doc_scheme)
+                    ],
+                )?;
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Insert a stub entity row for a referenced symbol that we haven't seen a

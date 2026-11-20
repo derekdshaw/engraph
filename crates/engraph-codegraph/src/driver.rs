@@ -18,6 +18,65 @@ pub trait Driver: Send + Sync {
     fn command(&self, repo: &Path, out: &Path) -> Command;
     /// Give the run's `--go-tags` to `cmd`. Only scip-go takes them.
     fn set_go_tags(&self, _cmd: &mut Command, _tags: Option<&str>) {}
+
+    /// The runs that cover `files` (repo-relative) without indexing the rest
+    /// of `repo`, for an overlay index run (plan 10, part 3, step 10).
+    /// `None` when this indexer has no unit below the repo — the caller then
+    /// indexes the repo as usual and keeps only the changed documents.
+    ///
+    /// Narrowing is safe for the symbol ids: the ids of a narrowed run are
+    /// the ids of the full run for the same code, verified per indexer
+    /// (plan 10, "Findings"). A narrowed run sees fewer symbols, never other
+    /// ones, so its rows join the base rows.
+    fn narrow(&self, _repo: &Path, _files: &[&str]) -> Option<Vec<NarrowRun>> {
+        None
+    }
+}
+
+/// One narrowed index run: where to start it, and the arguments that limit it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NarrowRun {
+    /// The directory the indexer runs in and indexes — a crate, a package, or
+    /// a module below the repo, or the repo itself when `args` do the
+    /// limiting.
+    pub dir: std::path::PathBuf,
+    /// Extra arguments appended to the driver's command, for an indexer that
+    /// takes patterns instead of a directory (scip-go).
+    pub args: Vec<String>,
+}
+
+/// The directory of the unit containing `file`: the nearest ancestor at or
+/// below `repo` holding one of `markers`. `None` when only `repo` itself has
+/// one — there is nothing to narrow to.
+fn unit_dir(repo: &Path, file: &str, markers: &[&str]) -> Option<std::path::PathBuf> {
+    let mut dir = repo.join(file).parent()?.to_path_buf();
+    while dir.starts_with(repo) && dir != repo {
+        if markers.iter().any(|m| dir.join(m).is_file()) {
+            return Some(dir);
+        }
+        dir = dir.parent()?.to_path_buf();
+    }
+    None
+}
+
+/// One run per unit the changed files fall in, or `None` when any file is
+/// outside a unit (it needs the whole repo anyway).
+fn runs_per_unit(repo: &Path, files: &[&str], markers: &[&str]) -> Option<Vec<NarrowRun>> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    for f in files {
+        let dir = unit_dir(repo, f, markers)?;
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    (!dirs.is_empty()).then(|| {
+        dirs.into_iter()
+            .map(|dir| NarrowRun {
+                dir,
+                args: Vec::new(),
+            })
+            .collect()
+    })
 }
 
 pub fn registry() -> Vec<Box<dyn Driver>> {
@@ -38,6 +97,12 @@ pub struct RustAnalyzer;
 impl Driver for RustAnalyzer {
     fn name(&self) -> &'static str {
         "rust-analyzer"
+    }
+    /// One run per crate: rust-analyzer started in a workspace member indexes
+    /// that member, with the other crates as dependencies, and gives the
+    /// member's symbols the ids the workspace run gives them.
+    fn narrow(&self, repo: &Path, files: &[&str]) -> Option<Vec<NarrowRun>> {
+        runs_per_unit(repo, files, &["Cargo.toml"])
     }
     fn detect(&self, repo: &Path) -> bool {
         repo.join("Cargo.toml").is_file()
@@ -249,6 +314,31 @@ impl Driver for ScipGo {
     fn name(&self) -> &'static str {
         "scip-go"
     }
+    /// scip-go takes package patterns, not a directory: a run in a package
+    /// below the module root has no `go.mod` to work from. One run in the
+    /// module root with `./<dir>/...` for each directory holding a changed
+    /// file, which gives those packages the ids the whole-module run gives
+    /// them. A changed file at the module root makes `./...`, which narrows
+    /// nothing, so there is no run to give.
+    fn narrow(&self, repo: &Path, files: &[&str]) -> Option<Vec<NarrowRun>> {
+        let mut args: Vec<String> = Vec::new();
+        for f in files {
+            let dir = Path::new(f).parent()?;
+            if dir.as_os_str().is_empty() {
+                return None;
+            }
+            let pattern = format!("./{}/...", dir.to_string_lossy().replace('\\', "/"));
+            if !args.contains(&pattern) {
+                args.push(pattern);
+            }
+        }
+        (!args.is_empty()).then(|| {
+            vec![NarrowRun {
+                dir: repo.to_path_buf(),
+                args,
+            }]
+        })
+    }
     fn detect(&self, repo: &Path) -> bool {
         repo.join("go.mod").is_file() || repo.join("go.work").is_file()
     }
@@ -423,6 +513,12 @@ impl Driver for ScipTypescript {
     fn name(&self) -> &'static str {
         "scip-typescript"
     }
+    /// One run per package: scip-typescript started in a package indexes its
+    /// `tsconfig.json` project, with package-relative document paths that the
+    /// caller rebases.
+    fn narrow(&self, repo: &Path, files: &[&str]) -> Option<Vec<NarrowRun>> {
+        runs_per_unit(repo, files, &["tsconfig.json"])
+    }
     fn detect(&self, repo: &Path) -> bool {
         repo.join("package.json").is_file() && repo.join("tsconfig.json").is_file()
     }
@@ -438,6 +534,16 @@ pub struct ScipJava;
 impl Driver for ScipJava {
     fn name(&self) -> &'static str {
         "scip-java"
+    }
+    /// One run per module: scip-java started in a Maven or Gradle module
+    /// builds that module alone and gives its symbols the ids the whole
+    /// reactor gives them.
+    fn narrow(&self, repo: &Path, files: &[&str]) -> Option<Vec<NarrowRun>> {
+        runs_per_unit(
+            repo,
+            files,
+            &["pom.xml", "build.gradle", "build.gradle.kts"],
+        )
     }
     fn detect(&self, repo: &Path) -> bool {
         // scip-java's `index` command auto-detects {Maven, Gradle, sbt, mill}.
@@ -940,5 +1046,66 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ts_args(flow.path(), &all), plain);
+    }
+
+    /// Plan 10, part 3, step 10: a narrowed run covers the changed files
+    /// without indexing the rest of the repo.
+    #[test]
+    fn rust_narrows_to_the_crates_holding_the_changed_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        std::fs::write(repo.join("Cargo.toml"), "[workspace]\n").unwrap();
+        for c in ["alpha", "beta"] {
+            let crate_dir = repo.join("crates").join(c);
+            std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+            std::fs::write(crate_dir.join("Cargo.toml"), "[package]\n").unwrap();
+        }
+        // Two crates changed: one run each, in the crate directories.
+        let runs = RustAnalyzer
+            .narrow(repo, &["crates/alpha/src/lib.rs", "crates/beta/src/lib.rs"])
+            .unwrap();
+        assert_eq!(
+            runs.iter().map(|r| r.dir.clone()).collect::<Vec<_>>(),
+            vec![repo.join("crates/alpha"), repo.join("crates/beta")]
+        );
+        assert!(runs.iter().all(|r| r.args.is_empty()));
+
+        // Two files of one crate are one run.
+        let runs = RustAnalyzer
+            .narrow(
+                repo,
+                &["crates/alpha/src/lib.rs", "crates/alpha/src/other.rs"],
+            )
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+
+        // A file that belongs to no crate below the repo cannot be narrowed:
+        // the run must cover the repo.
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        assert_eq!(RustAnalyzer.narrow(repo, &["src/main.rs"]), None);
+    }
+
+    #[test]
+    fn go_narrows_by_package_pattern_from_the_module_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let runs = ScipGo.narrow(repo, &["ops/ops.go", "models/m.go", "ops/more.go"]);
+        let runs = runs.unwrap();
+        assert_eq!(runs.len(), 1, "scip-go runs once, in the module root");
+        assert_eq!(runs[0].dir, repo);
+        assert_eq!(
+            runs[0].args,
+            vec!["./ops/...".to_string(), "./models/...".to_string()]
+        );
+        // A file in the module root would make `./...`, which narrows nothing.
+        assert_eq!(ScipGo.narrow(repo, &["main.go"]), None);
+    }
+
+    /// scip-python has no unit below its project: the overlay run indexes the
+    /// project and keeps the changed documents.
+    #[test]
+    fn python_does_not_narrow() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(ScipPython.narrow(dir.path(), &["pkg/mod.py"]), None);
     }
 }

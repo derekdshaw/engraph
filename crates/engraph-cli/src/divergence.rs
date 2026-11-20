@@ -117,19 +117,7 @@ fn untracked_files(top: &Path, pathspecs: &[&str]) -> Vec<String> {
     }
 }
 
-/// A file of a checkout whose content differs from the base commit, thus a
-/// file of that checkout's overlay (plan 10, part 3).
-// The overlay index run of step 10 is the first caller; until it lands, only
-// the tests of this module use it. Remove the allow with that step.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OverlayFile {
-    /// Repo-relative, `/`-separated, as `entities.file_path` stores it.
-    pub(crate) path: String,
-    /// The checkout does not have the file, but the base does. It gets no
-    /// overlay rows; the row in `overlay_files` hides the base rows.
-    pub(crate) deleted: bool,
-}
+pub(crate) use engraph_codegraph::OverlayFile;
 
 /// The files of the checkout containing `checkout` that differ from the base
 /// commit of `project`: changed, untracked (and not ignored), and deleted, in
@@ -147,8 +135,6 @@ pub(crate) struct OverlayFile {
 /// for a base before it asks what differs from one. A subtree whose commit git
 /// cannot resolve counts every tracked file under it as changed (plan 10,
 /// decision 3): a full overlay, which the next refresh of the base heals.
-// First caller: the overlay index run of step 10 (see `OverlayFile`).
-#[allow(dead_code)]
 pub(crate) fn overlay_files(
     conn: &db::PooledConn,
     project: &str,

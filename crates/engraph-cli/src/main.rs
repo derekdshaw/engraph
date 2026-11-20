@@ -287,6 +287,7 @@ async fn main() -> Result<()> {
             dry_run,
             if_changed,
             auto,
+            overlay,
         } => {
             let start = Instant::now();
             let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
@@ -323,7 +324,52 @@ async fn main() -> Result<()> {
             } else {
                 workspace.clone()
             };
-            if if_changed {
+            if overlay {
+                // The overlay of this checkout: only the files that differ
+                // from the base commit, under this checkout's key, so no
+                // other worktree's view changes.
+                let project = canonical_repo_key(&repo);
+                let worktree = git_current_toplevel(&repo)
+                    .and_then(|t| t.canonicalize().ok())
+                    .map(|t| t.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| repo.to_string_lossy().into_owned());
+                let files = divergence::overlay_files(&conn, &project, &repo);
+                if dry_run {
+                    println!(
+                        "dry-run: overlay of {worktree}: {} file(s) differ from the base",
+                        files.len()
+                    );
+                    for f in files.iter().take(20) {
+                        println!("  {}{}", f.path, if f.deleted { " (deleted)" } else { "" });
+                    }
+                } else {
+                    let _lock = engraph_codegraph::acquire_index_lock_wait(&project)?;
+                    let stats = engraph_codegraph::index_overlay(
+                        &conn, &repo, &project, &worktree, &files, go,
+                    )?;
+                    println!(
+                        "overlay {worktree}: {} file(s), {} document(s) indexed, {} entities, \
+                         {} relations ({}ms)",
+                        stats.files,
+                        stats.documents_loaded,
+                        stats.entities_inserted,
+                        stats.relations_inserted,
+                        start.elapsed().as_millis()
+                    );
+                    telemetry::record_event(
+                        &conn,
+                        EventInput {
+                            session_id: session_id.as_deref(),
+                            kind: EventKind::Index,
+                            feature: "codegraph_index",
+                            filter_id: Some("overlay"),
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            latency_ms: start.elapsed().as_millis() as i64,
+                        },
+                    )?;
+                }
+            } else if if_changed {
                 // Refresh only the recorded parts of this repo's index whose
                 // files moved on since their index commit. Nothing recorded
                 // means the repo was never indexed by hand; leave it alone.

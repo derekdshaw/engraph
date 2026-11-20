@@ -192,6 +192,29 @@ scip-typescript, scip-java):
 - **The same code at another path gives the same ids,** if the index runs use
   one project key (`engraph index --project`).
 
+### Part 3, step 10: a narrowed index run gives the same ids (2026-11-20)
+
+An overlay run indexes only the unit (crate, package, module) that holds a
+changed file. The test indexed a unit alone and compared the ids of its
+symbols with the ids of a run over the whole project:
+
+| Indexer | Narrowed unit | Ids the same | Blob |
+|---|---|---|---|
+| scip-go | `./ops/...` | 35 of 35 | 59 of 137 monikers |
+| rust-analyzer | one workspace member | 7 of 7 | 11 of 25 |
+| scip-typescript | one package | 6 of 6 | 6 of 14 |
+| scip-python | the package directory | 35 of 35 | 136 of 136 |
+| scip-java | one Maven module | 10 of 10 | 12 of 23 |
+
+A narrowed run gives a subset of the ids of the full run, never other ids, thus
+the overlay rows join the base rows. The symbols of other units that the
+narrowed run names (a dependency) also have the ids of the full run.
+
+scip-python is the exception for the *saving*, not for the ids: it has no unit
+below its project (it indexed the same 136 monikers from the package
+directory), thus its overlay runs index the project and keep the changed
+documents.
+
 Thus, the overlay design is correct: the base rows and the overlay rows join,
 and no language needs an overlay of all its files.
 
@@ -301,8 +324,25 @@ keeps the base commit safe.
    (`--no-renames`), which is what an overlay stores. A subtree whose commit
    git cannot resolve gives every tracked file under it, which is the full
    overlay of decision 3.
-10. Add an overlay index run: index the packages that contain these files, and
-    load only the documents of these files into the overlay of the checkout.
+10. ~~Add an overlay index run: index the packages that contain these files, and
+    load only the documents of these files into the overlay of the checkout.~~
+    Complete: `engraph index --overlay`, `index::index_overlay` and
+    `scip_loader::load_overlay`.
+
+    One loader, two destinations: `scip_loader::RowSink` is `Base` or
+    `Overlay { worktree }`, and `load_document` — the anchor heuristics, the
+    relation kinds, the locations — has one implementation for both. The
+    overlay sink writes a stub row only for a symbol the base does not have,
+    thus an overlay does not copy the external symbols of unchanged code.
+
+    `Driver::narrow` gives the runs that cover the changed files: one per
+    crate (rust-analyzer), package (scip-typescript) or module (scip-java),
+    and one run with `./<dir>/...` patterns for scip-go, which has no `go.mod`
+    below the module root. scip-python does not narrow. More than
+    `index::MAX_NARROW_RUNS` (3) units makes one run over the checkout
+    instead: each narrowed run starts the indexer again, and past a few units
+    that costs more than one run. The rows are the same either way, thus the
+    threshold is a question of time and never of what the worktree sees.
 11. Record the base commit and the checkout state (`git stash create`, or
     `HEAD`) of each overlay.
 12. In the SessionStart hook, start an overlay index run in the background if
