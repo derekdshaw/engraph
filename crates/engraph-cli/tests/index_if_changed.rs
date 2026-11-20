@@ -450,8 +450,12 @@ fn session_start_leaves_unindexed_and_opted_out_repos_alone() {
     );
 }
 
+/// Plan 10, step 7: a worktree that is not the base checkout writes its own
+/// overlay, never the base rows the other worktrees read. This project was
+/// indexed from prebuilt SCIP, which engraph cannot reproduce, so its overlay
+/// is left alone too — but the base is untouched either way.
 #[test]
-fn a_linked_worktree_does_not_refresh_the_shared_index() {
+fn a_linked_worktree_writes_an_overlay_not_the_shared_index() {
     let (dir, mono) = mono();
     let db = dir.path().join("e.db");
     let scip = dir.path().join("empty.scip");
@@ -478,32 +482,32 @@ fn a_linked_worktree_does_not_refresh_the_shared_index() {
     let wt = wt.canonicalize().unwrap();
     std::fs::write(wt.join("svc-a/src/lib.rs"), "pub fn alpha_handler() {}\n").unwrap();
 
-    // The hook starts nothing from the linked worktree.
-    session_start(&db, &wt, &[]);
-    std::thread::sleep(Duration::from_millis(1500));
-    assert!(
-        !dir.path().join("auto-index.log").exists(),
-        "spawned a refresh from a linked worktree"
-    );
-
-    // A refresh run by hand there skips, and records nothing.
+    // A refresh run by hand there goes to the overlay, and leaves the base
+    // rows of every other worktree as they are.
     let out = engraph(&db, &wt, &["index", "--if-changed", "."]);
-    assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = stdout(&out);
+    assert!(s.contains("overlay "), "{s}");
+    assert_eq!(index_state(&db), before, "the base graph is untouched");
+
+    // The same for a plain index run there: it names the overlay and points
+    // at --full for moving the base.
+    let out = engraph(&db, &wt, &["index", "."]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = stdout(&out);
     assert!(
-        s.starts_with("skipped: ") && s.contains("linked worktree"),
+        s.contains("not the base checkout") && s.contains("--full"),
         "{s}"
     );
-    assert_eq!(index_state(&db), before);
-
-    // An explicit index still runs there, with a warning.
-    let out = engraph(&db, &wt, &["index", ".", "--scip", scip.to_str().unwrap()]);
-    assert!(out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("warning:") && err.contains("linked worktree"),
-        "{err}"
-    );
+    assert_eq!(index_state(&db), before, "the base graph is untouched");
 }
 
 #[test]

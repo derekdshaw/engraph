@@ -189,6 +189,37 @@ pub(crate) fn overlay_files(
         .collect()
 }
 
+/// `files` without those under a subtree engraph cannot index itself.
+///
+/// A subtree indexed from prebuilt SCIP (`--scip`, `--scip-manifest`) has base
+/// rows from whatever produced that file; an overlay for it would come from
+/// engraph's own drivers, whose ids need not be the ids of that indexer, so
+/// the overlay rows would not join the base rows. `--if-changed` refuses to
+/// refresh such a subtree for the same reason.
+pub(crate) fn driver_indexed_only(
+    conn: &db::PooledConn,
+    project: &str,
+    files: Vec<OverlayFile>,
+) -> Vec<OverlayFile> {
+    let commits = match engraph_codegraph::indexed_commits(conn, project) {
+        Ok(c) if !c.is_empty() => c,
+        _ => return Vec::new(),
+    };
+    let modes = engraph_codegraph::index_modes(conn, project).unwrap_or_default();
+    files
+        .into_iter()
+        .filter(|f| {
+            let Some((subtree, _)) = covering_subtree(&commits, &f.path) else {
+                return false;
+            };
+            modes
+                .get(subtree)
+                .map(|m| m.source == engraph_codegraph::IndexSource::Drivers)
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
 /// `git diff --name-status <sha> -- <pathspec>` in `top` as `(path, deleted)`
 /// pairs. `None` when git cannot compare, which is what the caller turns into
 /// a full overlay. Renames are off, so a rename reads as a delete and an add —

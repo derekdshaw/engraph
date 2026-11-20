@@ -306,6 +306,25 @@ keeps the base commit safe.
    step replaces the main-worktree gate of the automatic refresh
    (`divergence::in_linked_worktree` in `main` and in `hooks`).
 
+   Done in `main`: `main::index_route` sends a run to the base or to the
+   overlay. `--full` writes the base and records the checkout; the first index
+   run of a project writes the base too, because an overlay is a difference
+   from a base and something must write one first (this is also how a
+   bare-repo layout gets a base). A full run of the whole project records the
+   base checkout and its commit. `engraph index` and `engraph index
+   --if-changed` in another checkout write that checkout's overlay.
+
+   Files under a subtree indexed from prebuilt SCIP stay out of the overlay
+   (`divergence::driver_indexed_only`): their base rows come from another
+   indexer, whose ids engraph's drivers need not reproduce, so overlay rows
+   for them would not join. `--if-changed` already refuses to refresh such a
+   subtree for the same reason.
+
+   **Not done in `hooks`**: the SessionStart gate stays until the overlay
+   state of step 11 is there. Without it the hook has no way to tell a stale
+   overlay from a current one, thus each session in each worktree would start
+   an index run. Step 12 removes the gate with that condition.
+
 ### Part 3: overlays
 
 8. ~~Add the tables `overlay_entities`, `overlay_relations`, and

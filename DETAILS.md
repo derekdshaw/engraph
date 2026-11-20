@@ -1172,7 +1172,32 @@ run's own error exit, so the hook's firing rate and cost are always visible.
 A dry run records nothing. Plain `engraph index <repo>` keeps its one row per
 run keyed by driver name.
 
-### 8.0.1a Overlay index runs (`engraph index --overlay`)
+### 8.0.1a Where an index run writes: base or overlay
+
+`main::index_route` decides, per run, whether rows go to the base graph every
+worktree reads or to this checkout's overlay:
+
+- `--full` → **base**, and the checkout becomes the base checkout
+  (`record_base`). Moving the base to another checkout prints a warning, since
+  every other worktree will then compute its overlay against this branch.
+- The project's **first** index run → base. An overlay is a difference from a
+  base, so something has to write one; this is also how a bare-repo layout,
+  where no checkout is the main worktree, gets a base at all.
+- Otherwise: the base checkout (`index::base_checkout`) → base; **any other
+  worktree → its overlay**, for a plain `engraph index` and for
+  `--if-changed` alike. A session in one worktree can no longer replace the
+  graph the others read, which is what the old `in_linked_worktree` gate was
+  protecting against by refusing to run.
+- A `--scip-manifest` load always writes the base: a manifest describes the
+  whole project, not a difference from it.
+
+Files under a subtree indexed from **prebuilt SCIP** are kept out of overlays
+(`divergence::driver_indexed_only`). Their base rows come from whatever
+produced that file, and engraph's own drivers need not reproduce those ids, so
+overlay rows for them would not join the base rows — the same reason
+`--if-changed` refuses to refresh such a subtree.
+
+### 8.0.1b Overlay index runs (`engraph index --overlay`)
 
 An overlay run indexes what a checkout changed, not the repo. It asks
 `divergence::overlay_files` which files differ from the base commit (§8.0.1),

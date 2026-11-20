@@ -223,6 +223,14 @@ pub(crate) enum Cmd {
         /// SessionStart hook runs this in the background.
         #[arg(long, conflicts_with_all = ["scip", "scip_manifest", "lang", "project", "workspace", "recursive"])]
         if_changed: bool,
+        /// Index the **base graph** from this checkout and make it the base
+        /// checkout: the graph every worktree of the repo reads. Without it,
+        /// an index run in a checkout that is not the base writes that
+        /// checkout's overlay instead. Use it to move the base to another
+        /// checkout, and in a bare-repo layout, where no checkout is the main
+        /// worktree.
+        #[arg(long, conflicts_with_all = ["overlay", "if_changed"])]
+        full: bool,
         /// Index this checkout's **overlay**: the files that differ from the
         /// base commit, and only those. The indexers run over the crates,
         /// packages or modules holding those files, and the rows land under
