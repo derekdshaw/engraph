@@ -44,8 +44,8 @@ pub fn main_worktree(start: &Path) -> Option<String> {
     // <name>), not a checkout. Unlike a bare repo's directory — also listed
     // first, with a `bare` attribute, and kept as the shared key of its
     // worktrees — the gitdir is no key: fall back to this checkout's own
-    // root, so the submodule scopes to itself and `in_linked_worktree` stays
-    // false for it.
+    // root, so the submodule scopes to itself and counts as its own base
+    // checkout, never as a worktree of the parent.
     if !first.any(|l| l.trim() == "bare") && !p.join(".git").exists() {
         return current_toplevel(start).map(|top| {
             top.canonicalize()

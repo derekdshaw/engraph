@@ -510,6 +510,116 @@ fn a_linked_worktree_writes_an_overlay_not_the_shared_index() {
     assert_eq!(index_state(&db), before, "the base graph is untouched");
 }
 
+/// Plan 10, steps 11 and 12: "--if-changed" in a worktree brings the overlay
+/// up to date once, and then leaves it alone until something moves.
+#[test]
+fn if_changed_in_a_worktree_runs_the_overlay_once_until_something_changes() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let scip = dir.path().join("empty.scip");
+    let out = engraph(
+        &db,
+        &mono,
+        &["index", ".", "--scip", scip.to_str().unwrap()],
+    );
+    assert!(out.status.success());
+    let before = index_state(&db);
+    let wt = dir.path().join("wt");
+    git(
+        &mono,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            wt.to_str().unwrap(),
+        ],
+    );
+    let wt = wt.canonicalize().unwrap();
+
+    // A clean worktree: the first run computes the (empty) overlay and
+    // records what it was computed from; the second finds it current and
+    // indexes nothing.
+    let out = engraph(&db, &wt, &["index", "--if-changed", "."]);
+    assert!(out.status.success());
+    assert!(stdout(&out).contains("overlay "), "{}", stdout(&out));
+    let out = engraph(&db, &wt, &["index", "--if-changed", "."]);
+    assert!(out.status.success());
+    assert!(
+        stdout(&out).contains("overlay up to date"),
+        "{}",
+        stdout(&out)
+    );
+
+    // An edit makes it stale again. This project is prebuilt SCIP, so the
+    // run has nothing it can index — but it records the new state, and the
+    // check goes quiet again.
+    std::fs::write(wt.join("svc-a/src/lib.rs"), "pub fn alpha_handler() {}\n").unwrap();
+    let out = engraph(&db, &wt, &["index", "--if-changed", "."]);
+    assert!(out.status.success());
+    assert!(
+        stdout(&out).contains("nothing engraph can index"),
+        "{}",
+        stdout(&out)
+    );
+    let out = engraph(&db, &wt, &["index", "--if-changed", "."]);
+    assert!(out.status.success());
+    assert!(
+        stdout(&out).contains("overlay up to date"),
+        "{}",
+        stdout(&out)
+    );
+
+    assert_eq!(index_state(&db), before, "the base graph never moved");
+}
+
+/// Plan 10, step 12: the SessionStart hook starts the background refresh from
+/// a linked worktree too — the child brings that worktree's overlay up to
+/// date instead of touching the base.
+#[test]
+fn session_start_refreshes_a_worktree_overlay_in_the_background() {
+    let (dir, mono) = mono();
+    let db = dir.path().join("e.db");
+    let scip = dir.path().join("empty.scip");
+    let out = engraph(
+        &db,
+        &mono,
+        &["index", ".", "--scip", scip.to_str().unwrap()],
+    );
+    assert!(out.status.success());
+    let before = index_state(&db);
+    let wt = dir.path().join("wt");
+    git(
+        &mono,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            wt.to_str().unwrap(),
+        ],
+    );
+    let wt = wt.canonicalize().unwrap();
+
+    session_start(&db, &wt, &[]);
+    let log = dir.path().join("auto-index.log");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let text = loop {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.contains("overlay ") || std::time::Instant::now() > deadline {
+            break text;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        text.contains("overlay "),
+        "the hook did not refresh the worktree overlay: {text}"
+    );
+    assert_eq!(index_state(&db), before, "the base graph never moved");
+}
+
 #[test]
 fn a_refresh_skips_subtrees_indexed_from_prebuilt_scip() {
     let (dir, mono) = mono();

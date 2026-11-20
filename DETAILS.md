@@ -1105,9 +1105,9 @@ via `ingestion_log`, per-file errors are logged and skipped, and a
 
 After the brief's sections are gathered, the hook checks
 `engraph_codegraph::indexed_commits(project)`. If the project has at least one
-`index_state` row — i.e. someone ran `engraph index` on it before — and `cwd`
-is in the repo's main worktree, it spawns `engraph index --if-changed --auto
-<cwd>` (`spawn_detached_index`, `hooks.rs`) and does not wait: stdin is null,
+`index_state` row — i.e. someone ran `engraph index` on it before — it spawns
+`engraph index --if-changed --auto <cwd>` (`spawn_detached_index`, `hooks.rs`)
+from any checkout, base or worktree, and does not wait: stdin is null,
 stdout/stderr append to `auto-index.log` in the data directory beside the
 database — the hook writes a dated header line (`=== <UTC> engraph index
 --if-changed --auto <cwd> …`) before handing the file over, since the child's
@@ -1120,17 +1120,24 @@ The "indexed before" gate is deliberate: a cold index can run for minutes and
 download toolchains, which is a commitment the user makes once with an explicit
 `engraph index`; from then on, every session start pays only for what changed.
 
-The main-worktree gate (`divergence::in_linked_worktree`) follows from the
-codegraph being one index per repo (§5.5, §14): a refresh from a linked
-worktree would re-index that shared index from its branch, and sessions in
-different worktrees would then keep re-indexing over each other. Linked
-worktrees rely on the per-file divergence check instead: greps on symbols
-whose files their branch changed pass through, and `subgraph` flags those
-files. An explicit `engraph index` from a linked worktree still runs, with a
-warning that it replaces the shared index. In a bare-repo layout (`git clone
---bare` plus `git worktree add`) git lists the bare directory as the main
-worktree, so every checkout counts as linked and no session refreshes the
-index automatically; run `engraph index` by hand there.
+In a checkout that is not the base checkout, the child brings that worktree's
+**overlay** up to date instead of touching the base (§8.0.1a), and only when
+the overlay no longer describes the checkout (`divergence::overlay_stale`):
+the base graph was indexed again (the digest of `index_state`'s
+`(subtree, commit)` rows moved), the tracked working tree changed (the tree
+hash of the `git stash create`/HEAD pair differs — the tree, because a stash
+commit's id embeds its timestamp), or an untracked file was written after the
+overlay (`overlay_state.indexed_at`, same mtime rule as the base refresh). A
+current overlay prints `overlay up to date` and indexes nothing, so a session
+start in an unchanged worktree costs a few git commands. An untracked file
+*removed* after the overlay is not seen — the same blind spot the base
+refresh's untracked check has — and heals with the next change. What each
+overlay was computed from is recorded in `overlay_state` (§12.1 v21) after
+every overlay run, captured *before* the indexer starts, so an edit made
+while it runs leaves the overlay stale rather than falsely covered. In a
+bare-repo layout no checkout is the main worktree; the first full index run
+(or `--full`) makes its checkout the base, and the others get overlays like
+any worktree.
 
 `--if-changed` itself (`Cmd::Index`, `main.rs`) resolves the project key with
 `index_scope`, lists the subtrees `divergence::changed_subtrees` reports — one
@@ -1507,8 +1514,9 @@ but logs a warning if it ever happens.
 | 18 | `index_state.normalization`: the version of the symbol-id normalization rules (`scip_loader::NORMALIZATION_VERSION`) the run's ids were written with. `engraph index` lists the projects whose rows carry another version (NULL, from before the rules, counts as 0) and recommends a full `engraph index <repo>` of each: their ids and newly indexed ids do not connect until then (plan 05, part 2, steps 11 to 13). |
 | 19 | `project_base (project, base_worktree, base_commit, indexed_at)`: the checkout whose index run wrote the project's base rows — the base checkout — and the commit it read (plan 10, part 2, step 4). Every other worktree of the repo diffs its files against that commit and stores only the difference, so indexing a worktree never re-indexes the repo and engraph keeps no checkout of its own. One row per project, written by a full index run; no row means the main worktree is the base checkout (`index::base_checkout` falls back to the project key when that key is a working tree root), which is how a repo indexed before plan 10 carries on. A bare repo's key is no checkout, so one of its worktrees must claim the base with a full run. |
 | 20 | `overlay_files`, `overlay_entities`, `overlay_relations`: the overlay of each checkout (plan 10, part 3) — the rows for the files whose content differs from the base commit, keyed by `worktree` (the checkout path, as `git worktree list` names it). `overlay_files` lists the files the overlay covers, deleted ones included: a base row whose file is listed is hidden from that worktree, so a deleted file has a row there and none in `overlay_entities`. The row tables key on `(worktree, id)` because one symbol id exists in the base and in every worktree that changed it, which `entities.id TEXT PRIMARY KEY` cannot hold. `overlay_relations` deliberately has no foreign key to `entities` (the base `relations` does, and `foreign_keys` is ON): an overlay edge can end at a symbol only that worktree has. Columns match what the lookups read; `valid_from` and `source_message_id`, which the codegraph never writes, are left out. |
+| 21 | `overlay_state (worktree, project, checkout_tree, base_digest, indexed_at)`: what each overlay was computed from (plan 10, part 3, step 11) — the tree hash of the checkout's `git stash create`/HEAD commit (the tree, since a stash commit's id embeds its timestamp) and a digest of the `index_state` rows the overlay diffed against. `divergence::overlay_stale` compares both with the state now (§8.0.1); one row per worktree, replaced on each overlay run, removed with the overlay's rows. |
 
-(`SCHEMA_VERSION = 20`; the `MIGRATIONS` array has 20 entries.)
+(`SCHEMA_VERSION = 21`; the `MIGRATIONS` array has 21 entries.)
 
 ---
 

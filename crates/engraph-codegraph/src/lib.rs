@@ -33,7 +33,8 @@ pub use lock::{
 };
 pub use relation_kind::RelationKind;
 pub use scip_loader::{
-    LoadStats, NORMALIZATION_VERSION, OverlayFile, OverlayStats, clear_overlay, load, load_overlay,
+    LoadStats, NORMALIZATION_VERSION, OverlayFile, OverlayState, OverlayStats, clear_overlay, load,
+    load_overlay, overlay_state, record_overlay_state,
 };
 pub use subgraph::{
     MATCH_WHERE_SQL, Neighborhood, format_markdown, normalize_qualified, qualified_candidates,

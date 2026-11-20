@@ -19,18 +19,6 @@ pub(crate) fn index_scope(repo: &Path) -> (String, String) {
     (crate::canonical_repo_key(repo), rel.unwrap_or_default())
 }
 
-/// Whether `dir` is inside a linked worktree rather than its repo's main
-/// worktree. The codegraph is one index per repo under the main worktree's key,
-/// so indexing from a linked worktree replaces the code every other worktree
-/// sees with this branch's. Those worktrees rely on the per-file divergence
-/// check instead. `false` outside git.
-pub(crate) fn in_linked_worktree(dir: &Path) -> bool {
-    let Some(top) = crate::git_current_toplevel(dir).and_then(|t| t.canonicalize().ok()) else {
-        return false;
-    };
-    Path::new(&crate::canonical_repo_key(dir)) != top
-}
-
 /// Where the codegraph stores an absolute `file`: `(project, repo-relative
 /// path)` of the git checkout it's in — a linked worktree maps to its repo's
 /// key. `None` for relative paths or outside git.
@@ -81,9 +69,63 @@ pub(crate) fn record_index_commit(
     repo: &Path,
     mode: &engraph_codegraph::IndexMode,
 ) -> anyhow::Result<()> {
-    let commit =
-        git_stdout(repo, &["stash", "create"]).or_else(|| git_stdout(repo, &["rev-parse", "HEAD"]));
+    let commit = working_tree_commit(repo);
     engraph_codegraph::record_indexed_commit(conn, project, subtree, commit.as_deref(), mode)
+}
+
+/// The commit that contains what the working tree of `repo` holds now: a
+/// `git stash create` snapshot when the tree is dirty, else HEAD. What
+/// `record_index_commit` records, so uncommitted edits count.
+pub(crate) fn working_tree_commit(repo: &Path) -> Option<String> {
+    git_stdout(repo, &["stash", "create"]).or_else(|| git_stdout(repo, &["rev-parse", "HEAD"]))
+}
+
+/// The **tree hash** of the working tree of `repo`: the content identity the
+/// overlay state stores. The tree and not the commit, because a stash commit
+/// embeds the time it was made — two of them over one unchanged tree are two
+/// commits, and a dirty worktree would always read as stale.
+pub(crate) fn working_tree_id(repo: &Path) -> Option<String> {
+    let commit = working_tree_commit(repo)?;
+    git_stdout(repo, &["rev-parse", &format!("{commit}^{{tree}}")])
+}
+
+/// A digest of the `(subtree, commit)` rows of `index_state` for `project` —
+/// the base the overlays diff against. A base refresh changes it, which is
+/// how `overlay_stale` sees that every overlay must be computed again.
+pub(crate) fn base_digest(conn: &db::PooledConn, project: &str) -> String {
+    let rows = engraph_codegraph::indexed_commits(conn, project).unwrap_or_default();
+    let text: String = rows
+        .iter()
+        .map(|(sub, sha)| format!("{sub}={sha}\n"))
+        .collect();
+    engraph_core::utils::sha256_hex(text.as_bytes())
+}
+
+/// Whether the overlay of the checkout containing `checkout` no longer
+/// describes it (plan 10, part 3, step 12): no overlay run recorded a state,
+/// the base graph was indexed again, the tracked working tree changed, or an
+/// untracked file was written after the overlay. An untracked file *removed*
+/// after the overlay is not seen — the same blind spot the `--if-changed`
+/// untracked check has — and heals with the next change.
+pub(crate) fn overlay_stale(conn: &db::PooledConn, project: &str, checkout: &Path) -> bool {
+    let Some(top) = crate::git_current_toplevel(checkout).and_then(|t| t.canonicalize().ok())
+    else {
+        // Outside git there is no overlay to be stale.
+        return false;
+    };
+    let worktree = top.to_string_lossy().into_owned();
+    let Ok(Some(state)) = engraph_codegraph::overlay_state(conn, &worktree) else {
+        return true;
+    };
+    if state.base_digest != base_digest(conn, project) {
+        return true;
+    }
+    if state.checkout_tree.is_none() || state.checkout_tree != working_tree_id(&top) {
+        return true;
+    }
+    untracked_files(&top, &["."])
+        .iter()
+        .any(|f| mtime_epoch(&top.join(f)).is_some_and(|m| m > state.indexed_at))
 }
 
 /// The most specific indexed subtree of `commits` covering the repo-relative
@@ -554,7 +596,6 @@ mod tests {
         let (key, subtree) = index_scope(&inner);
         assert_eq!(PathBuf::from(&key), inner.canonicalize().unwrap());
         assert_eq!(subtree, "");
-        assert!(!in_linked_worktree(&inner));
 
         // A directory inside it scopes to the nested repo too.
         std::fs::create_dir_all(inner.join("src")).unwrap();
@@ -589,11 +630,10 @@ mod tests {
         let sm = repo.join("sm").canonicalize().unwrap();
 
         // The key is the submodule checkout, not its gitdir under
-        // <parent>/.git/modules, and the checkout is not a linked worktree.
+        // <parent>/.git/modules.
         let (key, subtree) = index_scope(&sm);
         assert_eq!(PathBuf::from(&key), sm);
         assert_eq!(subtree, "");
-        assert!(!in_linked_worktree(&sm));
 
         // A directory inside the submodule scopes to the submodule.
         std::fs::create_dir_all(sm.join("src")).unwrap();
@@ -622,49 +662,6 @@ mod tests {
             at,
             None
         ));
-    }
-
-    #[test]
-    fn in_linked_worktree_is_false_in_the_main_worktree_only() {
-        let (dir, repo, _) = repo();
-        assert!(!in_linked_worktree(&repo));
-        assert!(!in_linked_worktree(&repo.join("svc-a")));
-        let wt = dir.path().join("wt");
-        git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "feature",
-                wt.to_str().unwrap(),
-            ],
-        );
-        assert!(in_linked_worktree(&wt));
-        assert!(in_linked_worktree(&wt.join("svc-a")));
-        // Outside git there is no worktree to be linked.
-        let plain = tempfile::tempdir().unwrap();
-        assert!(!in_linked_worktree(plain.path()));
-    }
-
-    /// A bare repo with worktrees has no main checkout: git lists the bare
-    /// directory first, so every worktree counts as linked and none refreshes
-    /// the shared index automatically (DETAILS §8.0.1).
-    #[test]
-    fn in_a_bare_repo_layout_every_worktree_is_linked() {
-        let (dir, repo, _) = repo();
-        let bare = dir.path().join("bare.git");
-        // Clone `.` from inside the repo: on Windows `repo` is canonicalized to
-        // a `\\?\C:\…` path, which git would parse as `host:path` if passed as
-        // the clone source.
-        git(
-            &repo,
-            &["clone", "-q", "--bare", ".", bare.to_str().unwrap()],
-        );
-        let wt = dir.path().join("main-wt");
-        git(&bare, &["worktree", "add", "-q", wt.to_str().unwrap()]);
-        assert!(in_linked_worktree(&wt));
     }
 
     #[test]
@@ -858,6 +855,100 @@ mod tests {
                 ("svc-b/b.rs".to_string(), false),
             ]
         );
+    }
+
+    /// Plan 10, part 3, steps 11 and 12: the overlay of a worktree is stale
+    /// when the checkout changed after it, or when the base graph did.
+    #[test]
+    fn overlay_stale_follows_the_checkout_and_the_base() {
+        let (dir, repo, head) = repo();
+        let pool = db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let project = crate::canonical_repo_key(&repo);
+        engraph_codegraph::record_indexed_commit(
+            &conn,
+            &project,
+            "",
+            Some(&head),
+            &Default::default(),
+        )
+        .unwrap();
+        let wt = dir.path().join("wt");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                wt.to_str().unwrap(),
+            ],
+        );
+        let wt = wt.canonicalize().unwrap();
+        let worktree = wt.to_string_lossy().into_owned();
+        let record = |conn: &db::PooledConn| {
+            engraph_codegraph::record_overlay_state(
+                conn,
+                &worktree,
+                &project,
+                working_tree_id(&wt).as_deref(),
+                &base_digest(conn, &project),
+            )
+            .unwrap();
+        };
+
+        // No overlay run yet: stale.
+        assert!(overlay_stale(&conn, &project, &wt));
+        record(&conn);
+        assert!(!overlay_stale(&conn, &project, &wt));
+
+        // An edit to a tracked file: stale, although nothing is committed —
+        // and recording again makes it fresh, although the stash commit of an
+        // unchanged dirty tree is a new commit each time (the tree is not).
+        std::fs::write(wt.join("svc-a/a.rs"), "fn a() { 1 }\n").unwrap();
+        assert!(overlay_stale(&conn, &project, &wt));
+        record(&conn);
+        assert!(!overlay_stale(&conn, &project, &wt));
+
+        // A new untracked file, written after the overlay: stale. The
+        // backdate makes the mtime comparison decisive, whatever the clock
+        // granularity.
+        conn.execute(
+            "UPDATE overlay_state SET indexed_at = datetime('now', '-10 seconds')",
+            [],
+        )
+        .unwrap();
+        assert!(!overlay_stale(&conn, &project, &wt));
+        std::fs::write(wt.join("svc-a/gen.rs"), "fn gen() {}\n").unwrap();
+        assert!(overlay_stale(&conn, &project, &wt));
+        record(&conn);
+        std::fs::File::options()
+            .write(true)
+            .open(wt.join("svc-a/gen.rs"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
+        assert!(!overlay_stale(&conn, &project, &wt));
+
+        // The base was indexed again at another commit: every overlay is
+        // stale, this worktree's included, although the worktree is unchanged.
+        git(
+            &repo,
+            &["commit", "-q", "--allow-empty", "-m", "base moves"],
+        );
+        let head2 = git(&repo, &["rev-parse", "HEAD"]);
+        engraph_codegraph::record_indexed_commit(
+            &conn,
+            &project,
+            "",
+            Some(&head2),
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(overlay_stale(&conn, &project, &wt));
+        record(&conn);
+        assert!(!overlay_stale(&conn, &project, &wt));
     }
 
     #[test]

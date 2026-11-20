@@ -320,10 +320,8 @@ keeps the base commit safe.
    for them would not join. `--if-changed` already refuses to refresh such a
    subtree for the same reason.
 
-   **Not done in `hooks`**: the SessionStart gate stays until the overlay
-   state of step 11 is there. Without it the hook has no way to tell a stale
-   overlay from a current one, thus each session in each worktree would start
-   an index run. Step 12 removes the gate with that condition.
+   The SessionStart gate in `hooks` stayed until the overlay state of step 11
+   was there; step 12 removed it with the staleness condition.
 
 ### Part 3: overlays
 
@@ -362,10 +360,25 @@ keeps the base commit safe.
     instead: each narrowed run starts the indexer again, and past a few units
     that costs more than one run. The rows are the same either way, thus the
     threshold is a question of time and never of what the worktree sees.
-11. Record the base commit and the checkout state (`git stash create`, or
-    `HEAD`) of each overlay.
-12. In the SessionStart hook, start an overlay index run in the background if
-    the checkout changed after its overlay, or if the base commit changed.
+11. ~~Record the base commit and the checkout state (`git stash create`, or
+    `HEAD`) of each overlay.~~ Complete: `overlay_state` (schema v21), written
+    after each overlay run and removed with the overlay's rows. The checkout
+    state is the **tree hash** of the stash or HEAD commit, not the commit: a
+    stash commit's id contains the time it was made, thus two of them over one
+    unchanged tree are two commits, and a dirty worktree would always read as
+    stale. The base is a digest of the `(subtree, commit)` rows of
+    `index_state` that the overlay diffed against. The state is captured
+    before the indexer runs, thus an edit made while it runs leaves the
+    overlay stale and the next check runs it again.
+12. ~~In the SessionStart hook, start an overlay index run in the background if
+    the checkout changed after its overlay, or if the base commit changed.~~
+    Complete. The hook starts `engraph index --if-changed --auto` from any
+    checkout, and the condition is in the child (`divergence::overlay_stale`):
+    a current overlay prints "overlay up to date" and indexes nothing, thus a
+    session in an unchanged worktree costs a few git commands. An untracked
+    file that is *removed* after the overlay is not seen — the untracked check
+    of `--if-changed` has the same blind spot — and heals with the next
+    change. `divergence::in_linked_worktree` is removed with its gate.
 13. Add the view function. Use it in `subgraph_for`, in the grep redirect, and
     in the PostToolUse(Read) hook.
 14. When the view function operates, remove the per-file divergence check from

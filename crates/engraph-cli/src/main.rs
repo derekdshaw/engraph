@@ -361,16 +361,23 @@ async fn main() -> Result<()> {
                 if overlay_here {
                     let worktree =
                         checkout_path(&repo).unwrap_or_else(|| repo.to_string_lossy().into_owned());
-                    run_overlay_index(
-                        &conn,
-                        &repo,
-                        &project_key,
-                        &worktree,
-                        go,
-                        dry_run,
-                        session_id.as_deref(),
-                        start,
-                    )?;
+                    // "If changed": a current overlay is left alone, which is
+                    // what lets the SessionStart hook start this run in every
+                    // worktree without indexing anything that did not move.
+                    if !dry_run && !divergence::overlay_stale(&conn, &project_key, &repo) {
+                        println!("overlay up to date: {worktree}");
+                    } else {
+                        run_overlay_index(
+                            &conn,
+                            &repo,
+                            &project_key,
+                            &worktree,
+                            go,
+                            dry_run,
+                            session_id.as_deref(),
+                            start,
+                        )?;
+                    }
                 }
                 // A dry run takes no lock; a real one holds it across every
                 // subtree. A best-effort refresh yields to whatever run is
@@ -1361,10 +1368,6 @@ fn run_overlay_index(
             differing.len() - files.len()
         );
     }
-    if files.is_empty() && !differing.is_empty() {
-        println!("overlay {worktree}: nothing engraph can index; left as it was");
-        return Ok(());
-    }
     if dry_run {
         println!(
             "dry-run: overlay of {worktree}: {} file(s) differ from the base",
@@ -1375,8 +1378,22 @@ fn run_overlay_index(
         }
         return Ok(());
     }
+    // The state the overlay is computed from, captured before the indexer
+    // runs: an edit made while it runs then leaves the overlay stale, and the
+    // next check runs it again, instead of reading as covered when it is not.
+    let tree = divergence::working_tree_id(repo);
+    let digest = divergence::base_digest(conn, project);
+    if files.is_empty() && !differing.is_empty() {
+        // Every differing file is under a prebuilt-SCIP subtree: nothing
+        // engraph can index, and nothing to store — but the decision was made
+        // from this state, so record it and let the staleness check go quiet.
+        println!("overlay {worktree}: nothing engraph can index; left as it was");
+        engraph_codegraph::record_overlay_state(conn, worktree, project, tree.as_deref(), &digest)?;
+        return Ok(());
+    }
     let _lock = engraph_codegraph::acquire_index_lock_wait(project)?;
     let stats = engraph_codegraph::index_overlay(conn, repo, project, worktree, &files, go)?;
+    engraph_codegraph::record_overlay_state(conn, worktree, project, tree.as_deref(), &digest)?;
     println!(
         "overlay {worktree}: {} file(s), {} document(s) indexed, {} entities, {} relations ({}ms)",
         stats.files,

@@ -455,6 +455,27 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_overlay_relations_dst
         ON overlay_relations(worktree, dst_entity);
     "#,
+    // v21 — what each overlay was computed from (plan 10, part 3, step 11):
+    // the **tree hash** of the checkout (of the `git stash create` commit, or
+    // of HEAD — the same pair `record_index_commit` records, so uncommitted
+    // edits count), and a digest of the `(subtree, commit)` rows of
+    // `index_state` the overlay diffed against. The SessionStart hook compares
+    // both with the state now and starts an overlay index run when either
+    // moved (step 12): the checkout changed, or the base graph did. The tree,
+    // not the commit: a stash commit's id embeds the time it was made, so two
+    // of them over one unchanged tree differ, and a dirty worktree would
+    // always read as stale. `checkout_tree` is NULL when git gave none, which
+    // counts as stale. One row per worktree, written after each overlay run,
+    // removed with the overlay's rows.
+    r#"
+    CREATE TABLE IF NOT EXISTS overlay_state (
+        worktree TEXT PRIMARY KEY,
+        project TEXT NOT NULL,
+        checkout_tree TEXT,
+        base_digest TEXT NOT NULL,
+        indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    "#,
 ];
 
 pub fn current_version(conn: &Connection) -> Result<i64> {

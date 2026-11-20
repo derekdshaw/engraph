@@ -316,16 +316,76 @@ pub struct OverlayStats {
 }
 
 /// Remove the overlay of `worktree`: its checkout matches the base, so every
-/// lookup from it reads base rows.
+/// lookup from it reads base rows. Its state row goes too — a later overlay
+/// run records a fresh one.
 pub fn clear_overlay(conn: &PooledConn, worktree: &str) -> Result<OverlayStats> {
     for sql in [
         "DELETE FROM overlay_entities WHERE worktree = ?1",
         "DELETE FROM overlay_relations WHERE worktree = ?1",
         "DELETE FROM overlay_files WHERE worktree = ?1",
+        "DELETE FROM overlay_state WHERE worktree = ?1",
     ] {
         conn.execute(sql, [worktree])?;
     }
     Ok(OverlayStats::default())
+}
+
+/// What the overlay of a worktree was computed from (plan 10, part 3, step
+/// 11): the checkout state, and a digest of the base commits it diffed
+/// against. The staleness check of step 12 compares both with the state now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverlayState {
+    /// The tree hash of the checkout at overlay time — of the `git stash
+    /// create` commit when the tree was dirty, else of HEAD. The tree, not
+    /// the commit: a stash commit's id embeds the time it was made. `None`
+    /// when git gave none, which counts as stale.
+    pub checkout_tree: Option<String>,
+    /// A digest of the `(subtree, commit)` rows of `index_state` the overlay
+    /// diffed against; a base refresh changes it.
+    pub base_digest: String,
+    /// When the overlay was computed, as fractional epoch seconds, for the
+    /// untracked-file mtime comparison — the same rule `index_state` follows.
+    pub indexed_at: f64,
+}
+
+/// Record what the overlay of `worktree` was computed from. One row per
+/// worktree: a later run replaces it.
+pub fn record_overlay_state(
+    conn: &PooledConn,
+    worktree: &str,
+    project: &str,
+    checkout_tree: Option<&str>,
+    base_digest: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO overlay_state (worktree, project, checkout_tree, base_digest, indexed_at)
+         VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%d %H:%M:%f','now'))
+         ON CONFLICT(worktree) DO UPDATE SET
+             project = excluded.project,
+             checkout_tree = excluded.checkout_tree,
+             base_digest = excluded.base_digest,
+             indexed_at = excluded.indexed_at",
+        rusqlite::params![worktree, project, checkout_tree, base_digest],
+    )?;
+    Ok(())
+}
+
+/// The recorded state of `worktree`'s overlay, or `None` when no overlay run
+/// recorded one.
+pub fn overlay_state(conn: &PooledConn, worktree: &str) -> Result<Option<OverlayState>> {
+    let mut stmt = conn.prepare(
+        "SELECT checkout_tree, base_digest,
+                (julianday(indexed_at) - 2440587.5) * 86400.0
+         FROM overlay_state WHERE worktree = ?1",
+    )?;
+    let mut rows = stmt.query_map([worktree], |r| {
+        Ok(OverlayState {
+            checkout_tree: r.get(0)?,
+            base_digest: r.get(1)?,
+            indexed_at: r.get(2)?,
+        })
+    })?;
+    Ok(rows.next().transpose()?)
 }
 
 /// Replace the overlay of `worktree` with the rows of `files` (plan 10, part
