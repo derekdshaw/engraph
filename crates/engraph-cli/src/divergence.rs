@@ -117,6 +117,139 @@ fn untracked_files(top: &Path, pathspecs: &[&str]) -> Vec<String> {
     }
 }
 
+/// A file of a checkout whose content differs from the base commit, thus a
+/// file of that checkout's overlay (plan 10, part 3).
+// The overlay index run of step 10 is the first caller; until it lands, only
+// the tests of this module use it. Remove the allow with that step.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OverlayFile {
+    /// Repo-relative, `/`-separated, as `entities.file_path` stores it.
+    pub(crate) path: String,
+    /// The checkout does not have the file, but the base does. It gets no
+    /// overlay rows; the row in `overlay_files` hides the base rows.
+    pub(crate) deleted: bool,
+}
+
+/// The files of the checkout containing `checkout` that differ from the base
+/// commit of `project`: changed, untracked (and not ignored), and deleted, in
+/// path order.
+///
+/// Each file is compared with the commit of the most specific indexed subtree
+/// covering it (`covering_subtree`), the same rule the per-file divergence
+/// check uses, so a monorepo whose sub-projects were indexed at different
+/// commits compares each one with its own. The difference goes in the two
+/// directions: a file this checkout changed differs, and so does a file the
+/// base checkout changed after this one started.
+///
+/// Empty when the project has no recorded commit, or `checkout` is in another
+/// repo — the same rule `changed_since_index` follows, and the caller must ask
+/// for a base before it asks what differs from one. A subtree whose commit git
+/// cannot resolve counts every tracked file under it as changed (plan 10,
+/// decision 3): a full overlay, which the next refresh of the base heals.
+// First caller: the overlay index run of step 10 (see `OverlayFile`).
+#[allow(dead_code)]
+pub(crate) fn overlay_files(
+    conn: &db::PooledConn,
+    project: &str,
+    checkout: &Path,
+) -> Vec<OverlayFile> {
+    let commits = match engraph_codegraph::indexed_commits(conn, project) {
+        Ok(c) if !c.is_empty() => c,
+        _ => return Vec::new(),
+    };
+    if crate::canonical_repo_key(checkout) != project {
+        return Vec::new();
+    }
+    let Some(top) = crate::git_current_toplevel(checkout) else {
+        return Vec::new();
+    };
+
+    // What differs under each indexed subtree, against that subtree's commit.
+    let mut by_subtree: BTreeMap<&str, BTreeMap<String, bool>> = BTreeMap::new();
+    for (subtree, sha) in &commits {
+        let pathspec = if subtree.is_empty() { "." } else { subtree };
+        let found = diff_status(&top, sha, pathspec).unwrap_or_else(|| {
+            tracked_files(&top, pathspec)
+                .into_iter()
+                .map(|p| (p, false))
+                .collect()
+        });
+        by_subtree.insert(subtree, found);
+    }
+    // An untracked file is in no commit, so no diff reports it; it belongs to
+    // the overlay of the subtree covering it.
+    for path in untracked_files(&top, &["."]) {
+        if let Some((subtree, _)) = covering_subtree(&commits, &path)
+            && let Some(files) = by_subtree.get_mut(subtree.as_str())
+        {
+            files.insert(path, false);
+        }
+    }
+
+    // Keep each file only from its covering subtree: nested subtrees overlap,
+    // and the most specific one has the commit that describes the file.
+    let mut out: BTreeMap<String, bool> = BTreeMap::new();
+    for (subtree, files) in &by_subtree {
+        for (path, deleted) in files {
+            let covering = covering_subtree(&commits, path).map(|(s, _)| s.as_str());
+            if covering == Some(subtree) {
+                out.insert(path.clone(), *deleted);
+            }
+        }
+    }
+    out.into_iter()
+        .map(|(path, deleted)| OverlayFile { path, deleted })
+        .collect()
+}
+
+/// `git diff --name-status <sha> -- <pathspec>` in `top` as `(path, deleted)`
+/// pairs. `None` when git cannot compare, which is what the caller turns into
+/// a full overlay. Renames are off, so a rename reads as a delete and an add —
+/// which is what an overlay stores: the old path hides the base rows, the new
+/// path gets rows of its own.
+fn diff_status(top: &Path, sha: &str, pathspec: &str) -> Option<BTreeMap<String, bool>> {
+    let out = engraph_core::utils::git_cmd(top)
+        .args([
+            "diff",
+            "--name-status",
+            "--no-renames",
+            "-z",
+            sha,
+            "--",
+            pathspec,
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // `-z` writes `<status>\0<path>\0` for each file.
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut fields = text.split('\0').filter(|s| !s.is_empty());
+    let mut found = BTreeMap::new();
+    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
+        found.insert(path.to_string(), status.starts_with('D'));
+    }
+    Some(found)
+}
+
+/// The tracked files under `pathspec` in `top` (`git ls-files`). Empty when
+/// git fails.
+fn tracked_files(top: &Path, pathspec: &str) -> Vec<String> {
+    let out = engraph_core::utils::git_cmd(top)
+        .args(["ls-files", "-z", "--", pathspec])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Modification time of `path` as fractional epoch seconds.
 fn mtime_epoch(path: &Path) -> Option<f64> {
     path.metadata()
@@ -549,6 +682,165 @@ mod tests {
             rusqlite::params![-secs],
         )
         .unwrap();
+    }
+
+    /// `overlay_files` as `(path, deleted)` pairs, for readable assertions.
+    fn overlay(conn: &db::PooledConn, project: &str, checkout: &Path) -> Vec<(String, bool)> {
+        overlay_files(conn, project, checkout)
+            .into_iter()
+            .map(|f| (f.path, f.deleted))
+            .collect()
+    }
+
+    /// Plan 10, part 3, step 9: the files of a checkout that differ from the
+    /// base commit — changed, untracked, and deleted.
+    #[test]
+    fn overlay_files_lists_changed_untracked_and_deleted_files() {
+        let (dir, repo, head) = repo();
+        let pool = db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let project = crate::canonical_repo_key(&repo);
+        engraph_codegraph::record_indexed_commit(
+            &conn,
+            &project,
+            "",
+            Some(&head),
+            &Default::default(),
+        )
+        .unwrap();
+
+        // The checkout is the indexed commit: nothing differs.
+        assert!(overlay(&conn, &project, &repo).is_empty());
+
+        // A changed file, a deleted file, an untracked file, and an ignored
+        // file, which does not count.
+        std::fs::write(repo.join("svc-a/a.rs"), "fn a() { 1 }\n").unwrap();
+        std::fs::remove_file(repo.join("svc-b/b.rs")).unwrap();
+        std::fs::write(repo.join("svc-a/gen.rs"), "fn gen() {}\n").unwrap();
+        std::fs::write(repo.join(".gitignore"), "*.tmp\n").unwrap();
+        std::fs::write(repo.join("svc-a/x.tmp"), "tmp\n").unwrap();
+        assert_eq!(
+            overlay(&conn, &project, &repo),
+            vec![
+                (".gitignore".to_string(), false),
+                ("svc-a/a.rs".to_string(), false),
+                ("svc-a/gen.rs".to_string(), false),
+                ("svc-b/b.rs".to_string(), true),
+            ]
+        );
+
+        // Another repo's checkout says nothing about this project.
+        let other = tempfile::tempdir().unwrap();
+        git(other.path(), &["init", "-q"]);
+        assert!(overlay(&conn, &project, other.path()).is_empty());
+    }
+
+    /// Each file is compared with the commit of the most specific subtree
+    /// covering it, and it is listed once.
+    #[test]
+    fn overlay_files_uses_the_commit_of_the_covering_subtree() {
+        let (dir, repo, head) = repo();
+        let pool = db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let project = crate::canonical_repo_key(&repo);
+
+        // svc-b is indexed at a later commit than the whole project.
+        std::fs::write(repo.join("svc-b/b.rs"), "fn b() { 2 }\n").unwrap();
+        git(&repo, &["commit", "-q", "-am", "b"]);
+        let head2 = git(&repo, &["rev-parse", "HEAD"]);
+        for (subtree, sha) in [("", &head), ("svc-b", &head2)] {
+            engraph_codegraph::record_indexed_commit(
+                &conn,
+                &project,
+                subtree,
+                Some(sha),
+                &Default::default(),
+            )
+            .unwrap();
+        }
+
+        // svc-b matches its own commit, so only the file that the first
+        // commit does not have differs — and svc-b/b.rs is not listed twice
+        // although the "" row is at the older commit.
+        assert!(overlay(&conn, &project, &repo).is_empty());
+
+        std::fs::write(repo.join("svc-b/b.rs"), "fn b() { 3 }\n").unwrap();
+        assert_eq!(
+            overlay(&conn, &project, &repo),
+            vec![("svc-b/b.rs".to_string(), false)]
+        );
+    }
+
+    /// A worktree on another branch differs in the two directions: its own
+    /// changes, and the files the base checkout changed after it started.
+    #[test]
+    fn overlay_files_covers_both_directions_of_the_difference() {
+        let (dir, repo, head) = repo();
+        let pool = db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let project = crate::canonical_repo_key(&repo);
+        let wt = dir.path().join("wt");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                wt.to_str().unwrap(),
+            ],
+        );
+
+        // The base moves on: svc-a/a.rs changes after the worktree started.
+        std::fs::write(repo.join("svc-a/a.rs"), "fn a() { base }\n").unwrap();
+        git(&repo, &["commit", "-q", "-am", "base work"]);
+        let base_head = git(&repo, &["rev-parse", "HEAD"]);
+        assert_ne!(base_head, head);
+        engraph_codegraph::record_indexed_commit(
+            &conn,
+            &project,
+            "",
+            Some(&base_head),
+            &Default::default(),
+        )
+        .unwrap();
+
+        // The worktree changed svc-b/b.rs itself.
+        std::fs::write(wt.join("svc-b/b.rs"), "fn b() { feature }\n").unwrap();
+        assert_eq!(
+            overlay(&conn, &project, &wt),
+            vec![
+                ("svc-a/a.rs".to_string(), false),
+                ("svc-b/b.rs".to_string(), false),
+            ]
+        );
+    }
+
+    /// A base commit git cannot resolve (`git gc` of a `git stash create`
+    /// commit) makes every tracked file of the subtree differ — the full
+    /// overlay that decision 3 of the plan accepts.
+    #[test]
+    fn overlay_files_falls_back_to_every_file_when_the_base_commit_is_gone() {
+        let (dir, repo, _head) = repo();
+        let pool = db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let project = crate::canonical_repo_key(&repo);
+        engraph_codegraph::record_indexed_commit(
+            &conn,
+            &project,
+            "",
+            Some("0000000000000000000000000000000000000000"),
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            overlay(&conn, &project, &repo),
+            vec![
+                ("svc-a/a.rs".to_string(), false),
+                ("svc-b/b.rs".to_string(), false),
+            ]
+        );
     }
 
     #[test]

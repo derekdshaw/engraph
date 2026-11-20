@@ -292,8 +292,15 @@ keeps the base commit safe.
    there and none in `overlay_entities`, thus it hides the base rows.
    `overlay_relations` has no foreign key to `entities`, because an overlay
    edge can end at a symbol that only that worktree has.
-9. Add a function that finds the files of a checkout that are different from
-   the base commit: changed, untracked, and deleted files.
+9. ~~Add a function that finds the files of a checkout that are different from
+   the base commit: changed, untracked, and deleted files.~~ Complete:
+   `divergence::overlay_files`. It compares each file with the commit of the
+   most specific subtree covering it (`covering_subtree`), thus a monorepo
+   whose sub-projects have different commits compares each one with its own,
+   and a file is listed once. A rename reads as a delete and an add
+   (`--no-renames`), which is what an overlay stores. A subtree whose commit
+   git cannot resolve gives every tracked file under it, which is the full
+   overlay of decision 3.
 10. Add an overlay index run: index the packages that contain these files, and
     load only the documents of these files into the overlay of the checkout.
 11. Record the base commit and the checkout state (`git stash create`, or
