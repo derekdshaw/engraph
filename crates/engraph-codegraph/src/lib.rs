@@ -21,10 +21,11 @@ pub use gc::collect_orphans;
 pub use index::{
     BaseState, DirOutcome, DiscoveredDir, Discovery, DiscoveryFilter, GoOptions, IndexMode,
     IndexPlan, IndexScope, IndexSource, IndexStats, RECURSIVE_MAX_DEPTH, SymbolLangSummary,
-    WorkspacePlan, WorkspaceRepoResult, WorkspaceStats, base_state, discover_workspace_repos,
-    index_modes, index_repo, index_repo_in, index_scip_manifest, index_workspace,
-    indexed_at_by_subtree, indexed_commits, plan_repo, plan_workspace, record_base,
-    record_indexed_commit, scip_output_dir, source_extensions, stale_normalization, workspace_rel,
+    WorkspacePlan, WorkspaceRepoResult, WorkspaceStats, base_checkout, base_state,
+    discover_workspace_repos, index_modes, index_repo, index_repo_in, index_scip_manifest,
+    index_workspace, indexed_at_by_subtree, indexed_commits, plan_repo, plan_workspace,
+    record_base, record_indexed_commit, scip_output_dir, source_extensions, stale_normalization,
+    workspace_rel,
 };
 pub use lock::{
     Acquire, IndexLock, acquire as acquire_index_lock, acquire_wait as acquire_index_lock_wait,

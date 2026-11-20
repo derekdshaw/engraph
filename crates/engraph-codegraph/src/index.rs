@@ -194,44 +194,83 @@ pub fn record_indexed_commit(
     Ok(())
 }
 
-/// The base a project's base graph was built from (plan 10, part 2, step 4).
+/// The checkout a project's base graph was built from, and the commit it was
+/// built at (plan 10, part 2, step 4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseState {
-    /// The branch ref the base follows, as `refs/heads/<name>`.
-    pub base_ref: String,
-    /// The commit of the last base index run.
+    /// The checkout the base graph belongs to — the base checkout. Only an
+    /// index run there changes the base rows; every other worktree of the repo
+    /// writes an overlay against them.
+    pub base_worktree: String,
+    /// The commit of the last base index run: what each worktree diffs its
+    /// files against to build its overlay.
     pub commit: String,
 }
 
-/// Record that the base graph of `project` was indexed from `commit` of
-/// `base_ref`. One row for each project: a later run replaces it.
-pub fn record_base(conn: &PooledConn, project: &str, base_ref: &str, commit: &str) -> Result<()> {
+/// Record that the base graph of `project` was indexed in `base_worktree` at
+/// `commit`. One row for each project: a later run replaces it, so a full run
+/// in another checkout moves the base there.
+pub fn record_base(
+    conn: &PooledConn,
+    project: &str,
+    base_worktree: &str,
+    commit: &str,
+) -> Result<()> {
     conn.execute(
-        "INSERT INTO project_base (project, base_ref, base_commit, indexed_at)
+        "INSERT INTO project_base (project, base_worktree, base_commit, indexed_at)
          VALUES (?1, ?2, ?3, strftime('%Y-%m-%d %H:%M:%f','now'))
          ON CONFLICT(project) DO UPDATE SET
-             base_ref = excluded.base_ref,
+             base_worktree = excluded.base_worktree,
              base_commit = excluded.base_commit,
              indexed_at = excluded.indexed_at",
-        rusqlite::params![project, base_ref, commit],
+        rusqlite::params![project, base_worktree, commit],
     )?;
     Ok(())
 }
 
-/// The base of `project`, or `None` when it has no base graph yet. The caller
-/// compares `base_ref` with the default branch of the checkout, and `commit`
-/// with where that ref points now: a different ref needs a new base graph, a
-/// different commit needs a base index run.
+/// The base of `project`, or `None` when no run recorded one. The caller asks
+/// two things of it: whether the checkout it is in is the base checkout (only
+/// that one refreshes the base), and which commit the overlays diff against.
 pub fn base_state(conn: &PooledConn, project: &str) -> Result<Option<BaseState>> {
     let mut stmt =
-        conn.prepare("SELECT base_ref, base_commit FROM project_base WHERE project = ?1")?;
+        conn.prepare("SELECT base_worktree, base_commit FROM project_base WHERE project = ?1")?;
     let mut rows = stmt.query_map([project], |r| {
         Ok(BaseState {
-            base_ref: r.get(0)?,
+            base_worktree: r.get(0)?,
             commit: r.get(1)?,
         })
     })?;
     Ok(rows.next().transpose()?)
+}
+
+/// The checkout that owns the base graph of `project` — the one whose index
+/// runs write the base rows, while every other worktree of the repo writes an
+/// overlay against them (plan 10, part 2, step 5).
+///
+/// The recorded base checkout wins, so `engraph index --full` in a worktree
+/// moves ownership there. Without a row it is the repo's main worktree, which
+/// is the project key itself: a repo engraph indexed before this plan thus has
+/// a base already and needs no new index run. `None` when the key is no
+/// checkout — a bare repo (its worktrees are all linked, so one of them must
+/// claim the base with a full run), a directory outside git, or an explicit
+/// `--project` key that names no path.
+pub fn base_checkout(conn: &PooledConn, project: &str) -> Result<Option<String>> {
+    if let Some(state) = base_state(conn, project)? {
+        return Ok(Some(state.base_worktree));
+    }
+    Ok(main_worktree_at(project))
+}
+
+/// `project` when the key is the root of a working tree, else `None`. The key
+/// of a git repo is its main worktree (`cli::canonical_repo_key`), so the two
+/// agree exactly when that main worktree is a checkout: `rev-parse
+/// --show-toplevel` fails in a bare repo and outside git.
+fn main_worktree_at(project: &str) -> Option<String> {
+    let top = engraph_core::utils::current_toplevel(Path::new(project))?;
+    let top = top.canonicalize().unwrap_or(top);
+    let key = Path::new(project);
+    let key = key.canonicalize().unwrap_or_else(|_| key.to_path_buf());
+    (top == key).then(|| project.to_string())
 }
 
 /// The projects with an `index_state` row written under other symbol-id
@@ -1481,18 +1520,17 @@ mod tests {
         // No base graph yet.
         assert_eq!(base_state(&conn, "/repo").unwrap(), None);
 
-        record_base(&conn, "/repo", "refs/heads/main", "aaa").unwrap();
+        record_base(&conn, "/repo", "/repo", "aaa").unwrap();
         assert_eq!(
             base_state(&conn, "/repo").unwrap(),
             Some(BaseState {
-                base_ref: "refs/heads/main".to_string(),
+                base_worktree: "/repo".to_string(),
                 commit: "aaa".to_string(),
             })
         );
 
-        // The ref moved and the base was indexed again: one row, the new
-        // commit.
-        record_base(&conn, "/repo", "refs/heads/main", "bbb").unwrap();
+        // The base checkout was indexed again: one row, the new commit.
+        record_base(&conn, "/repo", "/repo", "bbb").unwrap();
         assert_eq!(
             base_state(&conn, "/repo").unwrap().unwrap().commit,
             "bbb".to_string()
@@ -1502,18 +1540,18 @@ mod tests {
             .unwrap();
         assert_eq!(rows, 1);
 
-        // The default branch was renamed: the ref follows it.
-        record_base(&conn, "/repo", "refs/heads/trunk", "ccc").unwrap();
+        // `engraph index --full` in a worktree moves the base there.
+        record_base(&conn, "/repo", "/worktrees/elm", "ccc").unwrap();
         assert_eq!(
             base_state(&conn, "/repo").unwrap(),
             Some(BaseState {
-                base_ref: "refs/heads/trunk".to_string(),
+                base_worktree: "/worktrees/elm".to_string(),
                 commit: "ccc".to_string(),
             })
         );
 
         // Another project has its own base.
-        record_base(&conn, "/other", "refs/heads/main", "ddd").unwrap();
+        record_base(&conn, "/other", "/other", "ddd").unwrap();
         assert_eq!(
             base_state(&conn, "/other").unwrap().unwrap().commit,
             "ddd".to_string()
@@ -1522,6 +1560,64 @@ mod tests {
             base_state(&conn, "/repo").unwrap().unwrap().commit,
             "ccc".to_string()
         );
+    }
+
+    /// Plan 10, part 2, step 5: which checkout owns the base graph. A repo
+    /// engraph indexed before the plan has no `project_base` row, and it must
+    /// not need a new index run to get a base: its main worktree is the base
+    /// checkout.
+    #[test]
+    fn base_checkout_is_the_recorded_one_else_the_main_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = engraph_core::db::open_pool(&dir.path().join("t.db")).unwrap();
+        let conn = pool.get().unwrap();
+
+        // A repo with a linked worktree. The project key is the main worktree.
+        let main = dir.path().join("engraph");
+        std::fs::create_dir_all(&main).unwrap();
+        git_init(&main);
+        git_in(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let wt = dir.path().join("elm");
+        git_in(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                wt.to_str().unwrap(),
+            ],
+        );
+        let project = main.canonicalize().unwrap().to_string_lossy().into_owned();
+
+        // No row: the main worktree, whichever worktree asks.
+        assert_eq!(
+            base_checkout(&conn, &project).unwrap().as_deref(),
+            Some(project.as_str())
+        );
+
+        // A recorded base checkout wins, so `--full` in a worktree moves it.
+        let elm = wt.canonicalize().unwrap().to_string_lossy().into_owned();
+        record_base(&conn, &project, &elm, "aaa").unwrap();
+        assert_eq!(
+            base_checkout(&conn, &project).unwrap().as_deref(),
+            Some(elm.as_str())
+        );
+
+        // A bare repo has no checkout to fall back to: no base until a full
+        // index run records one.
+        let bare = dir.path().join("bare.git");
+        git_in(
+            &main,
+            &["clone", "-q", "--bare", ".", bare.to_str().unwrap()],
+        );
+        let bare_key = bare.canonicalize().unwrap().to_string_lossy().into_owned();
+        assert_eq!(base_checkout(&conn, &bare_key).unwrap(), None);
+
+        // A project key that is no checkout at all (an explicit --project, or
+        // a directory outside git) has none either.
+        assert_eq!(base_checkout(&conn, "/no/such/project").unwrap(), None);
     }
 
     #[test]
@@ -1833,6 +1929,27 @@ mod tests {
             .output()
             .unwrap();
         assert!(out.status.success(), "git init failed: {out:?}");
+    }
+
+    /// `git -C dir <args>` with an identity, for the tests that commit.
+    fn git_in(dir: &Path, args: &[&str]) {
+        let out = engraph_core::utils::git_cmd(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]

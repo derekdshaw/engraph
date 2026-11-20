@@ -9,10 +9,11 @@ of the plans.
 - An agent in a worktree sees the code graph of that worktree: the base graph
   together with the changes of that worktree. It does not see the changes of
   other worktrees.
-- When the base branch changes (for example, after a pull request merges),
-  engraph updates the base graph and the overlay of each worktree.
-- A worktree that has a feature branch, also the main worktree, does not change
-  the base graph.
+- An index run in a worktree indexes only the files that are different from the
+  base, not the full repo. engraph makes no second copy of the repo on disk.
+- A linked worktree does not change the base graph. It writes only its overlay.
+- When the base graph is indexed again (for example, after the user pulls in
+  the base checkout), engraph computes the overlay of each worktree again.
 
 ## Condition at this time (2026-11-19)
 
@@ -27,7 +28,7 @@ is complete, thus the symbol ids are stable (refer to "Findings").
 - `index_state` has one row for each `(project, subtree)`, with the commit and
   the index mode (`source`, `lang`, `bazel_symbols`, `go_tags`, `go_tests`,
   `normalization`). It has no worktree or branch.
-- The schema is at v18. The overlay tables must have the columns that the base
+- The schema is at v19. The overlay tables must have the columns that the base
   tables got after v11: `entities.qualified_name` (v12), `entities.scheme`
   (v13), and `relations.line` (v14).
 - The automatic refresh (`engraph index --if-changed`) operates only from the
@@ -39,16 +40,28 @@ is complete, thus the symbol ids are stable (refer to "Findings").
   that branch into the shared graph.
 - In a bare-repo layout (`git clone --bare` and `git worktree add`), each
   worktree is a linked worktree. Thus, no automatic refresh occurs.
-- The standard Go driver gives no `--module-version` to scip-go. Thus, each Go
-  symbol id contains the commit hash, and no Go file has the same ids in two
-  commits ([plan 05](05-stable-symbol-ids-plan.md), part 2, step 1).
 
 ## Design
 
 ### Base graph
 
-The base graph is a full index of the base branch at a specified commit. All
-worktrees of the repo use it.
+The base graph is a full index of one checkout of the repo at one commit — the
+graph that `engraph index <repo>` writes at this time. All worktrees of the
+repo use it. The checkout that has it is the **base checkout** (refer to
+decision 1).
+
+engraph makes no checkout of its own. The base is a commit, not a directory:
+each worktree of a repo uses one object store, thus a worktree can compare its
+files with the base commit (`git diff --name-only <base-commit>`) although that
+commit is on another branch and no checkout of it is on disk. `divergence::
+diff_names` does this at this time, from a linked worktree, for the "Changed
+since the index" note.
+
+`record_index_commit` writes a `git stash create` commit when the working tree
+of the base checkout is not clean. That commit has no ref, thus `git gc` can
+remove it, and a base commit that git cannot resolve makes each file count as
+different (`diff_names`) — an overlay of the full repo. The base index run
+therefore puts the commit on the ref `refs/engraph/base/<project tag>`.
 
 ### Overlay
 
@@ -63,9 +76,13 @@ contains only the files whose content is different from the base commit:
   graph.
 
 The difference goes in the two directions. A file that the worktree changed is
-in the overlay. A file that the base branch changed after the worktree started
-is also in the overlay, with the old content of the worktree. Thus, each
-worktree sees its own code.
+in the overlay. A file that the base checkout changed after the worktree
+started is also in the overlay, with the content that the worktree has. Thus,
+each worktree sees its own code.
+
+The base checkout also has an overlay, because its working tree moves on after
+the commit of its last index run. A refresh of the base makes that overlay
+empty again.
 
 ### Lookups
 
@@ -110,23 +127,40 @@ this plan. Add it only if telemetry shows that overlay index runs are too slow
 
 ### Refresh
 
-- The base graph changes when the base branch ref moves.
+- The base graph changes only from an index run in the base checkout: the
+  automatic refresh (`engraph index --if-changed`) there, or
+  `engraph index --full` by hand.
 - After a change to the base graph, compute the overlays again, because the set
   of different files changes.
 - Remove the overlay of a worktree that `git worktree list` does not show.
 
 ## Decisions
 
-1. **The base: the default branch ref.** engraph indexes it from a detached
-   checkout that it manages in its data directory. The base then follows
-   merges when the local ref moves, also when the main worktree has a feature
-   branch. The cost is a second checkout of the repo on disk, and the build
-   artifacts of some indexers (for example, rust-analyzer). The other possible
-   base, the checkout of the main worktree, needs no second checkout, but a
-   feature branch in the main worktree becomes the base. That result is not
-   correct for a user who does the work in the main worktree.
-2. **Fetch.** engraph does not do `git fetch`. The base changes when the local
-   ref moves. The user or other tools fetch.
+1. **The base is a checkout that the user has: the base checkout.** It is the
+   main worktree, and for a repo whose main worktree is not a checkout (a bare
+   repo with worktrees) it is the checkout of the last full index run, which
+   `project_base` records. engraph makes no checkout of its own.
+
+   An earlier version of this plan made the base the default branch ref, from
+   a detached checkout in the engraph data directory. That is removed. A second
+   working tree of a large repo is too much disk, and it is not necessary: the
+   base is a commit, and each worktree can compare its files with a commit of
+   another branch without a checkout of it (refer to "Base graph"). The cost of
+   this decision is the size of the overlays, not their correctness: if the base
+   checkout is on a feature branch, each overlay also contains the files of that
+   branch. The result that each worktree sees is still its own code.
+
+2. **A worktree writes an overlay; only the base checkout writes the base.** An
+   index run in a linked worktree writes the overlay of that worktree.
+   `engraph index --full <repo>` writes the base graph from the checkout it runs
+   in, and that checkout becomes the base checkout. Thus a user with a bare-repo
+   layout, or a user who wants another checkout to be the base, has one command
+   for it, and no index run in a worktree can replace the graph that the other
+   worktrees read by accident.
+
+3. **The base commit gets a ref.** `refs/engraph/base/<project tag>` keeps the
+   commit of the last base index run, thus `git gc` cannot remove a `git stash
+   create` commit that the overlays compare with.
 
 ## Findings
 
@@ -208,19 +242,37 @@ a worktree would not join the base rows. Step 4 corrects it.
    it the rule R1 note. `engraph index` then recommends a new index run of the
    projects whose rows have version 1 (`index::stale_normalization`).
 
-### Part 2: base graph from the base branch
+### Part 2: the base checkout
 
-4. ~~Record the base of each project: the branch ref and the commit of the last
-   base index run.~~ Complete: the table `project_base` (schema v19), the
-   functions `index::record_base` and `index::base_state`, and
-   `utils::default_branch_ref`, which gives the local ref of the default
-   branch (`refs/remotes/origin/HEAD`, else `init.defaultBranch`, else `main`
-   or `master`). Step 5 makes the first caller.
-5. If the base is the default branch ref, make a detached checkout of the ref
-   in the engraph data directory. Index the base from this checkout.
-6. In the SessionStart hook, find out if the base ref moved after the last base
-   index run. If it moved, start a base index run in the background.
-7. Replace the main-worktree gate of the automatic refresh with steps 5 and 6.
+The base graph is the graph that `engraph index` writes at this time, thus this
+part adds no index run. It records which checkout the base belongs to, and it
+keeps the base commit safe.
+
+4. ~~Record the base of each project in `project_base`: the base checkout and
+   the commit of the last base index run.~~ Complete: the table `project_base`
+   (schema v19) with the columns `base_worktree` and `base_commit`, and the
+   functions `index::record_base` and `index::base_state`.
+   `utils::default_branch_ref`, which the earlier decision 1 needed, is
+   removed.
+5. ~~Give the base checkout a fallback: a project with no row has the main
+   worktree as its base checkout, thus a repo that engraph indexed before this
+   plan needs no new index run to get a base. A bare repo has no main worktree;
+   such a project has no base until a full index run records one.~~ Complete:
+   `index::base_checkout` gives the recorded checkout, else the project key
+   when that key is the root of a working tree, else nothing. The fallback is
+   a question of ownership only, thus it is a function beside `base_state` and
+   not a part of it: a project with no row has no base commit to give, but its
+   `index_state` rows have the commit of each subtree, which is what the
+   overlays of part 3 compare with.
+6. Write the base commit to `refs/engraph/base/<project tag>` in each base
+   index run, so `git gc` keeps it (refer to decision 3). Remove the ref with
+   the rows of a project.
+7. Add `engraph index --full`: a full index run that writes the base graph from
+   the checkout it runs in and makes that checkout the base checkout. Without
+   it, an index run in a linked worktree writes an overlay (part 3), and the
+   automatic refresh in the base checkout refreshes the base as before. This
+   step replaces the main-worktree gate of the automatic refresh
+   (`divergence::in_linked_worktree` in `main` and in `hooks`).
 
 ### Part 3: overlays
 
@@ -250,14 +302,18 @@ a worktree would not join the base rows. Step 4 corrects it.
   of worktree B or of the base.
 - A symbol that worktree A removes is not in the view of A, and the callers of
   that symbol in the base show no relation to it in the view of A.
-- A function that the base branch changes after worktree A started shows the
-  old version in the view of A.
-- After a commit on the base branch, the base index run starts, and the overlay
-  of each worktree is computed again.
+- A function that the base checkout changes after worktree A started shows the
+  version of A in the view of A.
+- After a refresh of the base graph, the overlay of each worktree is computed
+  again.
 - A worktree with no changes has an empty overlay, and its view is the base.
 - The overlay of a removed worktree is deleted.
-- With the base as the default branch ref, a feature branch in the main
-  worktree does not change the base graph.
+- An index run in a linked worktree writes an overlay. It does not change the
+  base rows that the other worktrees read.
+- `engraph index --full` in a linked worktree writes the base graph and makes
+  that checkout the base checkout.
+- An overlay of a worktree is computed against a base commit that no branch
+  contains (a `git stash create` commit), also after `git gc --prune=now`.
 
 ## Risks
 
@@ -265,8 +321,15 @@ a worktree would not join the base rows. Step 4 corrects it.
   Rust, this is a full analysis of each changed crate. For Java and Bazel
   repos, it can take minutes. During that time, the overlay is old or missing,
   and the agent uses grep for the changed files.
-- A detached checkout of the base doubles the disk use of the repo, and some
-  indexers add build artifacts.
+- If the base checkout is on a branch that is far from the branches of the
+  worktrees, each overlay contains the files of both branches, and the saving
+  is small. The user controls this: keep the base checkout on the branch that
+  the work starts from, or make another checkout the base with
+  `engraph index --full`.
+- A base commit that git cannot resolve makes each file count as different, thus
+  an overlay of the full repo. The ref of decision 3 stops the usual cause
+  (`git gc` of a `git stash create` commit); a user who removes the ref, or
+  re-makes the repo, gets one full overlay index run.
 - If symbol ids change between commits, the overlay must contain all files of
   the affected language. Then it gives no saving. The test of part 1, step 2
   shows that no installed indexer does this (refer to "Findings").
